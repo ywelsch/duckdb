@@ -166,32 +166,43 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 
 bool DuckTransactionManager::CanCheckpoint(optional_ptr<DuckTransaction> current) {
 	if (db.IsSystem()) {
+//		printf("Cannot checkpoint because of system DB\n");
 		return false;
 	}
 	auto &storage_manager = db.GetStorageManager();
 	if (storage_manager.InMemory()) {
+//		printf("Cannot checkpoint because of in-memory DB\n");
 		return false;
 	}
-	if (!recently_committed_transactions.empty() || !old_transactions.empty()) {
+	if (!recently_committed_transactions.empty()) {
+		printf("Cannot checkpoint because of recently committed transactions\n");
+		return false;
+	}
+	if (!old_transactions.empty()) {
+		printf("Cannot checkpoint because of old transactions\n");
 		return false;
 	}
 	for (auto &transaction : active_transactions) {
 		if (transaction.get() != current.get()) {
+			printf("Cannot checkpoint because of active transaction\n");
 			return false;
 		}
 	}
+	printf("Can checkpoint\n");
 	return true;
 }
 
 string DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction *transaction_p) {
 	auto &transaction = transaction_p->Cast<DuckTransaction>();
 	vector<ClientLockWrapper> client_locks;
+	auto start_time = std::chrono::system_clock::now();
 	auto lock = make_uniq<lock_guard<mutex>>(transaction_lock);
 	CheckpointLock checkpoint_lock(*this);
 	// check if we can checkpoint
 	bool checkpoint = thread_is_checkpointing ? false : CanCheckpoint(&transaction);
 	if (checkpoint) {
 		if (transaction.AutomaticCheckpoint(db)) {
+			printf("Automatic checkpoint enabled\n");
 			checkpoint_lock.Lock();
 			// we might be able to checkpoint: lock all clients
 			// to avoid deadlock we release the transaction lock while locking the clients
@@ -231,10 +242,17 @@ string DuckTransactionManager::CommitTransaction(ClientContext &context, Transac
 	// now perform a checkpoint if (1) we are able to checkpoint, and (2) the WAL has reached sufficient size to
 	// checkpoint
 	if (checkpoint) {
+		auto checkpoint_start_time = std::chrono::system_clock::now();
 		// checkpoint the database to disk
 		auto &storage_manager = db.GetStorageManager();
 		storage_manager.CreateCheckpoint(false, true);
+		auto checkpoint_time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - checkpoint_start_time);
+		printf("CHECKPOINT completed in %i ms\n", checkpoint_time_elapsed);
 	}
+
+	auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time);
+	printf("COMMIT completed in %i ms\n", time_elapsed);
+
 	return error;
 }
 

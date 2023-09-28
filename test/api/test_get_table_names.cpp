@@ -230,3 +230,26 @@ TEST_CASE("Test GetTableNames", "[api]") {
 		REQUIRE_NO_FAIL(con.Query("CALL dbgen(sf=0)"));
 	}
 }
+
+TEST_CASE("checkpointing", "[test]") {
+	DBConfig config;
+	DuckDB db("bar.db", &config);
+	REQUIRE(db.ExtensionIsLoaded("tpch"));
+	Connection con1(db);
+
+	auto t1 = std::thread([&db]{
+		std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+		Connection con2(db);
+		printf("START SELECT * FROM duckdb_tables()\n");
+		REQUIRE_NO_FAIL(con2.Query("SELECT * FROM duckdb_tables()"));
+		printf("COMPLETE SELECT * FROM duckdb_tables()\n");
+	});
+
+	printf("START DBGEN\n");
+	auto start_time = std::chrono::system_clock::now();
+	REQUIRE_NO_FAIL(con1.Query("CALL dbgen(sf=10)"));
+	auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time);
+	printf("COMPLETE DBGEN in %i ms\n", time_elapsed);
+
+	t1.join();
+}
