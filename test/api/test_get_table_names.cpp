@@ -253,3 +253,34 @@ TEST_CASE("checkpointing", "[test]") {
 
 	t1.join();
 }
+
+TEST_CASE("long block", "[test]") {
+	DBConfig config;
+	DuckDB db("bar.db", &config);
+	REQUIRE(db.ExtensionIsLoaded("tpch"));
+	Connection con1(db);
+
+	std::atomic<bool> stopped {false};
+
+	auto t1 = std::thread([&db, &stopped]{
+		while (!stopped) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+			Connection con2(db);
+			printf("START SELECT * FROM duckdb_tables()\n");
+			auto start_time = std::chrono::system_clock::now();
+			REQUIRE_NO_FAIL(con2.Query("SELECT * FROM duckdb_tables()"));
+			auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time);
+			printf("COMPLETE SELECT * FROM duckdb_tables() in %i ms\n", time_elapsed);
+		}
+	});
+
+	printf("START DBGEN\n");
+	auto start_time = std::chrono::system_clock::now();
+	REQUIRE_NO_FAIL(con1.Query("CALL dbgen(sf=10)"));
+	auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start_time);
+	printf("COMPLETE DBGEN in %i ms\n", time_elapsed);
+
+	stopped = true;
+
+	t1.join();
+}
