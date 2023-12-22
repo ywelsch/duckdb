@@ -8,6 +8,9 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 
+#include <chrono>
+#include <thread>
+
 namespace duckdb {
 
 BoundStatement Binder::Bind(ExecuteStatement &stmt) {
@@ -53,6 +56,9 @@ BoundStatement Binder::Bind(ExecuteStatement &stmt) {
 		D_ASSERT(prepared->properties.bound_all_parameters);
 		this->bound_tables = prepared_planner.binder->bound_tables;
 	}
+	printf("Sleeping query 1\n");
+	std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+	printf("Resuming query 1\n");
 	// copy the properties of the prepared statement into the planner
 	this->properties = prepared->properties;
 	this->properties.parameter_count = parameter_count;
