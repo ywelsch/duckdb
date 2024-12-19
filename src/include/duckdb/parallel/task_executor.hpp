@@ -47,6 +47,8 @@ private:
 	unique_ptr<ProducerToken> token;
 	atomic<idx_t> completed_tasks;
 	atomic<idx_t> total_tasks;
+	friend class BaseExecutorTask;
+	optional_ptr<ClientContext> context;
 };
 
 class BaseExecutorTask : public Task {

@@ -1,18 +1,19 @@
 #include "duckdb/parallel/task.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/current_client_context.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 
 namespace duckdb {
 
 ExecutorTask::ExecutorTask(Executor &executor_p, shared_ptr<Event> event_p)
-    : executor(executor_p), event(std::move(event_p)) {
+    : executor(executor_p), event(std::move(event_p)), context(executor_p.context) {
 	executor.RegisterTask();
 }
 
-ExecutorTask::ExecutorTask(ClientContext &context, shared_ptr<Event> event_p, const PhysicalOperator &op_p)
-    : executor(Executor::Get(context)), event(std::move(event_p)), op(&op_p) {
-	thread_context = make_uniq<ThreadContext>(context);
+ExecutorTask::ExecutorTask(ClientContext &context_p, shared_ptr<Event> event_p, const PhysicalOperator &op_p)
+    : executor(Executor::Get(context_p)), event(std::move(event_p)), op(&op_p), context(context_p) {
+	thread_context = make_uniq<ThreadContext>(context_p);
 	executor.RegisterTask();
 }
 
@@ -34,6 +35,10 @@ void ExecutorTask::Reschedule() {
 }
 
 TaskExecutionResult ExecutorTask::Execute(TaskExecutionMode mode) {
+	CurrentClientContext::ScopeGuard context_guard(context);
+	for (auto &state : context.registered_state->States()) {
+		state->TaskBegin(context, *this);
+	}
 	try {
 		if (thread_context) {
 			TaskExecutionResult result;

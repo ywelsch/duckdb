@@ -127,7 +127,7 @@ static catalog_entry_vector_t GetCatalogEntries(vector<reference<SchemaCatalogEn
 	return entries;
 }
 
-void SingleFileCheckpointWriter::CreateCheckpoint() {
+void SingleFileCheckpointWriter::CreateCheckpoint(optional_ptr<ClientContext> context) {
 	auto &config = DBConfig::Get(db);
 	auto &storage_manager = db.GetStorageManager().Cast<SingleFileStorageManager>();
 	if (storage_manager.InMemory()) {

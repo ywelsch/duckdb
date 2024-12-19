@@ -8,6 +8,7 @@
 #include "duckdb/common/windows.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/current_client_context.hpp"
 #include "duckdb/main/database.hpp"
 
 #include <cstdint>
@@ -462,6 +463,7 @@ idx_t LocalFileSystem::GetFilePointer(FileHandle &handle) {
 }
 
 void LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+	D_ASSERT(CurrentClientContext::CurrentContext() || CurrentClientContext::CurrentDatabase());
 	int fd = handle.Cast<UnixFileHandle>().fd;
 	auto read_buffer = char_ptr_cast(buffer);
 	while (nr_bytes > 0) {
@@ -483,6 +485,7 @@ void LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, i
 }
 
 int64_t LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
+	D_ASSERT(CurrentClientContext::CurrentContext() || CurrentClientContext::CurrentDatabase());
 	int fd = handle.Cast<UnixFileHandle>().fd;
 	int64_t bytes_read = read(fd, buffer, UnsafeNumericCast<size_t>(nr_bytes));
 	if (bytes_read == -1) {
@@ -493,6 +496,7 @@ int64_t LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes
 }
 
 void LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+	D_ASSERT(CurrentClientContext::CurrentContext() || CurrentClientContext::CurrentDatabase());
 	int fd = handle.Cast<UnixFileHandle>().fd;
 	auto write_buffer = char_ptr_cast(buffer);
 	while (nr_bytes > 0) {
@@ -513,6 +517,7 @@ void LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 }
 
 int64_t LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
+	D_ASSERT(CurrentClientContext::CurrentContext() || CurrentClientContext::CurrentDatabase());
 	int fd = handle.Cast<UnixFileHandle>().fd;
 	int64_t bytes_written = 0;
 	while (nr_bytes > 0) {

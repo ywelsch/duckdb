@@ -27,6 +27,7 @@ add_library_unity(
   chunk_scan_state.cpp
   config.cpp
   connection.cpp
+  current_client_context.cpp
   database.cpp
   database_path_and_type.cpp
   database_manager.cpp

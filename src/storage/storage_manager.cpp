@@ -355,7 +355,7 @@ bool SingleFileStorageManager::IsCheckpointClean(MetaBlockPointer checkpoint_id)
 	return block_manager->IsRootBlock(checkpoint_id);
 }
 
-void SingleFileStorageManager::CreateCheckpoint(CheckpointOptions options) {
+void SingleFileStorageManager::CreateCheckpoint(optional_ptr<ClientContext> context, CheckpointOptions options) {
 	if (InMemory() || read_only || !load_complete) {
 		return;
 	}
@@ -367,7 +367,7 @@ void SingleFileStorageManager::CreateCheckpoint(CheckpointOptions options) {
 		// we only need to checkpoint if there is anything in the WAL
 		try {
 			SingleFileCheckpointWriter checkpointer(db, *block_manager, options.type);
-			checkpointer.CreateCheckpoint();
+			checkpointer.CreateCheckpoint(context);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			throw FatalException("Failed to create checkpoint because of error: %s", error.RawMessage());

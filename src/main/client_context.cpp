@@ -16,6 +16,7 @@
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/client_data.hpp"
+#include "duckdb/main/current_client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/error_manager.hpp"
@@ -628,6 +629,7 @@ void ClientContext::InitialCleanup(ClientContextLock &lock) {
 }
 
 vector<unique_ptr<SQLStatement>> ClientContext::ParseStatements(const string &query) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	return ParseStatementsInternal(*lock, query);
 }
@@ -643,6 +645,7 @@ vector<unique_ptr<SQLStatement>> ClientContext::ParseStatementsInternal(ClientCo
 }
 
 void ClientContext::HandlePragmaStatements(vector<unique_ptr<SQLStatement>> &statements) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 
 	PragmaHandler handler(*this);
@@ -650,6 +653,7 @@ void ClientContext::HandlePragmaStatements(vector<unique_ptr<SQLStatement>> &sta
 }
 
 unique_ptr<LogicalOperator> ClientContext::ExtractPlan(const string &query) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 
 	auto statements = ParseStatementsInternal(*lock, query);
@@ -693,6 +697,7 @@ unique_ptr<PreparedStatement> ClientContext::PrepareInternal(ClientContextLock &
 }
 
 unique_ptr<PreparedStatement> ClientContext::Prepare(unique_ptr<SQLStatement> statement) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	// prepare the query
 	auto query = statement->query;
@@ -705,6 +710,7 @@ unique_ptr<PreparedStatement> ClientContext::Prepare(unique_ptr<SQLStatement> st
 }
 
 unique_ptr<PreparedStatement> ClientContext::Prepare(const string &query) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	// prepare the query
 	try {
@@ -738,12 +744,14 @@ unique_ptr<PendingQueryResult> ClientContext::PendingQueryPreparedInternal(Clien
 unique_ptr<PendingQueryResult> ClientContext::PendingQuery(const string &query,
                                                            shared_ptr<PreparedStatementData> &prepared,
                                                            const PendingQueryParameters &parameters) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	return PendingQueryPreparedInternal(*lock, query, prepared, parameters);
 }
 
 unique_ptr<QueryResult> ClientContext::Execute(const string &query, shared_ptr<PreparedStatementData> &prepared,
                                                const PendingQueryParameters &parameters) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	auto pending = PendingQueryPreparedInternal(*lock, query, prepared, parameters);
 	if (pending->HasError()) {
@@ -755,6 +763,7 @@ unique_ptr<QueryResult> ClientContext::Execute(const string &query, shared_ptr<P
 unique_ptr<QueryResult> ClientContext::Execute(const string &query, shared_ptr<PreparedStatementData> &prepared,
                                                case_insensitive_map_t<BoundParameterData> &values,
                                                bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	PendingQueryParameters parameters;
 	parameters.parameters = &values;
 	parameters.allow_stream_result = allow_stream_result;
@@ -938,6 +947,7 @@ void ClientContext::LogQueryInternal(ClientContextLock &, const string &query) {
 }
 
 unique_ptr<QueryResult> ClientContext::Query(unique_ptr<SQLStatement> statement, bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto pending_query = PendingQuery(std::move(statement), allow_stream_result);
 	if (pending_query->HasError()) {
 		return ErrorResult<MaterializedQueryResult>(pending_query->GetErrorObject());
@@ -946,6 +956,7 @@ unique_ptr<QueryResult> ClientContext::Query(unique_ptr<SQLStatement> statement,
 }
 
 unique_ptr<QueryResult> ClientContext::Query(const string &query, bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 
 	ErrorData error;
@@ -1018,12 +1029,14 @@ bool ClientContext::ParseStatements(ClientContextLock &lock, const string &query
 }
 
 unique_ptr<PendingQueryResult> ClientContext::PendingQuery(const string &query, bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	case_insensitive_map_t<BoundParameterData> empty_param_list;
 	return PendingQuery(query, empty_param_list, allow_stream_result);
 }
 
 unique_ptr<PendingQueryResult> ClientContext::PendingQuery(unique_ptr<SQLStatement> statement,
                                                            bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	case_insensitive_map_t<BoundParameterData> empty_param_list;
 	return PendingQuery(std::move(statement), empty_param_list, allow_stream_result);
 }
@@ -1031,6 +1044,7 @@ unique_ptr<PendingQueryResult> ClientContext::PendingQuery(unique_ptr<SQLStateme
 unique_ptr<PendingQueryResult> ClientContext::PendingQuery(const string &query,
                                                            case_insensitive_map_t<BoundParameterData> &values,
                                                            bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	try {
 		InitialCleanup(*lock);
@@ -1058,6 +1072,7 @@ unique_ptr<PendingQueryResult> ClientContext::PendingQuery(const string &query,
 unique_ptr<PendingQueryResult> ClientContext::PendingQuery(unique_ptr<SQLStatement> statement,
                                                            case_insensitive_map_t<BoundParameterData> &values,
                                                            bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	auto query = statement->query;
 	try {
@@ -1113,6 +1128,7 @@ void ClientContext::DisableProfiling() {
 }
 
 void ClientContext::RegisterFunction(CreateFunctionInfo &info) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	RunFunctionInTransaction([&]() {
 		auto existing_function = Catalog::GetEntry<ScalarFunctionCatalogEntry>(*this, INVALID_CATALOG, info.schema,
 		                                                                       info.name, OnEntryNotFound::RETURN_NULL);
@@ -1131,6 +1147,7 @@ void ClientContext::RegisterFunction(CreateFunctionInfo &info) {
 
 void ClientContext::RunFunctionInTransactionInternal(ClientContextLock &lock, const std::function<void(void)> &fun,
                                                      bool requires_valid_transaction) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	if (requires_valid_transaction && transaction.HasActiveTransaction() &&
 	    ValidChecker::IsInvalidated(ActiveTransaction())) {
 		throw TransactionException(ErrorManager::FormatException(*this, ErrorType::INVALIDATED_TRANSACTION));
@@ -1166,12 +1183,14 @@ void ClientContext::RunFunctionInTransactionInternal(ClientContextLock &lock, co
 }
 
 void ClientContext::RunFunctionInTransaction(const std::function<void(void)> &fun, bool requires_valid_transaction) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	RunFunctionInTransactionInternal(*lock, fun, requires_valid_transaction);
 }
 
 unique_ptr<TableDescription> ClientContext::TableInfo(const string &database_name, const string &schema_name,
                                                       const string &table_name) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	unique_ptr<TableDescription> result;
 	RunFunctionInTransaction([&]() {
 		// Obtain the table from the catalog.
@@ -1192,12 +1211,13 @@ unique_ptr<TableDescription> ClientContext::TableInfo(const string &database_nam
 }
 
 unique_ptr<TableDescription> ClientContext::TableInfo(const string &schema_name, const string &table_name) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	return TableInfo(INVALID_CATALOG, schema_name, table_name);
 }
 
 void ClientContext::Append(TableDescription &description, ColumnDataCollection &collection,
                            optional_ptr<const vector<LogicalIndex>> column_ids) {
-
+	CurrentClientContext::ScopeGuard context_guard(this);
 	RunFunctionInTransaction([&]() {
 		auto &table_entry =
 		    Catalog::GetEntry<TableCatalogEntry>(*this, description.database, description.schema, description.table);
@@ -1224,6 +1244,7 @@ void ClientContext::Append(TableDescription &description, ColumnDataCollection &
 }
 
 void ClientContext::InternalTryBindRelation(Relation &relation, vector<ColumnDefinition> &result_columns) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	// bind the expressions
 	auto binder = Binder::CreateBinder(*this);
 	auto result = relation.Bind(*binder);
@@ -1236,6 +1257,7 @@ void ClientContext::InternalTryBindRelation(Relation &relation, vector<ColumnDef
 }
 
 void ClientContext::TryBindRelation(Relation &relation, vector<ColumnDefinition> &result_columns) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 #ifdef DEBUG
 	D_ASSERT(!relation.GetAlias().empty());
 	D_ASSERT(!relation.ToString().empty());
@@ -1288,11 +1310,13 @@ unique_ptr<PendingQueryResult> ClientContext::PendingQueryInternal(ClientContext
 
 unique_ptr<PendingQueryResult> ClientContext::PendingQuery(const shared_ptr<Relation> &relation,
                                                            bool allow_stream_result) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	return PendingQueryInternal(*lock, relation, allow_stream_result);
 }
 
 unique_ptr<QueryResult> ClientContext::Execute(const shared_ptr<Relation> &relation) {
+	CurrentClientContext::ScopeGuard context_guard(this);
 	auto lock = LockContext();
 	auto &expected_columns = relation->Columns();
 	auto pending = PendingQueryInternal(*lock, relation, false);

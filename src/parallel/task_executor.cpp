@@ -1,13 +1,17 @@
 #include "duckdb/parallel/task_executor.hpp"
+
+#include "duckdb/main/current_client_context.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
 namespace duckdb {
 
 TaskExecutor::TaskExecutor(TaskScheduler &scheduler)
-    : scheduler(scheduler), token(scheduler.CreateProducer()), completed_tasks(0), total_tasks(0) {
+    : scheduler(scheduler), token(scheduler.CreateProducer()), completed_tasks(0), total_tasks(0),
+      context(CurrentClientContext::CurrentContext()) {
 }
 
-TaskExecutor::TaskExecutor(ClientContext &context) : TaskExecutor(TaskScheduler::GetScheduler(context)) {
+TaskExecutor::TaskExecutor(ClientContext &context_p) : TaskExecutor(TaskScheduler::GetScheduler(context_p)) {
+	context = context_p;
 }
 
 TaskExecutor::~TaskExecutor() {
@@ -61,6 +65,14 @@ BaseExecutorTask::BaseExecutorTask(TaskExecutor &executor) : executor(executor) 
 }
 
 TaskExecutionResult BaseExecutorTask::Execute(TaskExecutionMode mode) {
+	CurrentClientContext::ScopeGuard context_guard(executor.context.get());
+	if (executor.context) {
+		auto &context = *executor.context;
+		for (auto &state : context.registered_state->States()) {
+			state->TaskBegin(context, *this);
+		}
+	}
+
 	(void)mode;
 	D_ASSERT(mode == TaskExecutionMode::PROCESS_ALL);
 	if (executor.HasError()) {

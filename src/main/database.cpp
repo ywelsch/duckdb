@@ -9,6 +9,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection_manager.hpp"
+#include "duckdb/main/current_client_context.hpp"
 #include "duckdb/main/database_file_opener.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/database_path_and_type.hpp"
@@ -67,6 +68,7 @@ DatabaseInstance::DatabaseInstance() {
 }
 
 DatabaseInstance::~DatabaseInstance() {
+	CurrentClientContext::ScopeGuard context_guard {this};
 	// destroy all attached databases
 	if (db_manager) {
 		db_manager->ResetDatabases(scheduler);
@@ -274,6 +276,7 @@ static duckdb_ext_api_v1 CreateAPIv1Wrapper() {
 }
 
 void DatabaseInstance::Initialize(const char *database_path, DBConfig *user_config) {
+	CurrentClientContext::ScopeGuard context_guard {this};
 	DBConfig default_config;
 	DBConfig *config_ptr = &default_config;
 	if (user_config) {
@@ -329,6 +332,7 @@ void DatabaseInstance::Initialize(const char *database_path, DBConfig *user_conf
 }
 
 DuckDB::DuckDB(const char *path, DBConfig *new_config) : instance(make_shared_ptr<DatabaseInstance>()) {
+	CurrentClientContext::ScopeGuard context_guard {*instance};
 	instance->Initialize(path, new_config);
 	if (instance->config.options.load_extensions) {
 		ExtensionHelper::LoadAllExtensions(*this);

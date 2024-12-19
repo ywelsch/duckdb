@@ -80,6 +80,9 @@ public:
 	}
 	virtual void WriteProfilingInformation(std::ostream &ss) {
 	}
+	virtual void TaskBegin(ClientContext &context, const Task &task) {
+
+	}
 
 public:
 	template <class TARGET>
