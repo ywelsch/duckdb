@@ -493,6 +493,7 @@ int64_t LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes
 }
 
 void LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+	printf("Writing to file \"%s\": %lld\n", handle.path.c_str(), nr_bytes);
 	int fd = handle.Cast<UnixFileHandle>().fd;
 	auto write_buffer = char_ptr_cast(buffer);
 	while (nr_bytes > 0) {
@@ -513,6 +514,7 @@ void LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 }
 
 int64_t LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
+	printf("Writing to file \"%s\": %lld\n", handle.path.c_str(), nr_bytes);
 	int fd = handle.Cast<UnixFileHandle>().fd;
 	int64_t bytes_written = 0;
 	while (nr_bytes > 0) {
