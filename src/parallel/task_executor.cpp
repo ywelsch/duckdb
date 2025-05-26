@@ -74,7 +74,7 @@ TaskExecutionResult BaseExecutorTask::Execute(TaskExecutionMode mode) {
 	}
 	try {
 		{
-			TaskNotifier task_notifier {executor.context};
+			TaskNotifier task_notifier {executor.context, TaskType()};
 			ExecuteTask();
 		}
 		executor.FinishTask();
