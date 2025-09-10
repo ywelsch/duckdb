@@ -7,6 +7,9 @@
 #include "duckdb/parser/query_node/select_node.hpp"
 
 #include <chrono>
+#include <fstream>
+#include <iostream>
+#include <memory>
 #include <thread>
 
 using namespace duckdb;
@@ -754,4 +757,463 @@ TEST_CASE("Test SqlStatement::ToString for UPDATE, INSERT, DELETE statements wit
 	sql = "DELETE FROM test WHERE (id = 1) RETURNING id AS deleted";
 	stmts = con.ExtractStatements(sql);
 	REQUIRE(stmts[0]->ToString() == sql);
+}
+
+class DuckDBAppCpp {
+private:
+    std::unique_ptr<duckdb::DuckDB> database;
+
+    // Thread configuration flags
+    bool enable_loading_thread{true};
+    bool enable_mutating_thread{true};
+    bool enable_mutating2_thread{false};
+    bool enable_checkpointing_thread{true};
+
+    std::atomic<bool> loading_exit{false};
+    std::atomic<bool> mutating_exit{false};
+    std::atomic<bool> mutating2_exit{false};
+    std::atomic<bool> checkpointing_exit{false};
+    std::atomic<bool> fatal_error{false};
+
+    std::mt19937 rng;
+
+public:
+    DuckDBAppCpp() : rng(std::random_device{}()) {
+        // Open the database
+        database = make_uniq<duckdb::DuckDB>("test.db");
+
+        // Output DuckDB version
+        duckdb::Connection temp_conn(*database);
+        auto version_result = temp_conn.Query("SELECT version()");
+        if (version_result->HasError()) {
+            std::cerr << "Failed to get DuckDB version: " << version_result->GetError() << std::endl;
+        } else if (version_result->RowCount() > 0) {
+            std::string version = version_result->GetValue(0, 0).GetValue<std::string>();
+            std::cout << "DuckDB Version: " << version << std::endl;
+        } else {
+            std::cout << "DuckDB Version: No rows returned" << std::endl;
+        }
+
+        createTable();
+    }
+
+    // Constructor with thread configuration
+    DuckDBAppCpp(bool enable_loading, bool enable_mutating, bool enable_mutating2, bool enable_checkpointing)
+        : rng(std::random_device{}()),
+          enable_loading_thread(enable_loading),
+          enable_mutating_thread(enable_mutating),
+          enable_mutating2_thread(enable_mutating2),
+          enable_checkpointing_thread(enable_checkpointing) {
+        // Open the database
+        database = make_uniq<duckdb::DuckDB>("test.db");
+
+        // Output DuckDB version
+        duckdb::Connection temp_conn(*database);
+    	//temp_conn.Query("SET experimental_metadata_reuse=true");
+        auto version_result = temp_conn.Query("SELECT version()");
+        if (version_result->HasError()) {
+            std::cerr << "Failed to get DuckDB version: " << version_result->GetError() << std::endl;
+        } else if (version_result->RowCount() > 0) {
+            std::string version = version_result->GetValue(0, 0).GetValue<std::string>();
+            std::cout << "DuckDB Version: " << version << std::endl;
+        } else {
+            std::cout << "DuckDB Version: No rows returned" << std::endl;
+        }
+
+        createTable();
+    }
+
+    ~DuckDBAppCpp() = default; // RAII handles cleanup automatically
+
+    // Helper function to check for fatal errors
+    bool checkFatalError(const std::string& error_msg) {
+        if (error_msg.find("FATAL Error") != std::string::npos ||
+            error_msg.find("database has been invalidated") != std::string::npos) {
+            std::cerr << "FATAL ERROR DETECTED: " << error_msg << std::endl;
+            std::cerr << "Setting fatal_error flag and exiting threads..." << std::endl;
+            fatal_error = true;
+            return true;
+        }
+        return false;
+    }
+
+    void createTable() {
+        const char* create_sql = R"(
+            CREATE or REPLACE TABLE t1 (
+                md_session_id VARCHAR,
+                user_email VARCHAR,
+                event_name VARCHAR,
+                event_ts TIMESTAMP,
+                event_version INTEGER,
+                extra VARCHAR,
+                file_name VARCHAR,
+                line_number INTEGER,
+                insert_ts TIMESTAMP,
+                batch_file_id UUID,
+                duckling_version VARCHAR,
+                pod_name VARCHAR,
+                connection_id UUID,
+                query_id UBIGINT,
+                duckdb_id UUID,
+                user_id UUID,
+                query_type VARCHAR,
+                query_properties STRUCT(
+                    tools STRUCT(
+                        is_dbt BOOLEAN,
+                        is_airbyte BOOLEAN
+                    ),
+                    external_storage STRUCT(
+                        s3 BOOLEAN,
+                        gcp BOOLEAN,
+                        azure BOOLEAN
+                    )
+                ),
+                md_sql_metadata JSON,
+                is_hatchling BOOLEAN,
+                is_hatchling_automated_query BOOLEAN,
+                transaction_id UBIGINT,
+                organization_id UUID,
+                host VARCHAR,
+                trace_id VARCHAR,
+                message_id VARCHAR
+            );
+        )";
+
+        const char* create_t2_sql = R"(
+            CREATE or REPLACE TABLE t2 (
+                md_session_id VARCHAR,
+                user_email VARCHAR,
+                event_name VARCHAR,
+                event_ts TIMESTAMP,
+                event_version INTEGER,
+                extra VARCHAR,
+                file_name VARCHAR,
+                line_number INTEGER,
+                insert_ts TIMESTAMP,
+                batch_file_id UUID,
+                duckling_version VARCHAR,
+                pod_name VARCHAR,
+                connection_id UUID,
+                query_id UBIGINT,
+                duckdb_id UUID,
+                user_id UUID,
+                query_type VARCHAR,
+                query_properties STRUCT(
+                    tools STRUCT(
+                        is_dbt BOOLEAN,
+                        is_airbyte BOOLEAN
+                    ),
+                    external_storage STRUCT(
+                        s3 BOOLEAN,
+                        gcp BOOLEAN,
+                        azure BOOLEAN
+                    )
+                ),
+                md_sql_metadata JSON,
+                is_hatchling BOOLEAN,
+                is_hatchling_automated_query BOOLEAN,
+                transaction_id UBIGINT,
+                organization_id UUID,
+                host VARCHAR,
+                trace_id VARCHAR,
+                message_id VARCHAR
+            );
+        )";
+
+        // Create a temporary connection for table creation
+        duckdb::Connection temp_conn(*database);
+
+        try {
+            auto result1 = temp_conn.Query(create_sql);
+            if (result1->HasError()) {
+                throw std::runtime_error("Failed to create table t1: " + result1->GetError());
+            }
+
+            auto result2 = temp_conn.Query(create_t2_sql);
+            if (result2->HasError()) {
+                throw std::runtime_error("Failed to create table t2: " + result2->GetError());
+            }
+
+            std::cout << "Tables t1 and t2 created successfully" << std::endl;
+        } catch (const std::exception& e) {
+            throw std::runtime_error("Failed to create tables: " + std::string(e.what()));
+        }
+    }
+
+    void loadingThread() {
+        std::string sql = R"""(
+			INSERT INTO t1 BY NAME
+			-- INSERT INTO mdw_stg_v10.raw.datadog_combined_logs_landing BY NAME
+            SELECT md_session_id::varchar as md_session_id, event_name::varchar as event_name, make_timestamp(event_ts) as event_ts, extra::varchar as extra, query_id::UBIGINT as query_id, duckling_version::varchar as duckling_version, pod_name::varchar as pod_name, connection_id::UUID as connection_id, duckdb_id::UUID as duckdb_id, line_number::int as line_number, file_name::varchar as file_name, batch_file_id::uuid as batch_file_id, transaction_id::ubigint as transaction_id, host::varchar as host, trace_id::varchar as trace_id, message_id::varchar as message_id, user_id::uuid as user_id,
+            now() as insert_ts
+            FROM read_parquet('/Users/ywelsch/Downloads/flat_vec_repro/parquet/*')
+		)""";
+
+        while (!loading_exit.load() && !fatal_error.load()) {
+            // Create a fresh connection for each iteration
+            duckdb::Connection conn(*database);
+            std::cout << "Loading data" << std::endl;
+
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+            int limit = static_cast<int>(200000 * dist(rng));
+
+            std::string query = sql + " limit " + std::to_string(limit);
+
+            try {
+                auto result = conn.Query(query);
+                if (result->HasError()) {
+                    std::string error_msg = result->GetError();
+                    std::cerr << "Loading query failed: " << error_msg << std::endl;
+                    if (checkFatalError(error_msg)) {
+                        std::cerr << "Loading thread exiting due to fatal error" << std::endl;
+                        break;
+                    }
+                    continue;
+                }
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                std::cerr << "Loading query exception: " << error_msg << std::endl;
+                if (checkFatalError(error_msg)) {
+                    std::cerr << "Loading thread exiting due to fatal error" << std::endl;
+                    break;
+                }
+                continue;
+            }
+        }
+
+        std::cout << "Loading thread finished" << std::endl;
+    }
+
+    void mutatingThread() {
+        while (!mutating_exit.load() && !fatal_error.load()) {
+            // Create a fresh connection for each iteration
+            duckdb::Connection conn(*database);
+            try {
+
+                std::this_thread::sleep_for(std::chrono::duration<float>(0.1f));
+
+                // Get max insert_ts and count
+                std::unique_ptr<duckdb::MaterializedQueryResult> result;
+                result = conn.Query("select max(insert_ts), count(1) c from t1");
+                if (result->HasError()) {
+                    std::string error_msg = result->GetError();
+                    std::cerr << "Mutating query failed: " << error_msg << std::endl;
+                    if (checkFatalError(error_msg)) {
+                        std::cerr << "Mutating thread exiting due to fatal error" << std::endl;
+                        break;
+                    }
+                    continue;
+                }
+
+                if (result->RowCount() == 0) {
+                    std::cout << "no rows" << std::endl;
+                    continue;
+                }
+
+                // Get the max insert_ts value
+                auto max_insert_ts_value = result->GetValue(0, 0);
+                if (max_insert_ts_value.IsNull()) {
+                    std::cout << "Failed to get max insert_ts" << std::endl;
+                    continue;
+                }
+
+                std::string max_insert_ts = max_insert_ts_value.GetValue<std::string>();
+
+                std::this_thread::sleep_for(std::chrono::duration<float>(1.23f));
+                // Query with filter
+                std::string filter_query = "select insert_ts, count(1) c, count(1) filter (where insert_ts <= '" + max_insert_ts + "') c2 from t1 group by insert_ts order by insert_ts";
+
+                std::unique_ptr<duckdb::MaterializedQueryResult> filter_result;
+                filter_result = conn.Query(filter_query);
+                if (filter_result->HasError()) {
+                    std::cerr << "Filter query failed: " << filter_result->GetError() << std::endl;
+                    continue;
+                }
+
+                // Print results
+                for (size_t row = 0; row < filter_result->RowCount(); row++) {
+                    auto insert_ts_value = filter_result->GetValue(0, row);
+                    auto count1_value = filter_result->GetValue(1, row);
+                    auto count2_value = filter_result->GetValue(2, row);
+
+                    std::cout << insert_ts_value.GetValue<std::string>() << " "
+                              << count1_value.GetValue<int64_t>() << " "
+                              << count2_value.GetValue<int64_t>() << std::endl;
+                }
+
+                // Update and copy operations
+                std::string update_query = "update t1 set user_email = md5(random()::varchar) where insert_ts <= '" + max_insert_ts + "'";
+                std::string copy_query = "insert into t2 select * from t1 where insert_ts <= '" + max_insert_ts + "'";
+                std::string delete_query = "delete from t1 where insert_ts <= '" + max_insert_ts + "'";
+
+                auto update_result = conn.Query(update_query);
+                if (update_result->HasError()) {
+                    std::cerr << "Update query failed: " << update_result->GetError() << std::endl;
+                }
+
+                // Copy selected rows from t1 to t2
+                auto copy_result = conn.Query(copy_query);
+                if (copy_result->HasError()) {
+                    std::cerr << "Copy query failed: " << copy_result->GetError() << std::endl;
+                } else {
+                    std::cout << "Copied rows from t1 to t2" << std::endl;
+                }
+
+                auto delete_result = conn.Query(delete_query);
+                if (delete_result->HasError()) {
+                    std::cerr << "Delete query failed: " << delete_result->GetError() << std::endl;
+                }
+
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                std::cerr << "Mutating thread exception: " << error_msg << std::endl;
+                if (checkFatalError(error_msg)) {
+                    std::cerr << "Mutating thread exiting due to fatal error" << std::endl;
+                    break;
+                }
+                continue;
+            }
+        }
+
+        std::cout << "Mutating thread finished" << std::endl;
+    }
+
+    void mutating2Thread() {
+        while (!mutating2_exit.load() && !fatal_error.load()) {
+            // Create a fresh connection for each iteration
+            duckdb::Connection conn(*database);
+            try {
+                // Randomly alter email column for the whole table
+                std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+                std::string update_query = "update t1 set user_email = md5(random()::varchar) where random() < 0.1";
+
+                auto update_result = conn.Query(update_query);
+                if (update_result->HasError()) {
+                    std::cerr << "Random update query failed: " << update_result->GetError() << std::endl;
+                } else {
+                    std::cout << "Randomly updated emails " << std::endl;
+                }
+
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                std::cerr << "Mutating2 thread exception: " << error_msg << std::endl;
+                if (checkFatalError(error_msg)) {
+                    std::cerr << "Mutating2 thread exiting due to fatal error" << std::endl;
+                    break;
+                }
+                continue;
+            }
+
+            // Random sleep between 1-5 seconds
+            std::uniform_real_distribution<double> sleep_dist(1.0, 5.0);
+            std::this_thread::sleep_for(std::chrono::duration<double>(sleep_dist(rng)));
+        }
+
+        std::cout << "Mutating2 thread finished" << std::endl;
+    }
+
+    void checkpointingThread() {
+        while (!checkpointing_exit.load() && !fatal_error.load()) {
+            // Create a fresh connection for each iteration
+            duckdb::Connection conn(*database);
+            std::cout << "Checkpointing data" << std::endl;
+
+            try {
+                // Randomly use FORCE CHECKPOINT 1/3 of the time
+                std::uniform_real_distribution<double> checkpoint_dist(0.0, 1.0);
+                std::string checkpoint_query = (checkpoint_dist(rng) < 0.33) ? "FORCE CHECKPOINT" : "checkpoint";
+
+                auto result = conn.Query(checkpoint_query);
+                if (result->HasError()) {
+                    std::string error_msg = result->GetError();
+                    std::cerr << "TransactionException: " << error_msg << std::endl;
+                    if (checkFatalError(error_msg)) {
+                        std::cerr << "Checkpointing thread exiting due to fatal error" << std::endl;
+                        break;
+                    }
+                } else {
+                    std::cout << "Checkpoint successful: " << checkpoint_query << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                std::cerr << "Checkpoint exception: " << error_msg << std::endl;
+                if (checkFatalError(error_msg)) {
+                    std::cerr << "Checkpointing thread exiting due to fatal error" << std::endl;
+                    break;
+                }
+            }
+
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+            std::this_thread::sleep_for(std::chrono::duration<double>(dist(rng)));
+        }
+
+        std::cout << "Checkpointing thread finished" << std::endl;
+    }
+
+    void run() {
+        std::cout << "Starting threads..." << std::endl;
+
+        // Conditionally start threads based on configuration flags
+        std::unique_ptr<std::thread> t1, t2, t3, t4;
+
+        if (enable_loading_thread) {
+            t1 = make_uniq<std::thread>(&DuckDBAppCpp::loadingThread, this);
+            std::cout << "Loading thread started" << std::endl;
+        }
+
+        if (enable_mutating_thread) {
+            t2 = make_uniq<std::thread>(&DuckDBAppCpp::mutatingThread, this);
+            std::cout << "Mutating thread started" << std::endl;
+        }
+
+        if (enable_mutating2_thread) {
+            t3 = make_uniq<std::thread>(&DuckDBAppCpp::mutating2Thread, this);
+            std::cout << "Mutating2 thread started" << std::endl;
+        }
+
+        if (enable_checkpointing_thread) {
+            t4 = make_uniq<std::thread>(&DuckDBAppCpp::checkpointingThread, this);
+            std::cout << "Checkpointing thread started" << std::endl;
+        }
+
+        // Run for 500 seconds (like the Python version)
+        std::this_thread::sleep_for(std::chrono::seconds(1800));
+
+        // Signal threads to exit
+        if (enable_loading_thread) loading_exit = true;
+        if (enable_mutating_thread) mutating_exit = true;
+        if (enable_mutating2_thread) mutating2_exit = true;
+        if (enable_checkpointing_thread) checkpointing_exit = true;
+
+        // Wait for threads to finish
+        if (t1 && t1->joinable()) {
+            t1->join();
+        }
+
+        if (t2 && t2->joinable()) {
+            t2->join();
+        }
+
+        if (t3 && t3->joinable()) {
+            t3->join();
+        }
+
+        if (t4 && t4->joinable()) {
+            t4->join();
+        }
+
+        std::cout << "Main thread finished" << std::endl;
+    }
+};
+
+TEST_CASE("Test concurrent loads", "[api]") {
+	DuckDBAppCpp app;
+
+	// Or configure specific threads:
+	// DuckDBAppCpp app(true, true, false, true);  // Disable mutating2 thread
+	// DuckDBAppCpp app(false, true, true, false); // Only mutation threads
+	// DuckDBAppCpp app(true, false, false, false); // Only loading thread
+
+	app.run();
 }
