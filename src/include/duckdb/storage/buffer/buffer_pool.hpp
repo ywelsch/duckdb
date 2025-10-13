@@ -56,7 +56,7 @@ public:
 	void SetAllocatorBulkDeallocationFlushThreshold(idx_t threshold);
 	idx_t GetAllocatorBulkDeallocationFlushThreshold();
 
-	void UpdateUsedMemory(MemoryTag tag, int64_t size);
+	virtual void UpdateUsedMemory(MemoryTag tag, int64_t size);
 
 	idx_t GetUsedMemory(bool flush = true) const;
 
