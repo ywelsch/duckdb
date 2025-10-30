@@ -85,10 +85,6 @@ void MetadataReader::ReadNextBlock(QueryContext context) {
 		has_next_block = false;
 	} else {
 		next_pointer = FromDiskPointer(MetaBlockPointer(next_block, 0));
-		MetaBlockPointer next_block_pointer(next_block, 0);
-		if (read_pointers) {
-			read_pointers->push_back(next_block_pointer);
-		}
 	}
 	if (next_offset < sizeof(block_id_t)) {
 		next_offset = sizeof(block_id_t);
@@ -99,6 +95,9 @@ void MetadataReader::ReadNextBlock(QueryContext context) {
 	offset = next_offset;
 	next_offset = sizeof(block_id_t);
 	capacity = GetMetadataManager().GetMetadataBlockSize();
+	if (read_pointers) {
+		read_pointers->push_back(GetMetaBlockPointer());
+	}
 }
 
 data_ptr_t MetadataReader::BasePtr() {
