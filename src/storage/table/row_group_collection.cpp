@@ -1184,6 +1184,8 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 		if (!row_group_writer) {
 			throw InternalException("Missing row group writer for index %llu", segment_idx);
 		}
+		bool metadata_reuse = !checkpoint_state.write_data[segment_idx].existing_pointers.empty();
+		std::ignore = metadata_reuse;
 		auto pointer =
 		    row_group.Checkpoint(std::move(checkpoint_state.write_data[segment_idx]), *row_group_writer, global_stats);
 		auto start_pointers = row_group.GetColumnStartPointers();
@@ -1208,17 +1210,19 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 				set<MetaBlockPointer> all_read_blocks;
 				for (auto &ptr : pointers) {
 					all_read_blocks.insert(ptr);
-					/*if (!block_manager.GetMetadataManager().BlockHasBeenCleared(ptr)) {
-					    std::cerr << "NOT CLEARED " << ptr << std::endl;
-					}*/
+					if (metadata_reuse && !block_manager.GetMetadataManager().BlockHasBeenCleared(ptr)) {
+						std::cout << "NOT CLEARED " << ptr << std::endl;
+						throw InternalException("Not cleared block");
+					}
 				}
 				auto detailed_pointers = row_group.GetAllColumnPointers();
 				set<MetaBlockPointer> all_detailed_read_blocks;
 				for (auto &ptr : detailed_pointers) {
 					all_detailed_read_blocks.insert(ptr);
-					/*if (!block_manager.GetMetadataManager().BlockHasBeenCleared(ptr)) {
-					    std::cerr << "NOT CLEARED " << ptr << std::endl;
-					}*/
+					if (metadata_reuse && !block_manager.GetMetadataManager().BlockHasBeenCleared(ptr)) {
+						std::cout << "NOT CLEARED DETAILED " << ptr << std::endl;
+						throw InternalException("Not cleared detailed block");
+					}
 				}
 				set<idx_t> all_written_block_ids;
 				for (auto &ptr : all_written_blocks) {
@@ -1265,6 +1269,9 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 						                        oss.str());
 					}
 				} else {
+					if (!metadata_reuse) {
+						throw InternalException("We only have no extra_metadata_blocks when we reuse an old segment");
+					}
 					for (auto &block : all_written_block_ids) {
 						if (all_read_block_ids.find(block) == all_read_block_ids.end()) {
 							throw InternalException(
