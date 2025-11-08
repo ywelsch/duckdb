@@ -93,6 +93,21 @@ void RowGroup::MoveToCollection(RowGroupCollection &collection_p, idx_t new_star
 	}
 }
 
+void RowGroup::Unload() {
+	lock_guard<mutex> l(row_group_lock);
+	if (!is_loaded) {
+		throw InternalException("Unload expects is_loaded flag to have been set up correctly");
+	}
+	for (idx_t c = 0; c < columns.size(); c++) {
+		if (!is_loaded[c]) {
+			// if it is not loaded - we can skip
+			continue;
+		}
+		columns[c].reset();
+		is_loaded[c] = false;
+	}
+}
+
 RowGroup::~RowGroup() {
 }
 
@@ -1113,6 +1128,13 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 	column_pointers = row_group_pointer.data_pointers;
 	has_metadata_blocks = true;
 	extra_metadata_blocks = row_group_pointer.extra_metadata_blocks;
+	// Also set up is_loaded, so that it supports unloading in a future step
+	if (!is_loaded) {
+		is_loaded = unique_ptr<atomic<bool>[]>(new atomic<bool>[columns.size()]);
+		for (idx_t c = 0; c < columns.size(); c++) {
+			is_loaded[c] = true;
+		}
+	}
 
 	if (metadata_manager) {
 		row_group_pointer.deletes_pointers = CheckpointDeletes(*metadata_manager);

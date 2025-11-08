@@ -150,6 +150,8 @@ public:
 	}
 	void SetAppendRequiresNewRowGroup();
 
+	void Unload();
+
 private:
 	bool IsEmpty(SegmentLock &) const;
 

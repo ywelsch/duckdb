@@ -547,6 +547,8 @@ void SingleFileCheckpointWriter::WriteTable(TableCatalogEntry &table, Serializer
 	// flush any partial blocks BEFORE releasing the table lock
 	// flushing partial blocks updates where data lives and is not thread-safe
 	partial_block_manager.FlushPartialBlocks();
+
+	table.GetStorage().UnloadRowgroups();
 }
 
 void CheckpointReader::ReadTable(CatalogTransaction transaction, Deserializer &deserializer) {

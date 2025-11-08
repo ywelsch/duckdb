@@ -1292,6 +1292,15 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 	Verify();
 }
 
+void RowGroupCollection::Unload() {
+	auto l = row_groups->Lock();
+	auto &nodes = row_groups->ReferenceLoadedSegments(l);
+	for (idx_t segment_idx = 0; segment_idx < nodes.size(); segment_idx++) {
+		auto segment = nodes[segment_idx].node.get();
+		segment->Unload();
+	}
+}
+
 //===--------------------------------------------------------------------===//
 // CommitDrop
 //===--------------------------------------------------------------------===//

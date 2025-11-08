@@ -1616,6 +1616,10 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	writer.FinalizeTable(global_stats, *info, *row_groups, serializer);
 }
 
+void DataTable::UnloadRowgroups() {
+	row_groups->Unload();
+}
+
 void DataTable::CommitDropColumn(const idx_t column_index) {
 	row_groups->CommitDropColumn(column_index);
 }
