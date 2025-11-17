@@ -46,6 +46,9 @@ public:
 	static shared_ptr<RowVersionManager> Deserialize(MetaBlockPointer delete_pointer, MetadataManager &manager,
 	                                                 idx_t start);
 
+	bool HasNoChanges();
+	vector<MetaBlockPointer> GetStoragePointers();
+
 private:
 	mutex version_lock;
 	idx_t start;

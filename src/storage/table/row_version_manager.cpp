@@ -281,4 +281,15 @@ shared_ptr<RowVersionManager> RowVersionManager::Deserialize(MetaBlockPointer de
 	return version_info;
 }
 
+bool RowVersionManager::HasNoChanges() {
+	lock_guard<mutex> lock(version_lock);
+	return !has_changes && !storage_pointers.empty();
+}
+
+vector<MetaBlockPointer> RowVersionManager::GetStoragePointers() {
+	lock_guard<mutex> lock(version_lock);
+	D_ASSERT(!has_changes);
+	return storage_pointers;
+}
+
 } // namespace duckdb
