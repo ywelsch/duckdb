@@ -17,6 +17,7 @@
 #include "duckdb/storage/table/column_data.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/parallel/lock_notifier.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
@@ -316,6 +317,8 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		require_write_lock = require_write_lock || type.CreateIndex();
 
 		if (require_write_lock) {
+			auto strong_context = context.lock();
+			LockNotifier lock_notifier {strong_context.get(), "SetModifications::CheckpointLock"};
 			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
 			checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
 		}
@@ -326,12 +329,15 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		require_vacuum_lock = require_vacuum_lock || type.DeleteData();
 
 		if (require_vacuum_lock) {
+			auto strong_context = context.lock();
+			LockNotifier lock_notifier {strong_context.get(), "SetModifications::VacuumLock"};
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
 		}
 	}
 }
 
 unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock() {
+	// This is a non-blocking call, so no need to instrument
 	if (!checkpoint_lock) {
 		return GetTransactionManager().TryGetCheckpointLock();
 	} else {
@@ -340,6 +346,8 @@ unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock() {
 }
 
 shared_ptr<CheckpointLock> DuckTransaction::SharedLockTable(DataTableInfo &info) {
+	auto strong_context = context.lock();
+	LockNotifier lock_notifier {strong_context.get(), "SharedLockTable::TableLock"};
 	unique_lock<mutex> transaction_lock(active_locks_lock);
 	auto entry = active_locks.find(info);
 	if (entry == active_locks.end()) {

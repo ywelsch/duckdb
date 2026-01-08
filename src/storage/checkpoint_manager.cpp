@@ -33,6 +33,7 @@
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/common/thread.hpp"
+#include "duckdb/parallel/lock_notifier.hpp"
 
 namespace duckdb {
 
@@ -631,7 +632,11 @@ void SingleFileCheckpointWriter::WriteTable(TableCatalogEntry &table, Serializer
 	// FIXME: If we do not have a context, however, the unbound indexes have to be serialized to disk.
 
 	// Write the table data
-	auto table_lock = table.GetStorage().GetCheckpointLock();
+	unique_ptr<StorageLockKey> table_lock;
+	{
+		LockNotifier lock_notifier {context, "SingleFileCheckpointWriter::TableLock"};
+		table_lock = table.GetStorage().GetCheckpointLock();
+	}
 	auto writer = GetTableDataWriter(table);
 	if (writer) {
 		writer->WriteTableData(serializer);
