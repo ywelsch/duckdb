@@ -18,8 +18,11 @@ PhysicalAsOfJoin::PhysicalAsOfJoin(PhysicalPlan &physical_plan, LogicalCompariso
     : PhysicalComparisonJoin(physical_plan, op, PhysicalOperatorType::ASOF_JOIN, std::move(op.conditions), op.join_type,
                              op.estimated_cardinality),
       comparison_type(ExpressionType::INVALID) {
+	if (op.predicate.get()) {
+		throw NotImplementedException("Unsupported ASOF JOIN type (%s) with arbitrary predicate",
+		                              EnumUtil::ToChars(op.join_type));
+	}
 	// Convert the conditions partitions and sorts
-	D_ASSERT(!op.predicate.get());
 	for (auto &cond : conditions) {
 		D_ASSERT(cond.left->return_type == cond.right->return_type);
 		join_key_types.push_back(cond.left->return_type);
