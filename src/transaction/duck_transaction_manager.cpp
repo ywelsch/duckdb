@@ -371,8 +371,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		// note: we can only drop the transaction lock if we are NOT checkpointing
 		// if we are checkpointing, we have already made certain decisions (e.g. the CheckpointType)
 		t_lock.unlock();
-		// grab the WAL lock and hold it until the entire commit is finished
-		held_wal_lock = storage_manager.GetWALLock();
+		{
+			LockNotifier lock_notifier {context, "CommitTransaction::WALLock"};
+			// grab the WAL lock and hold it until the entire commit is finished
+			held_wal_lock = storage_manager.GetWALLock();
+		}
 
 		// Commit the changes to the WAL.
 		if (!skip_wal_write_due_to_checkpoint) {
@@ -380,8 +383,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			wal_written = true;
 		}
 
-		// after we finish writing to the WAL we grab the transaction lock again
-		t_lock.lock();
+		{
+			// after we finish writing to the WAL we grab the transaction lock again
+			LockNotifier lock_notifier {context, "CommitTransaction::TransactionLock"};
+			t_lock.lock();
+		}
 	}
 	if (!error.HasError() && checkpoint_decision.can_checkpoint) {
 		// now that we have the transaction lock again, new transactions can't start

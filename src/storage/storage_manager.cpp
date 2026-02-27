@@ -7,6 +7,7 @@
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parallel/lock_notifier.hpp"
 #include "duckdb/storage/checkpoint_manager.hpp"
 #include "duckdb/storage/in_memory_block_manager.hpp"
 #include "duckdb/storage/object_cache.hpp"
@@ -202,10 +203,12 @@ bool StorageManager::HasWAL() const {
 	return true;
 }
 
-bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointOptions &options) {
+bool StorageManager::WALStartCheckpoint(optional_ptr<ClientContext> context, MetaBlockPointer meta_block,
+	CheckpointOptions &options) {
 	unique_ptr<lock_guard<mutex>> guard;
 	if (!options.wal_lock) {
 		// not holding the WAL lock yet - grab it
+		LockNotifier lock_notifier {context, "StorageManager::WALLock"};
 		guard = GetWALLock();
 	}
 	// while holding the WAL lock - get the last committed transaction from the transaction manager
