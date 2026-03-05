@@ -22,6 +22,8 @@ void ViewCatalogEntry::Initialize(CreateViewInfo &info) {
 		view_columns = make_shared_ptr<ViewColumnInfo>();
 		view_columns->types = info.types;
 		view_columns->names = info.names;
+	} else {
+		throw InternalException("View \"%s\" does not have types", name);
 	}
 	this->temporary = info.temporary;
 	this->sql = info.sql;
