@@ -9,8 +9,11 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/limits.hpp"
-#include "duckdb/parallel/lock_notifier.hpp"
+#include "duckdb/common/mutex.hpp"
+#include "duckdb/execution/partition_info.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/storage/table/column_data.hpp"
@@ -24,14 +27,27 @@ struct PragmaStorageFunctionData : public TableFunctionData {
 	}
 
 	TableCatalogEntry &table_entry;
-	vector<ColumnSegmentInfo> column_segments_info;
 };
 
-struct PragmaStorageOperatorData : public GlobalTableFunctionState {
-	PragmaStorageOperatorData() : offset(0) {
+struct PragmaStorageGlobalState : public GlobalTableFunctionState {
+	explicit PragmaStorageGlobalState(idx_t max_threads_p) : max_threads(max_threads_p) {
 	}
 
-	idx_t offset;
+	mutex lock;
+	idx_t max_threads;
+	ColumnSegmentInfoScanState scan_state;
+
+	idx_t MaxThreads() const override {
+		return max_threads;
+	}
+};
+
+struct PragmaStorageLocalState : public LocalTableFunctionState {
+	//! Buffered column segment info for the row group this thread is currently emitting.
+	vector<ColumnSegmentInfo> buffer;
+	idx_t buffer_offset = 0;
+	//! Index of the row group currently being emitted; used as the batch index for partitioning.
+	idx_t batch_index = 0;
 };
 
 static unique_ptr<FunctionData> PragmaStorageInfoBind(ClientContext &context, TableFunctionBindInput &input,
@@ -89,14 +105,21 @@ static unique_ptr<FunctionData> PragmaStorageInfoBind(ClientContext &context, Ta
 	// look up the table name in the catalog
 	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
 	auto &table_entry = Catalog::GetEntry<TableCatalogEntry>(context, qname.catalog, qname.schema, qname.name);
-	auto result = make_uniq<PragmaStorageFunctionData>(table_entry);
-	LockNotifier lock_notifier {context, "PragmaStorageInfo::TableLock"};
-	result->column_segments_info = table_entry.GetColumnSegmentInfo(context);
-	return std::move(result);
+	return make_uniq<PragmaStorageFunctionData>(table_entry);
 }
 
-unique_ptr<GlobalTableFunctionState> PragmaStorageInfoInit(ClientContext &context, TableFunctionInitInput &input) {
-	return make_uniq<PragmaStorageOperatorData>();
+unique_ptr<GlobalTableFunctionState> PragmaStorageInfoInitGlobal(ClientContext &context,
+                                                                 TableFunctionInitInput &input) {
+	auto &bind_data = input.bind_data->Cast<PragmaStorageFunctionData>();
+	auto max_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	auto gstate = make_uniq<PragmaStorageGlobalState>(max_threads);
+	bind_data.table_entry.InitializeColumnSegmentInfoScan(gstate->scan_state);
+	return std::move(gstate);
+}
+
+unique_ptr<LocalTableFunctionState> PragmaStorageInfoInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
+                                                               GlobalTableFunctionState *global_state) {
+	return make_uniq<PragmaStorageLocalState>();
 }
 
 static Value ValueFromBlockIdList(const vector<block_id_t> &block_ids) {
@@ -109,11 +132,39 @@ static Value ValueFromBlockIdList(const vector<block_id_t> &block_ids) {
 
 static void PragmaStorageInfoFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<PragmaStorageFunctionData>();
-	auto &data = data_p.global_state->Cast<PragmaStorageOperatorData>();
-	idx_t count = 0;
+	auto &gstate = data_p.global_state->Cast<PragmaStorageGlobalState>();
+	auto &lstate = data_p.local_state->Cast<PragmaStorageLocalState>();
 	auto &columns = bind_data.table_entry.GetColumns();
-	while (data.offset < bind_data.column_segments_info.size() && count < STANDARD_VECTOR_SIZE) {
-		auto &entry = bind_data.column_segments_info[data.offset++];
+	QueryContext query_context(context);
+
+	idx_t count = 0;
+
+	while (count < STANDARD_VECTOR_SIZE) {
+		if (lstate.buffer_offset >= lstate.buffer.size()) {
+			// drained the current buffer; pull the next row group under the global lock
+			lstate.buffer.clear();
+			lstate.buffer_offset = 0;
+			bool has_more;
+			{
+				lock_guard<mutex> guard(gstate.lock);
+				has_more = bind_data.table_entry.ScanColumnSegmentInfo(query_context, gstate.scan_state, lstate.buffer);
+			}
+			if (!has_more) {
+				break;
+			}
+			if (lstate.buffer.empty()) {
+				continue;
+			}
+		}
+
+		auto &entry = lstate.buffer[lstate.buffer_offset];
+		// keep each output chunk to a single row group so batch_index identifies its contents.
+		// merging is allowed when the next entry happens to belong to the same row group.
+		if (count > 0 && entry.row_group_index != lstate.batch_index) {
+			break;
+		}
+		lstate.buffer_offset++;
+		lstate.batch_index = entry.row_group_index;
 
 		idx_t col_idx = 0;
 		// row_group_id
@@ -164,9 +215,17 @@ static void PragmaStorageInfoFunction(ClientContext &context, TableFunctionInput
 	output.SetCardinality(count);
 }
 
+static OperatorPartitionData PragmaStorageInfoGetPartitionData(ClientContext &context,
+                                                               TableFunctionGetPartitionInput &input) {
+	auto &lstate = input.local_state->Cast<PragmaStorageLocalState>();
+	return OperatorPartitionData(lstate.batch_index);
+}
+
 void PragmaStorageInfo::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(TableFunction("pragma_storage_info", {LogicalType::VARCHAR}, PragmaStorageInfoFunction,
-	                              PragmaStorageInfoBind, PragmaStorageInfoInit));
+	TableFunction storage_info("pragma_storage_info", {LogicalType::VARCHAR}, PragmaStorageInfoFunction,
+	                           PragmaStorageInfoBind, PragmaStorageInfoInitGlobal, PragmaStorageInfoInitLocal);
+	storage_info.get_partition_data = PragmaStorageInfoGetPartitionData;
+	set.AddFunction(std::move(storage_info));
 }
 
 } // namespace duckdb

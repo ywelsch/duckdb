@@ -43,6 +43,14 @@ class DataTable;
 class RowGroupIterationHelper;
 class TableScanState;
 
+//! Snapshot state used to iterate row groups without holding the row-group segment-tree
+//! lock for the duration of the scan. Holding row_groups pins the snapshot alive; consistency
+//! follows the same model as table scans.
+struct ColumnSegmentInfoScanState {
+	shared_ptr<RowGroupSegmentTree> row_groups;
+	optional_ptr<SegmentNode<RowGroup>> current_row_group;
+};
+
 class RowGroupCollection {
 public:
 	RowGroupCollection(shared_ptr<DataTableInfo> info, TableIOManager &io_manager, vector<LogicalType> types,
@@ -135,6 +143,11 @@ public:
 
 	vector<PartitionStatistics> GetPartitionStats() const;
 	vector<ColumnSegmentInfo> GetColumnSegmentInfo(const QueryContext &context) const;
+	//! Initialize an incremental scan over column segment info, pinning the current row groups for consistency.
+	void InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state) const;
+	//! Append the next row group's column segment info to result. Returns false when no row groups remain.
+	bool ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
+	                           vector<ColumnSegmentInfo> &result) const;
 	bool SupportsPerColumnWrites();
 	const vector<LogicalType> &GetTypes() const;
 

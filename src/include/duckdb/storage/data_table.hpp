@@ -245,6 +245,9 @@ public:
 	idx_t GetRowGroupCountWithLocalStorage(ClientContext &context);
 
 	vector<ColumnSegmentInfo> GetColumnSegmentInfo(const QueryContext &context);
+	void InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state);
+	bool ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
+	                           vector<ColumnSegmentInfo> &result);
 
 	//! Scans the next chunk for the CREATE INDEX operator
 	bool CreateIndexScan(TableScanState &state, DataChunk &result);
