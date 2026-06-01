@@ -37,13 +37,15 @@ SELECT segment_info FROM pragma_storage_info('bp_tbl', include_segment_info=true
 ----
 CONSTANT: 9, DELTA_FOR: 1
 
-# Explicit include_segment_info=false omits the column.
-statement error
-SELECT segment_info FROM pragma_storage_info('bp_tbl', include_segment_info=false) LIMIT 1
+# Explicit include_segment_info=false keeps the schema stable and returns NULL.
+query I
+SELECT COUNT(*)
+FROM pragma_storage_info('bp_tbl', include_segment_info=false)
+WHERE segment_info IS NOT NULL
 ----
-<REGEX>:Binder Error:.*segment_info.*
+0
 
-# Row counts are unchanged when segment_info is omitted.
+# Row counts are unchanged when segment_info is not computed.
 query I
 SELECT COUNT(*) = (SELECT COUNT(*) FROM pragma_storage_info('bp_tbl', include_segment_info=false))
 FROM pragma_storage_info('bp_tbl')

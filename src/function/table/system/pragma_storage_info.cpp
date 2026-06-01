@@ -102,10 +102,8 @@ static unique_ptr<FunctionData> PragmaStorageInfoBind(ClientContext &context, Ta
 	if (include_entry != input.named_parameters.end()) {
 		options.include_segment_info = include_entry->second.GetValue<bool>();
 	}
-	if (options.include_segment_info) {
-		names.emplace_back("segment_info");
-		return_types.emplace_back(LogicalType::VARCHAR);
-	}
+	names.emplace_back("segment_info");
+	return_types.emplace_back(LogicalType::VARCHAR);
 
 	names.emplace_back("additional_block_ids");
 	return_types.emplace_back(LogicalType::LIST(LogicalTypeId::BIGINT));
@@ -215,6 +213,8 @@ static void PragmaStorageInfoFunction(ClientContext &context, TableFunctionInput
 		// segment_info
 		if (bind_data.options.include_segment_info) {
 			output.SetValue(col_idx++, count, Value(entry.segment_info));
+		} else {
+			output.SetValue(col_idx++, count, Value());
 		}
 		// additional_block_ids
 		if (entry.persistent) {
