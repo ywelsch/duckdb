@@ -244,10 +244,13 @@ public:
 	idx_t GetRowGroupCount() const;
 	idx_t GetRowGroupCountWithLocalStorage(ClientContext &context);
 
-	vector<ColumnSegmentInfo> GetColumnSegmentInfo(const QueryContext &context);
+	vector<ColumnSegmentInfo>
+	GetColumnSegmentInfo(const QueryContext &context,
+	                     const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
 	void InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state);
 	bool ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
-	                           vector<ColumnSegmentInfo> &result);
+	                           vector<ColumnSegmentInfo> &result,
+	                           const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
 
 	//! Scans the next chunk for the CREATE INDEX operator
 	bool CreateIndexScan(TableScanState &state, DataChunk &result);

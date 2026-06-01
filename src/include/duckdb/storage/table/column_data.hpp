@@ -15,6 +15,7 @@
 #include "duckdb/storage/table/segment_tree.hpp"
 #include "duckdb/storage/table/column_segment_tree.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/enums/column_segment_info_scan_type.hpp"
 #include "duckdb/common/enums/scan_vector_type.hpp"
 #include "duckdb/common/serializer/serialization_traits.hpp"
 #include "duckdb/common/atomic_ptr.hpp"
@@ -196,7 +197,8 @@ public:
 	                                          ReadStream &source, const LogicalType &type);
 
 	virtual void GetColumnSegmentInfo(const QueryContext &context, idx_t row_group_index, vector<idx_t> col_path,
-	                                  vector<ColumnSegmentInfo> &result);
+	                                  vector<ColumnSegmentInfo> &result,
+	                                  const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
 	virtual void Verify(RowGroup &parent);
 
 	FilterPropagateResult CheckZonemap(const StorageIndex &index, TableFilter &filter);

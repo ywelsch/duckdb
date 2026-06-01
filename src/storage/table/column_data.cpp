@@ -1105,7 +1105,7 @@ struct ListBlockIds : public BlockIdVisitor {
 };
 
 void ColumnData::GetColumnSegmentInfo(const QueryContext &context, idx_t row_group_index, vector<idx_t> col_path,
-                                      vector<ColumnSegmentInfo> &result) {
+                                      vector<ColumnSegmentInfo> &result, const ColumnSegmentInfoScanOptions &options) {
 	D_ASSERT(!col_path.empty());
 
 	// convert the column path to a string
@@ -1157,7 +1157,7 @@ void ColumnData::GetColumnSegmentInfo(const QueryContext &context, idx_t row_gro
 				compression_function.visit_block_ids(segment, list_block_ids);
 			}
 		}
-		if (compression_function.get_segment_info) {
+		if (options.include_segment_info && compression_function.get_segment_info) {
 			auto segment_info = compression_function.get_segment_info(context, segment);
 			vector<string> sinfo;
 			for (auto &item : segment_info) {

@@ -18,6 +18,7 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/catalog/catalog_entry/table_column_type.hpp"
 #include "duckdb/catalog/catalog_entry/column_dependency_manager.hpp"
+#include "duckdb/common/enums/column_segment_info_scan_type.hpp"
 #include "duckdb/common/table_column.hpp"
 
 namespace duckdb {
@@ -113,12 +114,15 @@ public:
 	static string ColumnNamesToSQL(const ColumnList &columns);
 
 	//! Returns a list of segment information for this table, if exists
-	virtual vector<ColumnSegmentInfo> GetColumnSegmentInfo(const QueryContext &context);
+	virtual vector<ColumnSegmentInfo>
+	GetColumnSegmentInfo(const QueryContext &context,
+	                     const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
 	//! Initialize an incremental scan over the table's column segment info.
 	virtual void InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state);
 	//! Append the next row group's column segment info to result. Returns false when no row groups remain.
 	virtual bool ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
-	                                   vector<ColumnSegmentInfo> &result);
+	                                   vector<ColumnSegmentInfo> &result,
+	                                   const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
 
 	//! Returns the storage info of this table
 	virtual TableStorageInfo GetStorageInfo(ClientContext &context) = 0;

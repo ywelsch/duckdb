@@ -1956,11 +1956,12 @@ vector<PartitionStatistics> RowGroupCollection::GetPartitionStats() const {
 //===--------------------------------------------------------------------===//
 // GetColumnSegmentInfo
 //===--------------------------------------------------------------------===//
-vector<ColumnSegmentInfo> RowGroupCollection::GetColumnSegmentInfo(const QueryContext &context) const {
+vector<ColumnSegmentInfo> RowGroupCollection::GetColumnSegmentInfo(const QueryContext &context,
+                                                                   const ColumnSegmentInfoScanOptions &options) const {
 	vector<ColumnSegmentInfo> result;
 	ColumnSegmentInfoScanState state;
 	InitializeColumnSegmentInfoScan(state);
-	while (ScanColumnSegmentInfo(context, state, result)) {
+	while (ScanColumnSegmentInfo(context, state, result, options)) {
 	}
 	return result;
 }
@@ -1975,12 +1976,13 @@ void RowGroupCollection::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanSt
 }
 
 bool RowGroupCollection::ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
-                                               vector<ColumnSegmentInfo> &result) const {
+                                               vector<ColumnSegmentInfo> &result,
+                                               const ColumnSegmentInfoScanOptions &options) const {
 	if (!state.current_row_group) {
 		return false;
 	}
 	auto &node = *state.current_row_group;
-	node.GetNode().GetColumnSegmentInfo(context, node.GetIndex(), result);
+	node.GetNode().GetColumnSegmentInfo(context, node.GetIndex(), result, options);
 	// Advance to the next row group. For lazy-loading segment trees this acquires
 	// the node lock briefly only while more segments still need to be loaded.
 	state.current_row_group = state.row_groups->GetNextSegment(node);

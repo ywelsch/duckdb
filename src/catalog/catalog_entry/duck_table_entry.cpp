@@ -1339,8 +1339,9 @@ TableFunction DuckTableEntry::GetScanFunction(ClientContext &context, unique_ptr
 	return TableScanFunction::GetFunction();
 }
 
-vector<ColumnSegmentInfo> DuckTableEntry::GetColumnSegmentInfo(const QueryContext &context) {
-	return storage->GetColumnSegmentInfo(context);
+vector<ColumnSegmentInfo> DuckTableEntry::GetColumnSegmentInfo(const QueryContext &context,
+                                                               const ColumnSegmentInfoScanOptions &options) {
+	return storage->GetColumnSegmentInfo(context, options);
 }
 
 void DuckTableEntry::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state) {
@@ -1348,8 +1349,9 @@ void DuckTableEntry::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState 
 }
 
 bool DuckTableEntry::ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
-                                           vector<ColumnSegmentInfo> &result) {
-	return storage->ScanColumnSegmentInfo(context, state, result);
+                                           vector<ColumnSegmentInfo> &result,
+                                           const ColumnSegmentInfoScanOptions &options) {
+	return storage->ScanColumnSegmentInfo(context, state, result, options);
 }
 
 TableStorageInfo DuckTableEntry::GetStorageInfo(ClientContext &context) {

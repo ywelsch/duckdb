@@ -1878,8 +1878,9 @@ void DataTable::CommitDropTable(CommitDropState &drop_state) {
 //===--------------------------------------------------------------------===//
 // Column Segment Info
 //===--------------------------------------------------------------------===//
-vector<ColumnSegmentInfo> DataTable::GetColumnSegmentInfo(const QueryContext &context) {
-	return row_groups->GetColumnSegmentInfo(context);
+vector<ColumnSegmentInfo> DataTable::GetColumnSegmentInfo(const QueryContext &context,
+                                                          const ColumnSegmentInfoScanOptions &options) {
+	return row_groups->GetColumnSegmentInfo(context, options);
 }
 
 void DataTable::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state) {
@@ -1887,8 +1888,8 @@ void DataTable::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &stat
 }
 
 bool DataTable::ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
-                                      vector<ColumnSegmentInfo> &result) {
-	return row_groups->ScanColumnSegmentInfo(context, state, result);
+                                      vector<ColumnSegmentInfo> &result, const ColumnSegmentInfoScanOptions &options) {
+	return row_groups->ScanColumnSegmentInfo(context, state, result, options);
 }
 
 //===--------------------------------------------------------------------===//

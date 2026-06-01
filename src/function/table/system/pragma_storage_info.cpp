@@ -8,6 +8,7 @@
 #include "duckdb/planner/constraints/bound_unique_constraint.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/enums/column_segment_info_scan_type.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/execution/partition_info.hpp"
@@ -23,10 +24,12 @@
 namespace duckdb {
 
 struct PragmaStorageFunctionData : public TableFunctionData {
-	explicit PragmaStorageFunctionData(TableCatalogEntry &table_entry) : table_entry(table_entry) {
+	PragmaStorageFunctionData(TableCatalogEntry &table_entry, ColumnSegmentInfoScanOptions options)
+	    : table_entry(table_entry), options(options) {
 	}
 
 	TableCatalogEntry &table_entry;
+	ColumnSegmentInfoScanOptions options;
 };
 
 struct PragmaStorageGlobalState : public GlobalTableFunctionState {
@@ -94,8 +97,15 @@ static unique_ptr<FunctionData> PragmaStorageInfoBind(ClientContext &context, Ta
 	names.emplace_back("block_offset");
 	return_types.emplace_back(LogicalType::BIGINT);
 
-	names.emplace_back("segment_info");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	ColumnSegmentInfoScanOptions options;
+	auto include_entry = input.named_parameters.find("include_segment_info");
+	if (include_entry != input.named_parameters.end()) {
+		options.include_segment_info = include_entry->second.GetValue<bool>();
+	}
+	if (options.include_segment_info) {
+		names.emplace_back("segment_info");
+		return_types.emplace_back(LogicalType::VARCHAR);
+	}
 
 	names.emplace_back("additional_block_ids");
 	return_types.emplace_back(LogicalType::LIST(LogicalTypeId::BIGINT));
@@ -105,7 +115,7 @@ static unique_ptr<FunctionData> PragmaStorageInfoBind(ClientContext &context, Ta
 	// look up the table name in the catalog
 	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
 	auto &table_entry = Catalog::GetEntry<TableCatalogEntry>(context, qname.catalog, qname.schema, qname.name);
-	return make_uniq<PragmaStorageFunctionData>(table_entry);
+	return make_uniq<PragmaStorageFunctionData>(table_entry, options);
 }
 
 unique_ptr<GlobalTableFunctionState> PragmaStorageInfoInitGlobal(ClientContext &context,
@@ -147,7 +157,8 @@ static void PragmaStorageInfoFunction(ClientContext &context, TableFunctionInput
 			bool has_more;
 			{
 				lock_guard<mutex> guard(gstate.lock);
-				has_more = bind_data.table_entry.ScanColumnSegmentInfo(query_context, gstate.scan_state, lstate.buffer);
+				has_more = bind_data.table_entry.ScanColumnSegmentInfo(query_context, gstate.scan_state, lstate.buffer,
+				                                                       bind_data.options);
 			}
 			if (!has_more) {
 				break;
@@ -202,7 +213,9 @@ static void PragmaStorageInfoFunction(ClientContext &context, TableFunctionInput
 			output.SetValue(col_idx++, count, Value());
 		}
 		// segment_info
-		output.SetValue(col_idx++, count, Value(entry.segment_info));
+		if (bind_data.options.include_segment_info) {
+			output.SetValue(col_idx++, count, Value(entry.segment_info));
+		}
 		// additional_block_ids
 		if (entry.persistent) {
 			output.SetValue(col_idx++, count, ValueFromBlockIdList(entry.additional_blocks));
@@ -224,6 +237,7 @@ static OperatorPartitionData PragmaStorageInfoGetPartitionData(ClientContext &co
 void PragmaStorageInfo::RegisterFunction(BuiltinFunctions &set) {
 	TableFunction storage_info("pragma_storage_info", {LogicalType::VARCHAR}, PragmaStorageInfoFunction,
 	                           PragmaStorageInfoBind, PragmaStorageInfoInitGlobal, PragmaStorageInfoInitLocal);
+	storage_info.named_parameters["include_segment_info"] = LogicalType::BOOLEAN;
 	storage_info.get_partition_data = PragmaStorageInfoGetPartitionData;
 	set.AddFunction(std::move(storage_info));
 }

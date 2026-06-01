@@ -59,7 +59,8 @@ public:
 	                    Vector &scan_vector) const override;
 
 	void GetColumnSegmentInfo(const QueryContext &context, duckdb::idx_t row_group_index,
-	                          vector<duckdb::idx_t> col_path, vector<duckdb::ColumnSegmentInfo> &result) override;
+	                          vector<duckdb::idx_t> col_path, vector<duckdb::ColumnSegmentInfo> &result,
+	                          const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {}) override;
 
 	bool IsPersistent() override;
 	bool HasAnyChanges() const override;

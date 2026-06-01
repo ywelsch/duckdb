@@ -142,12 +142,15 @@ public:
 	void CommitDropTable();
 
 	vector<PartitionStatistics> GetPartitionStats() const;
-	vector<ColumnSegmentInfo> GetColumnSegmentInfo(const QueryContext &context) const;
+	vector<ColumnSegmentInfo>
+	GetColumnSegmentInfo(const QueryContext &context,
+	                     const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {}) const;
 	//! Initialize an incremental scan over column segment info, pinning the current row groups for consistency.
 	void InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state) const;
 	//! Append the next row group's column segment info to result. Returns false when no row groups remain.
 	bool ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
-	                           vector<ColumnSegmentInfo> &result) const;
+	                           vector<ColumnSegmentInfo> &result,
+	                           const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {}) const;
 	bool SupportsPerColumnWrites();
 	const vector<LogicalType> &GetTypes() const;
 

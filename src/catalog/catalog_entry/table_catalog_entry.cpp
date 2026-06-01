@@ -294,7 +294,8 @@ void LogicalUpdate::BindExtraColumns(TableCatalogEntry &table, LogicalGet &get, 
 	}
 }
 
-vector<ColumnSegmentInfo> TableCatalogEntry::GetColumnSegmentInfo(const QueryContext &context) {
+vector<ColumnSegmentInfo> TableCatalogEntry::GetColumnSegmentInfo(const QueryContext &context,
+                                                                  const ColumnSegmentInfoScanOptions &options) {
 	return {};
 }
 
@@ -302,7 +303,8 @@ void TableCatalogEntry::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanSta
 }
 
 bool TableCatalogEntry::ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
-                                              vector<ColumnSegmentInfo> &result) {
+                                              vector<ColumnSegmentInfo> &result,
+                                              const ColumnSegmentInfoScanOptions &options) {
 	return false;
 }
 
