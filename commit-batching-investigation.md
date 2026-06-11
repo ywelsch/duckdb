@@ -235,6 +235,23 @@ Deadlock safety: lock order is WAL lock → `transaction_lock` → `publish_lock
 - SIGKILL crash test: clean recovery, consistent prefix.
 - Performance unchanged: 209/2770 TPS at 1/16 threads (F_FULLFSYNC), 82/1110 TPS at 1/16 threads (10 ms); 64 threads at 10 ms reaches 2834 TPS.
 
+## Experimental setting, DDL gate, and stress verification (2026-06-11, third commit)
+
+- **`SET experimental_group_commit = true`** (global, default `false`) now gates the deferred-commit path. With it off, every commit takes the synchronous path, which is behaviorally identical to the pre-group-commit code — verified: 236 TPS flat at 16 threads (off) vs 3020 TPS (on, F_FULLFSYNC). The pending-commit drains and the DDL gate remain unconditional (no-ops when no deferred commits exist), making runtime toggling safe.
+- **DDL publish gate**: `CatalogSet::AlterEntry`/`DropEntry` call `DuckTransactionManager::BlockPendingCommits()` before attaching a new catalog version — closing the race where an ALTER *executing* (not committing) during a deferred commit's sync window invalidated the marker-time conflict validation (clean abort would have become Fatal). While a DDL waits, new commits fall back to the synchronous path (no starvation, no blocking while holding the transaction lock). Registration now precedes validation, linearizing both through `publish_lock`.
+- **Self-deadlock found by stress test + stack trace**: `AlterEntry` held the gate through `DependencyManager::AlterObject`, which re-enters `CatalogSet::DropEntry` → `BlockPendingCommits()` on the same thread. Fixed by releasing the gate after the version attachment, before the dependency-manager call. A good reminder that the lock reasoning needs adversarial testing.
+
+### Stress verification (all with group commit on)
+
+| test | result |
+|---|---|
+| DDL race: 8 writers + ALTER ADD/DROP COLUMN loop, 5 ms sync, 15 s | OK — 6046 commits, 42k clean conflict aborts, 761 ALTERs, 0 fatals, count exact |
+| Checkpoint race: 8 writers + manual CHECKPOINT loop + 128KB auto-checkpoint threshold, 20 s | OK — 25,150 commits, **520 WAL-swap cycles**, 0 failures, count exact after close+reopen |
+| SIGKILL during checkpoint+commit activity | OK — 11,793 rows replayed cleanly, database writable |
+| `alter` (107), `catalog` (123), `transactions` (73), `storage/wal`, `storage/checkpoint` suites | all pass |
+
+The WAL-swap safety argument (drain in `WALStartCheckpoint` + WAL-lock exclusion of registrations + shared_ptr lifetime + move-not-delete in `WALFinishCheckpoint`) is documented in the session notes; the checkpoint stress above exercises both swap directions under load.
+
 ### Remaining open questions for productionizing
 
 1. **fsync/publish failure after the marker is durable** is `FatalException` — principled (matches Postgres PANIC semantics), but should be reviewed; the validation pass is the safeguard that keeps it unreachable.
