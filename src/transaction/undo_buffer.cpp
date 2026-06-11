@@ -5,16 +5,19 @@
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/list.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/execution/index/bound_index.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
+#include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/cleanup_state.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/delete_info.hpp"
 #include "duckdb/transaction/rollback_state.hpp"
+#include "duckdb/transaction/update_info.hpp"
 #include "duckdb/transaction/wal_write_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 
@@ -191,6 +194,39 @@ void UndoBuffer::WriteToWAL(WriteAheadLog &wal, optional_ptr<StorageCommitState>
 	WALWriteState state(transaction, wal, commit_state);
 	UndoBuffer::IteratorState iterator_state;
 	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) { state.CommitEntry(type, data); });
+}
+
+ErrorData UndoBuffer::ValidateCommitConflicts() {
+	ErrorData error;
+	UndoBuffer::IteratorState iterator_state;
+	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) {
+		if (error.HasError()) {
+			return;
+		}
+		optional_ptr<DuckTableEntry> table;
+		switch (type) {
+		case UndoFlags::INSERT_TUPLE:
+			table = reinterpret_cast<AppendInfo *>(data)->table;
+			break;
+		case UndoFlags::DELETE_TUPLE:
+			table = reinterpret_cast<DeleteInfo *>(data)->table;
+			break;
+		case UndoFlags::UPDATE_TUPLE:
+			table = reinterpret_cast<UpdateInfo *>(data)->table;
+			break;
+		default:
+			return;
+		}
+		// the same check that CommitState::CommitEntry performs: if another transaction has committed an
+		// alter/rename of a modified table in the meantime, the commit must fail
+		if (table->HasParent() && table->Parent().timestamp != transaction.transaction_id) {
+			auto &storage = table->GetStorage();
+			error = ErrorData(
+			    TransactionException("Attempting to modify table %s but another transaction has %s this table",
+			                         storage.GetTableName(), storage.TableModification()));
+		}
+	});
+	return error;
 }
 
 void UndoBuffer::Commit(UndoBuffer::IteratorState &iterator_state, CommitInfo &info) {

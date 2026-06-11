@@ -12,6 +12,9 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
+#include "duckdb/common/set.hpp"
+
+#include <condition_variable>
 
 namespace duckdb {
 class DuckTransactionManager;
@@ -82,6 +85,12 @@ public:
 	                      idx_t extra_data_size = 0);
 	void PushAttach(Transaction &transaction_p, AttachedDatabase &db);
 
+	//! Wait until all commits that have written their WAL flush marker have been published (made visible).
+	//! Used by checkpoints and catalog-changing commits to ensure no commit is "in between" WAL durability and
+	//! visibility. The caller must hold the WAL lock (so no new pending commits can register) and must NOT hold
+	//! the transaction lock (pending commits need it to publish).
+	void WaitForPendingCommits();
+
 protected:
 	struct CheckpointDecision {
 		explicit CheckpointDecision(string reason_p);
@@ -109,6 +118,14 @@ private:
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
+
+	//! Register a commit that has written its WAL flush marker but is not yet published.
+	void RegisterPendingCommit(transaction_t commit_id);
+	//! Wait until all earlier pending commits have been published. Publishing in commit order keeps
+	//! recently_committed_transactions ordered on commit_id and matches WAL replay order.
+	void WaitForPublishTurn(transaction_t commit_id);
+	//! Mark a pending commit as published (or abandoned on fatal failure) and wake up waiters.
+	void FinishPendingCommit(transaction_t commit_id);
 
 private:
 	//! The current start timestamp used by transactions
@@ -138,6 +155,15 @@ private:
 
 	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START};
 	idx_t last_committed_version = 0;
+
+	//! Protects pending_commit_publishes.
+	mutex publish_lock;
+	//! Signalled whenever a pending commit is published.
+	std::condition_variable publish_cv;
+	//! Commits that are durable in the WAL (flush marker written) but not yet published/visible.
+	//! Lock ordering: transaction_lock -> publish_lock. Waiting on publish_cv requires holding neither
+	//! the transaction lock nor the WAL lock.
+	set<transaction_t> pending_commit_publishes;
 
 	//! Only one cleanup can be active at any time.
 	mutex cleanup_lock;

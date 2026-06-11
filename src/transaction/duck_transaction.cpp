@@ -269,7 +269,9 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 		// }
 		if (commit_state) {
 			// if we have written to the WAL - flush after the commit has been successful
-			commit_state->FlushCommit();
+			// the commit has already been made visible (we hold the transaction lock, so no new transaction can
+			// observe it before it is durable) - hence we must make it durable here, before the lock is released
+			commit_state->FlushCommit(true);
 		}
 		drop_state.FinalizeCommit();
 		return ErrorData();
@@ -279,6 +281,51 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 			// if we have written to the WAL - truncate the WAL on failure
 			commit_state->RevertCommit();
 		}
+		return ErrorData(ex);
+	}
+}
+
+ErrorData DuckTransaction::CommitToWAL(AttachedDatabase &db, CommitInfo &commit_info,
+                                       StorageCommitState &commit_state) noexcept {
+	this->commit_id = commit_info.commit_id;
+	D_ASSERT(ChangesMade());
+	D_ASSERT(!IsReadOnly());
+	try {
+		// validate that the commit cannot fail anymore BEFORE writing the flush marker:
+		// once the marker is written, the commit must complete - it can be replayed after a crash
+		auto error = undo_buffer.ValidateCommitConflicts();
+		if (error.HasError()) {
+			commit_state.RevertCommit();
+			return error;
+		}
+		// write the WAL flush marker (without fsync - the caller batches the fsync across transactions)
+		commit_state.FlushCommit(false);
+		return ErrorData();
+	} catch (std::exception &ex) {
+		try {
+			commit_state.RevertCommit();
+		} catch (...) { // NOLINT
+		}
+		return ErrorData(ex);
+	}
+}
+
+ErrorData DuckTransaction::PublishCommit(AttachedDatabase &db, CommitInfo &commit_info) noexcept {
+	D_ASSERT(this->commit_id == commit_info.commit_id);
+	// deferred commits are data-only: catalog-changing transactions commit through Commit()
+	D_ASSERT(catalog_version < TRANSACTION_ID_START);
+	UndoBuffer::IteratorState iterator_state;
+	optional_ptr<BlockManager> block_manager;
+	if (db.HasStorageManager()) {
+		block_manager = db.GetStorageManager().GetBlockManager();
+	}
+	CommitDropState drop_state(block_manager);
+	commit_info.drop_state = &drop_state;
+	try {
+		undo_buffer.Commit(iterator_state, commit_info);
+		drop_state.FinalizeCommit();
+		return ErrorData();
+	} catch (std::exception &ex) {
 		return ErrorData(ex);
 	}
 }

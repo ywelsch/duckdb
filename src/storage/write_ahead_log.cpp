@@ -572,7 +572,8 @@ void WriteAheadLog::Flush() {
 		return;
 	}
 	auto target_offset = WriteFlushMarker();
-	SyncUpTo(target_offset);
+	// the caller holds the WAL lock, so no concurrent appends can arrive - no point waiting for a batch
+	SyncUpTo(target_offset, false);
 }
 
 idx_t WriteAheadLog::WriteFlushMarker() {
@@ -592,7 +593,7 @@ idx_t WriteAheadLog::WriteFlushMarker() {
 	return target_offset;
 }
 
-void WriteAheadLog::SyncUpTo(idx_t target_offset) {
+void WriteAheadLog::SyncUpTo(idx_t target_offset, bool wait_for_batch) {
 	// PROTOTYPE BENCHMARK HACK - DO NOT COMMIT
 	// when DUCKDB_BENCH_SKIP_WAL_SYNC is set we skip the fsync to measure the no-fsync commit throughput ceiling
 	static const bool skip_wal_sync = getenv("DUCKDB_BENCH_SKIP_WAL_SYNC") != nullptr;
@@ -616,10 +617,10 @@ void WriteAheadLog::SyncUpTo(idx_t target_offset) {
 		// the fsync covers everything pushed to the operating system up to this point, including the flush
 		// markers of other concurrently committing transactions - they share this single fsync (group commit)
 		sync_in_progress = true;
-		bool wait_for_batch = batch_commits;
+		bool do_batch_wait = wait_for_batch && batch_commits;
 		lock.unlock();
 		auto sync_target = written_offset.load();
-		if (wait_for_batch) {
+		if (do_batch_wait) {
 			// other transactions were committing concurrently during the previous fsync
 			// before fsync-ing, give concurrently committing transactions a brief window to finish appending
 			// their flush markers, so that this fsync covers them as well and they do not have to wait for the

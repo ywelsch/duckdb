@@ -262,6 +262,14 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 		// not holding the WAL lock yet - grab it
 		guard = GetWALLock();
 	}
+	// Wait for commits that have written their WAL flush marker but are not yet published (group commit).
+	// The checkpoint snapshot would not include them, while the checkpoint removes their WAL entries -
+	// without waiting, such commits would be lost on restart. New pending commits cannot register while
+	// we hold the WAL lock.
+	auto &transaction_manager = db.GetTransactionManager();
+	if (transaction_manager.IsDuckTransactionManager()) {
+		transaction_manager.Cast<DuckTransactionManager>().WaitForPendingCommits();
+	}
 	if (active_checkpoint.HasCheckpointContext()) {
 		// While holding the WAL lock, if we have a context then start a checkpoint transaction.
 		// The start time of this transaction defines the visibility for checkpointing, any new commits are written
@@ -622,7 +630,7 @@ public:
 	//! Revert the commit
 	void RevertCommit() override;
 	// Make the commit persistent
-	void FlushCommit() override;
+	void FlushCommit(bool durable) override;
 
 	void AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
 	                     unique_ptr<PersistentCollectionData> row_group_data) override;
@@ -673,15 +681,19 @@ void SingleFileStorageCommitState::RevertCommit() {
 	state = WALCommitState::TRUNCATED;
 }
 
-void SingleFileStorageCommitState::FlushCommit() {
+void SingleFileStorageCommitState::FlushCommit(bool durable) {
 	if (state != WALCommitState::IN_PROGRESS) {
 		return;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	// This only writes the flush marker and pushes the data to the operating system - the fsync that makes the
-	// commit durable happens later via WriteAheadLog::SyncUpTo, outside of the transaction and WAL locks, so that
-	// concurrently committing transactions can share a single fsync (group commit).
-	wal.WriteFlushMarker();
+	auto target_offset = wal.WriteFlushMarker();
+	if (durable) {
+		// make the commit durable before returning (the caller holds the WAL lock - no batch can form)
+		wal.SyncUpTo(target_offset, false);
+	}
+	// otherwise only the flush marker is written and the data is pushed to the operating system - the fsync that
+	// makes the commit durable happens later via WriteAheadLog::SyncUpTo, outside of the transaction and WAL locks,
+	// so that concurrently committing transactions can share a single fsync (group commit)
 	state = WALCommitState::FLUSHED;
 }
 

@@ -130,7 +130,9 @@ public:
 	//! Ensure the WAL is fsynced at least up to the given target offset (as returned by WriteFlushMarker).
 	//! Safe to call without holding the WAL lock: concurrent callers elect a leader whose single fsync
 	//! covers all data pushed to the operating system so far (group commit).
-	void SyncUpTo(idx_t target_offset);
+	//! wait_for_batch enables the adaptive micro-batching wait - pass false when the caller holds the WAL lock
+	//! (no concurrent appends can arrive, so there is nothing to wait for).
+	void SyncUpTo(idx_t target_offset, bool wait_for_batch);
 	//! The WAL offset (logical bytes written) that has been pushed to the operating system so far
 	idx_t GetWrittenOffset() const {
 		return written_offset;

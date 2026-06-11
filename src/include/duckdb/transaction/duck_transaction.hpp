@@ -70,6 +70,13 @@ public:
 	//! commit failed, or an empty string if the commit was successful
 	ErrorData Commit(AttachedDatabase &db, CommitInfo &commit_info,
 	                 unique_ptr<StorageCommitState> commit_state) noexcept;
+	//! First phase of a deferred (group) commit: validate that the commit cannot fail anymore, then write the WAL
+	//! flush marker. Caller must hold the transaction lock and the WAL lock. After this succeeds, the commit can no
+	//! longer be aborted - it must be made durable (WriteAheadLog::SyncUpTo) and then published (PublishCommit).
+	ErrorData CommitToWAL(AttachedDatabase &db, CommitInfo &commit_info, StorageCommitState &commit_state) noexcept;
+	//! Second phase of a deferred (group) commit: make the committed changes visible to other transactions.
+	//! Caller must hold the transaction lock. A failure here is fatal - the commit is already durable in the WAL.
+	ErrorData PublishCommit(AttachedDatabase &db, CommitInfo &commit_info) noexcept;
 	//! Returns whether or not a commit of this transaction should trigger an automatic checkpoint
 	bool AutomaticCheckpoint(AttachedDatabase &db, const UndoBufferProperties &properties);
 

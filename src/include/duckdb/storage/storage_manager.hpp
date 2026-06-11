@@ -35,8 +35,10 @@ public:
 
 	//! Revert the commit
 	virtual void RevertCommit() = 0;
-	// Make the commit persistent
-	virtual void FlushCommit() = 0;
+	//! Write the WAL flush marker that completes the commit in the WAL.
+	//! If durable is set, also fsync the WAL before returning. If not, the caller must make the commit durable
+	//! via WriteAheadLog::SyncUpTo before acknowledging it (group commit).
+	virtual void FlushCommit(bool durable) = 0;
 
 	virtual void AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
 	                             unique_ptr<PersistentCollectionData> row_group_data) = 0;

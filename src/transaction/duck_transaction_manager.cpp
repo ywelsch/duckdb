@@ -281,6 +281,32 @@ void DuckTransactionManager::CleanupTransactions() {
 	}
 }
 
+void DuckTransactionManager::RegisterPendingCommit(transaction_t commit_id) {
+	lock_guard<mutex> guard(publish_lock);
+	pending_commit_publishes.insert(commit_id);
+}
+
+void DuckTransactionManager::WaitForPublishTurn(transaction_t commit_id) {
+	std::unique_lock<mutex> guard(publish_lock);
+	publish_cv.wait(guard, [&]() {
+		D_ASSERT(!pending_commit_publishes.empty());
+		return *pending_commit_publishes.begin() == commit_id;
+	});
+}
+
+void DuckTransactionManager::FinishPendingCommit(transaction_t commit_id) {
+	{
+		lock_guard<mutex> guard(publish_lock);
+		pending_commit_publishes.erase(commit_id);
+	}
+	publish_cv.notify_all();
+}
+
+void DuckTransactionManager::WaitForPendingCommits() {
+	std::unique_lock<mutex> guard(publish_lock);
+	publish_cv.wait(guard, [&]() { return pending_commit_publishes.empty(); });
+}
+
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
 	unique_lock<mutex> t_lock(transaction_lock);
@@ -315,6 +341,10 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		}
 	}
 	bool should_write_to_wal = transaction.ShouldWriteToWAL(db);
+	// Catalog-changing commits cannot defer publishing their changes (see below) - they publish while holding the
+	// transaction lock. To guarantee that no catalog change can interleave between a data commit's WAL flush marker
+	// and its publish, they first wait for all pending (unpublished) commits to be published.
+	bool has_catalog_changes = undo_properties.has_catalog_changes || undo_properties.has_dropped_entries;
 	if (should_write_to_wal) {
 		auto &storage_manager = db.GetStorageManager().Cast<SingleFileStorageManager>();
 		// if we are committing changes and we are not doing a "checkpoint instead of WAL write"
@@ -331,6 +361,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		// Commit the changes to the WAL.
 		if (!skip_wal_write_due_to_checkpoint) {
 			error = transaction.WriteToWAL(context, db, commit_state);
+			if (!error.HasError() && has_catalog_changes) {
+				// we hold the WAL lock (no new pending commits can register), but not the transaction lock
+				// (pending commits can finish publishing)
+				WaitForPendingCommits();
+			}
 		}
 
 		// after we finish writing to the WAL we grab the transaction lock again
@@ -347,6 +382,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			// unlock the transaction lock while we are writing to the WAL
 			t_lock.unlock();
 			error = transaction.WriteToWAL(context, db, commit_state);
+			if (!error.HasError() && has_catalog_changes) {
+				WaitForPendingCommits();
+			}
 			t_lock.lock();
 			skip_wal_write_due_to_checkpoint = false;
 		}
@@ -362,6 +400,15 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	CommitInfo info;
 	info.commit_id = GetCommitTimestamp();
 
+	// Group commit: data-only commits that write to the WAL defer publishing (making their changes visible) until
+	// after their WAL entries have been fsynced. This way no transaction can ever observe a commit that is not yet
+	// durable, while the fsync itself happens outside of the transaction lock and the WAL lock, so that
+	// concurrently committing transactions can share a single fsync.
+	// Catalog-changing commits take the non-deferred path: they publish under the transaction lock and fsync inline
+	// before releasing it - no new transaction can start in the meantime, so those commits are also never visible
+	// before they are durable.
+	bool defer_publish = !error.HasError() && commit_state && !has_catalog_changes;
+
 	// commit the UndoBuffer of the transaction
 	if (!error.HasError()) {
 		if (HasOtherTransactions(transaction)) {
@@ -369,11 +416,18 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		} else {
 			info.active_transactions = ActiveTransactionState::NO_OTHER_TRANSACTIONS;
 		}
-		error = transaction.Commit(db, info, std::move(commit_state));
+		if (defer_publish) {
+			// only validate the commit and write the WAL flush marker
+			// the commit is published after the group fsync below
+			error = transaction.CommitToWAL(db, info, *commit_state);
+		} else {
+			error = transaction.Commit(db, info, std::move(commit_state));
+		}
 	}
 
 	if (error.HasError()) {
 		DUCKDB_LOG(context, TransactionLogType, db, "Rollback (after failed commit)", info.commit_id);
+		defer_publish = false;
 
 		// COMMIT not successful: ROLLBACK.
 		checkpoint_decision = CheckpointDecision(error.Message());
@@ -385,37 +439,75 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			    "Failed to rollback transaction. Cannot continue operation.\nOriginal Error: %s\nRollback Error: %s",
 			    error.Message(), rollback_error.Message());
 		}
-	} else {
+	} else if (!defer_publish) {
 		DUCKDB_LOG(context, TransactionLogType, db, "Commit", info.commit_id);
-		last_commit = info.commit_id;
+		last_commit = MaxValue<transaction_t>(last_commit, info.commit_id);
 
 		// check if catalog changes were made
 		if (transaction.catalog_version >= TRANSACTION_ID_START) {
 			transaction.catalog_version = ++last_committed_version;
 		}
+	} else {
+		// deferred publish: the commit is complete in the WAL but not yet visible
+		RegisterPendingCommit(info.commit_id);
 	}
 	OnCommitCheckpointDecision(checkpoint_decision, transaction);
-
-	// Group commit: if we have written to the WAL, the flush marker has been written and pushed to the operating
-	// system, but not yet fsynced. Capture the WAL and the offset we need to sync to make this commit durable.
-	// The actual fsync happens below, after releasing the transaction lock and the WAL lock, so that concurrently
-	// committing transactions can share a single fsync.
-	// The shared_ptr keeps the WAL alive even if a concurrent checkpoint swaps it out (the swap itself fully syncs
-	// the old WAL before replacing it, so our sync target is always reachable).
-	shared_ptr<WriteAheadLog> sync_wal;
-	idx_t sync_target = 0;
-	if (!error.HasError() && should_write_to_wal && !skip_wal_write_due_to_checkpoint) {
-		D_ASSERT(held_wal_lock.owns_lock());
-		sync_wal = db.GetStorageManager().GetWALShared();
-		if (sync_wal) {
-			sync_target = sync_wal->GetWrittenOffset();
-		}
-	}
 
 	if (!checkpoint_decision.can_checkpoint && lock) {
 		// we won't checkpoint after all due to an error during commit: unlock the checkpoint lock again
 		skip_wal_write_due_to_checkpoint = false;
 		lock.reset();
+	}
+
+	if (defer_publish) {
+		// deferred (group) commit: capture the WAL and the offset we need to sync to make this commit durable
+		// the shared_ptr keeps the WAL alive even if a concurrent checkpoint swaps it out (the swap fully syncs
+		// the old WAL before replacing it, so our sync target is always reachable)
+		D_ASSERT(held_wal_lock.owns_lock());
+		auto sync_wal = db.GetStorageManager().GetWALShared();
+		idx_t sync_target = sync_wal ? sync_wal->GetWrittenOffset() : 0;
+
+		// release all locks - other transactions can start, commit and append to the WAL while we wait for the
+		// fsync, and their flush markers are covered by the same fsync (or a later one)
+		// transactions that start in this window do not see our commit yet: it is published below, after the fsync
+		t_lock.unlock();
+		held_wal_lock.unlock();
+
+		try {
+			if (sync_wal) {
+				sync_wal->SyncUpTo(sync_target, true);
+			}
+		} catch (std::exception &ex) {
+			// the WAL cannot be guaranteed to be durable, and the flush marker can no longer be truncated
+			// (other transactions may have appended in the meantime): this is fatal
+			FinishPendingCommit(info.commit_id);
+			ErrorData sync_error(ex);
+			throw FatalException("Failed to sync WAL during commit. Cannot continue operation.\nError: %s",
+			                     sync_error.Message());
+		}
+
+		// publish in commit order - this keeps recently_committed_transactions ordered on commit_id and ensures
+		// that the visible state always corresponds to a prefix of the WAL (matching replay after a crash)
+		WaitForPublishTurn(info.commit_id);
+
+		t_lock.lock();
+		// other transactions may have started or committed while we were syncing - recompute the state
+		if (HasOtherTransactions(transaction)) {
+			info.active_transactions = ActiveTransactionState::OTHER_TRANSACTIONS;
+		} else {
+			info.active_transactions = ActiveTransactionState::NO_OTHER_TRANSACTIONS;
+		}
+		auto publish_error = transaction.PublishCommit(db, info);
+		if (publish_error.HasError()) {
+			// the commit is durable in the WAL and can no longer be rolled back: this is fatal
+			// (after a restart, WAL replay applies the transaction, which is the correct committed state)
+			t_lock.unlock();
+			FinishPendingCommit(info.commit_id);
+			throw FatalException("Failed to publish commit after WAL write. Cannot continue operation.\nError: %s",
+			                     publish_error.Message());
+		}
+		DUCKDB_LOG(context, TransactionLogType, db, "Commit", info.commit_id);
+		last_commit = MaxValue<transaction_t>(last_commit, info.commit_id);
 	}
 
 	// commit successful: remove the transaction id from the list of active transactions
@@ -438,20 +530,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	if (!skip_wal_write_due_to_checkpoint && held_wal_lock.owns_lock()) {
 		held_wal_lock.unlock();
 	}
-
-	// Group commit: make the commit durable before acknowledging it to the client.
-	// We no longer hold the transaction lock or the WAL lock here, so other transactions can append to the WAL and
-	// commit while we wait - their flush markers are covered by the same fsync (or a later one).
-	if (sync_wal) {
-		try {
-			sync_wal->SyncUpTo(sync_target);
-		} catch (std::exception &ex) {
-			// the commit has already been applied in-memory and other transactions may have built on top of it -
-			// we can no longer roll back, and the WAL cannot be guaranteed to be durable: this is fatal
-			ErrorData sync_error(ex);
-			throw FatalException("Failed to sync WAL after commit. Cannot continue operation.\nError: %s",
-			                     sync_error.Message());
-		}
+	if (defer_publish) {
+		// the commit is now published - wake up any waiters (later commits and checkpoints)
+		FinishPendingCommit(info.commit_id);
 	}
 
 	CleanupTransactions();

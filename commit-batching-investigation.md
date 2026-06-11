@@ -207,10 +207,39 @@ Takeaways:
 2. **Latency under load transforms completely**: at 64 connections on degraded EFS, a single-row commit takes 2.2 *seconds* in the baseline (queueing behind 63 other fsyncs) vs 61 ms with group commit (~2 fsync periods).
 3. Batching efficiency at 64 threads is ~31–35 commits per fsync (~50%) — the remaining gap is the fixed micro-wait window (10 × 100 µs requests) versus staggered arrivals; a latency-proportional wait window would close most of it. At ≤16 threads efficiency is 70–85%.
 
-### Open questions for productionizing
+## Visibility-before-durability fix (2026-06-11, second commit)
 
-1. **Visibility-before-durability window**: a concurrent reader (different connection) can observe a commit whose fsync hasn't completed; on crash that data vanishes. Today's code prevents this by holding `transaction_lock` during the fsync. Fixing it properly means publishing the in-memory commit only after the group sync (durability before visibility), which requires auditing/moving everything that can throw in `DuckTransaction::Commit` to before the flush marker. Postgres makes the same strict ordering choice; SQLite (WAL mode, `synchronous=NORMAL`) accepts the window.
-2. **fsync failure after in-memory commit** is currently `FatalException` — reasonable (fsyncgate), but should be reviewed.
-3. **Micro-wait tuning**: 100 µs × 10 rounds is calibrated for ms-class sync latency; on very fast devices (PLP NVMe, ~20 µs fsync) the wait should scale down or be a setting (cf. PostgreSQL `commit_delay`/`commit_siblings`).
-4. The optimistic-row-group `FileSync` on the DB file (`duck_transaction.cpp:227`) is still per-transaction, under the WAL lock.
-5. `make test_configs` / extensive CI sweep not yet run; thread-sanitizer run advisable for the new condvar protocol.
+The prototype initially published the in-memory commit before the group fsync, so a transaction starting during the sync window could observe a commit that wasn't durable yet. Fixed with Postgres-style strict ordering: **a commit only becomes visible after its WAL entries are fsynced.**
+
+### Design
+
+Data-only commits that write to the WAL now run as **deferred (group) commits**:
+
+1. *WAL phase* (under `transaction_lock` + WAL lock): `DuckTransaction::CommitToWAL` — first `UndoBuffer::ValidateCommitConflicts()` (the table-was-altered checks that `CommitState::CommitEntry` would otherwise raise during publish — they must fire **before** the flush marker, because after it the commit can no longer abort), then write the `WAL_FLUSH` marker. Failure here truncates the WAL and rolls back exactly as before.
+2. Register in `pending_commit_publishes` (ordered set in `DuckTransactionManager`), release both locks, `SyncUpTo` (batched fsync).
+3. `WaitForPublishTurn` — publishes happen in commit-id order, which keeps `recently_committed_transactions` ordered (a documented invariant of its GC scan) and ensures the visible state is always a *prefix of the WAL*, matching what replay would reconstruct after a crash.
+4. Re-acquire `transaction_lock`, `DuckTransaction::PublishCommit` (the `undo_buffer.Commit` that sets commit ids on versions/catalog = visibility), bookkeeping, remove from active transactions, `FinishPendingCommit`.
+
+A publish or sync failure after the marker is durable is a `FatalException` — the WAL says committed, so crash-restart replays the transaction, which is the correct committed state (same rationale as Postgres PANIC after the commit record is flushed). The conflict validation in step 1 makes this path unreachable in practice.
+
+Two interleaving hazards required explicit guards:
+
+- **Catalog commits**: the alter-conflict check reads catalog state, so no catalog change may interleave between a data commit's marker and its publish. Catalog-changing commits therefore stay on the legacy synchronous path (publish + *inline durable fsync* via `FlushCommit(durable=true)` under `transaction_lock` — exactly the pre-prototype behavior, anomaly-free since no transaction can start meanwhile) **and** they first `WaitForPendingCommits()` while holding the WAL lock (which blocks new registrations). This freezes the catalog between any data commit's validation and its publish.
+- **Checkpoints**: a checkpoint snapshot would not include a durable-but-unpublished commit while still deleting its WAL — losing it on restart. `WALStartCheckpoint` now calls `WaitForPendingCommits()` after acquiring the WAL lock, before taking the snapshot.
+
+Deadlock safety: lock order is WAL lock → `transaction_lock` → `publish_lock`; waiters on `publish_cv` hold neither the transaction lock nor the WAL lock, and publishers need only `transaction_lock`, which no waiter holds.
+
+### Validation & performance after the fix
+
+- `test/sql/transactions/*`, `test/sql/storage/wal/*`, `test/sql/storage/checkpoint/*`, `test/sql/catalog/*` (123 tests), `test/sql/alter/*` (107 tests, incl. `test_drop_col_concurrent_dml_conflict.test` which exercises the moved conflict check), `test/sql/storage/*`: all pass.
+- SIGKILL crash test: clean recovery, consistent prefix.
+- Performance unchanged: 209/2770 TPS at 1/16 threads (F_FULLFSYNC), 82/1110 TPS at 1/16 threads (10 ms); 64 threads at 10 ms reaches 2834 TPS.
+
+### Remaining open questions for productionizing
+
+1. **fsync/publish failure after the marker is durable** is `FatalException` — principled (matches Postgres PANIC semantics), but should be reviewed; the validation pass is the safeguard that keeps it unreachable.
+2. **Micro-wait tuning**: 100 µs × 10 rounds is calibrated for ms-class sync latency; on very fast devices (PLP NVMe, ~20 µs fsync) the wait should scale down or be a setting (cf. PostgreSQL `commit_delay`/`commit_siblings`).
+3. The optimistic-row-group `FileSync` on the DB file (`duck_transaction.cpp` in `WriteToWAL`) is still per-transaction, under the WAL lock.
+4. `ValidateCommitConflicts` duplicates the conflict conditions in `CommitState::CommitEntry` — keep in sync, or refactor to share.
+5. Out-of-tree storage extensions implementing `StorageCommitState` need the `FlushCommit(bool durable)` signature change.
+6. `make test_configs` / full extensive CI sweep not yet run; thread-sanitizer run advisable for the condvar protocols.
