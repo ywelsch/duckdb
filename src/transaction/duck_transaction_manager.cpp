@@ -396,6 +396,22 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 	OnCommitCheckpointDecision(checkpoint_decision, transaction);
 
+	// Group commit: if we have written to the WAL, the flush marker has been written and pushed to the operating
+	// system, but not yet fsynced. Capture the WAL and the offset we need to sync to make this commit durable.
+	// The actual fsync happens below, after releasing the transaction lock and the WAL lock, so that concurrently
+	// committing transactions can share a single fsync.
+	// The shared_ptr keeps the WAL alive even if a concurrent checkpoint swaps it out (the swap itself fully syncs
+	// the old WAL before replacing it, so our sync target is always reachable).
+	shared_ptr<WriteAheadLog> sync_wal;
+	idx_t sync_target = 0;
+	if (!error.HasError() && should_write_to_wal && !skip_wal_write_due_to_checkpoint) {
+		D_ASSERT(held_wal_lock.owns_lock());
+		sync_wal = db.GetStorageManager().GetWALShared();
+		if (sync_wal) {
+			sync_target = sync_wal->GetWrittenOffset();
+		}
+	}
+
 	if (!checkpoint_decision.can_checkpoint && lock) {
 		// we won't checkpoint after all due to an error during commit: unlock the checkpoint lock again
 		skip_wal_write_due_to_checkpoint = false;
@@ -421,6 +437,21 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	// this prevents any concurrent transactions from happening during this time
 	if (!skip_wal_write_due_to_checkpoint && held_wal_lock.owns_lock()) {
 		held_wal_lock.unlock();
+	}
+
+	// Group commit: make the commit durable before acknowledging it to the client.
+	// We no longer hold the transaction lock or the WAL lock here, so other transactions can append to the WAL and
+	// commit while we wait - their flush markers are covered by the same fsync (or a later one).
+	if (sync_wal) {
+		try {
+			sync_wal->SyncUpTo(sync_target);
+		} catch (std::exception &ex) {
+			// the commit has already been applied in-memory and other transactions may have built on top of it -
+			// we can no longer roll back, and the WAL cannot be guaranteed to be durable: this is fatal
+			ErrorData sync_error(ex);
+			throw FatalException("Failed to sync WAL after commit. Cannot continue operation.\nError: %s",
+			                     sync_error.Message());
+		}
 	}
 
 	CleanupTransactions();

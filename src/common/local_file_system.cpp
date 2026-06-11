@@ -830,7 +830,27 @@ bool LocalFileSystem::ListFilesExtended(const string &directory,
 void LocalFileSystem::FileSync(FileHandle &handle) {
 	int fd = handle.Cast<UnixFileHandle>().fd;
 
-#if HAVE_FULLFSYNC
+	// PROTOTYPE BENCHMARK HACK - DO NOT COMMIT
+	// force F_FULLFSYNC (true durability on macOS) to simulate durable commit cost
+	static const bool force_fullfsync = getenv("DUCKDB_BENCH_FULLFSYNC") != nullptr;
+	if (force_fullfsync) {
+		if (::fcntl(fd, F_FULLFSYNC) == 0) {
+			return;
+		}
+	}
+	// PROTOTYPE BENCHMARK HACK - DO NOT COMMIT
+	// simulate a slow device: plain fsync plus an artificial delay of N milliseconds
+	static const int sync_delay_ms =
+	    getenv("DUCKDB_BENCH_SYNC_DELAY_MS") ? atoi(getenv("DUCKDB_BENCH_SYNC_DELAY_MS")) : 0;
+	if (sync_delay_ms > 0) {
+		if (::fsync(fd) != 0) {
+			throw IOException("Could not fsync file \"%s\": %s", handle.GetPath(), strerror(errno));
+		}
+		::usleep(static_cast<useconds_t>(sync_delay_ms) * 1000);
+		return;
+	}
+
+#ifdef F_FULLFSYNC
 	// On macOS and iOS, fsync() doesn't guarantee durability past power failures. fcntl(F_FULLFSYNC) is required for
 	// that purpose. Some filesystems don't support fcntl(F_FULLFSYNC), and require a fallback to fsync().
 	if (::fcntl(fd, F_FULLFSYNC) == 0) {

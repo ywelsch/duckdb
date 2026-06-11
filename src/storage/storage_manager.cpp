@@ -214,6 +214,13 @@ optional_ptr<WriteAheadLog> StorageManager::GetWAL() {
 	return wal.get();
 }
 
+shared_ptr<WriteAheadLog> StorageManager::GetWALShared() {
+	if (InMemory() || read_only || !load_complete) {
+		return nullptr;
+	}
+	return wal;
+}
+
 // comparison used to see whether the storage version is compatible
 bool StorageManager::TargetAtLeastVersion(StorageVersion target_version, idx_t storage_version) {
 	if (storage_version < static_cast<idx_t>(target_version)) {
@@ -671,7 +678,10 @@ void SingleFileStorageCommitState::FlushCommit() {
 		return;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	wal.Flush();
+	// This only writes the flush marker and pushes the data to the operating system - the fsync that makes the
+	// commit durable happens later via WriteAheadLog::SyncUpTo, outside of the transaction and WAL locks, so that
+	// concurrently committing transactions can share a single fsync (group commit).
+	wal.WriteFlushMarker();
 	state = WALCommitState::FLUSHED;
 }
 

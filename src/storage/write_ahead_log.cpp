@@ -24,6 +24,9 @@
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
 
+#include <chrono>
+#include <thread>
+
 namespace duckdb {
 
 constexpr uint64_t WAL_VERSION_NUMBER = 2;
@@ -568,14 +571,90 @@ void WriteAheadLog::Flush() {
 	if (!writer) {
 		return;
 	}
+	auto target_offset = WriteFlushMarker();
+	SyncUpTo(target_offset);
+}
+
+idx_t WriteAheadLog::WriteFlushMarker() {
+	if (!writer) {
+		return 0;
+	}
 
 	// write an empty entry
 	WriteAheadLogSerializer serializer(*this, WALType::WAL_FLUSH);
 	serializer.End();
 
-	// flushes all changes made to the WAL to disk
-	writer->Sync();
+	// push all buffered data to the operating system - the fsync happens separately in SyncUpTo
+	writer->Flush();
+	auto target_offset = writer->GetTotalWritten();
+	written_offset = target_offset;
 	storage_manager.SetWALSize(writer->GetFileSize());
+	return target_offset;
+}
+
+void WriteAheadLog::SyncUpTo(idx_t target_offset) {
+	// PROTOTYPE BENCHMARK HACK - DO NOT COMMIT
+	// when DUCKDB_BENCH_SKIP_WAL_SYNC is set we skip the fsync to measure the no-fsync commit throughput ceiling
+	static const bool skip_wal_sync = getenv("DUCKDB_BENCH_SKIP_WAL_SYNC") != nullptr;
+
+	std::unique_lock<mutex> lock(sync_mutex);
+	if (skip_wal_sync) {
+		synced_offset = MaxValue(synced_offset, target_offset);
+		return;
+	}
+	while (synced_offset < target_offset) {
+		if (sync_in_progress) {
+			// another thread is currently performing an fsync - wait for it to finish
+			// its fsync might not cover our target offset (it could have started before our data was written),
+			// in which case we loop around and either become the next leader or wait again
+			sync_waiters++;
+			sync_cv.wait(lock);
+			sync_waiters--;
+			continue;
+		}
+		// no fsync in progress - this thread becomes the sync leader
+		// the fsync covers everything pushed to the operating system up to this point, including the flush
+		// markers of other concurrently committing transactions - they share this single fsync (group commit)
+		sync_in_progress = true;
+		bool wait_for_batch = batch_commits;
+		lock.unlock();
+		auto sync_target = written_offset.load();
+		if (wait_for_batch) {
+			// other transactions were committing concurrently during the previous fsync
+			// before fsync-ing, give concurrently committing transactions a brief window to finish appending
+			// their flush markers, so that this fsync covers them as well and they do not have to wait for the
+			// next one (micro-batching, similar in spirit to PostgreSQL's commit_delay)
+			for (idx_t i = 0; i < 10; i++) {
+				std::this_thread::sleep_for(std::chrono::microseconds(100));
+				auto new_target = written_offset.load();
+				if (new_target == sync_target) {
+					// no new appends - stop waiting
+					break;
+				}
+				sync_target = new_target;
+			}
+		}
+		ErrorData error;
+		try {
+			writer->SyncData();
+		} catch (std::exception &ex) {
+			error = ErrorData(ex);
+		}
+		// detect concurrent commit activity: did other transactions append while we were syncing?
+		auto post_sync_written = written_offset.load();
+		lock.lock();
+		sync_in_progress = false;
+		// adaptive micro-batching: only wait for a batch to form when there is concurrent commit activity,
+		// i.e. other transactions are waiting on this fsync or appended to the WAL while we were syncing
+		batch_commits = sync_waiters > 0 || post_sync_written > sync_target;
+		if (!error.HasError()) {
+			synced_offset = MaxValue(synced_offset, sync_target);
+		}
+		sync_cv.notify_all();
+		if (error.HasError()) {
+			error.Throw();
+		}
+	}
 }
 
 void WriteAheadLog::IncrementWALEntriesCount() {

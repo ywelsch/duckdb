@@ -16,6 +16,8 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/storage/block.hpp"
 
+#include <condition_variable>
+
 namespace duckdb {
 
 struct AlterInfo;
@@ -119,7 +121,20 @@ public:
 	//! Truncate the WAL to a previous size, and clear anything currently set in the writer.
 	//! Used during RevertCommit.
 	void Truncate(idx_t size);
+	//! Write a WAL_FLUSH marker, push all buffered data to the operating system and fsync (fully durable).
 	void Flush();
+	//! Write a WAL_FLUSH marker and push all buffered data to the operating system, WITHOUT fsync-ing.
+	//! Returns the WAL offset that a subsequent SyncUpTo() call must reach to make the data durable.
+	//! The caller must hold the WAL lock of the storage manager.
+	idx_t WriteFlushMarker();
+	//! Ensure the WAL is fsynced at least up to the given target offset (as returned by WriteFlushMarker).
+	//! Safe to call without holding the WAL lock: concurrent callers elect a leader whose single fsync
+	//! covers all data pushed to the operating system so far (group commit).
+	void SyncUpTo(idx_t target_offset);
+	//! The WAL offset (logical bytes written) that has been pushed to the operating system so far
+	idx_t GetWrittenOffset() const {
+		return written_offset;
+	}
 	//! Increment the WAL entry count, which is used for the auto-checkpoint threshold.
 	void IncrementWALEntriesCount();
 	void WriteCheckpoint(MetaBlockPointer meta_block);
@@ -131,6 +146,25 @@ protected:
 	string wal_path;
 	atomic<WALInitState> init_state;
 	optional_idx checkpoint_iteration;
+
+	//! Group commit state.
+	//! Offsets are logical byte counters (BufferedFileWriter::GetTotalWritten), they increase monotonically
+	//! across committed flush markers and are not affected by truncation of reverted (uncommitted) entries.
+	//! Logical bytes pushed to the operating system so far - only updated while holding the storage manager WAL lock.
+	atomic<idx_t> written_offset {0};
+	//! Protects synced_offset and sync_in_progress.
+	mutex sync_mutex;
+	//! Signalled when a leader finishes an fsync.
+	std::condition_variable sync_cv;
+	//! Logical bytes that are durable on disk.
+	idx_t synced_offset = 0;
+	//! Whether a sync leader is currently performing an fsync.
+	bool sync_in_progress = false;
+	//! The number of threads currently waiting for an fsync to complete.
+	idx_t sync_waiters = 0;
+	//! Whether concurrent commit activity was detected during the last fsync - if set, the next sync leader
+	//! briefly waits for concurrent committers to append their flush markers before fsync-ing (micro-batching).
+	bool batch_commits = false;
 };
 
 } // namespace duckdb
