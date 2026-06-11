@@ -673,6 +673,13 @@
         "struct": "ErrorsAsJSONSetting"
     },
     {
+        "name": "experimental_group_commit",
+        "description": "EXPERIMENTAL: Batch the WAL fsync of concurrently committing transactions (group commit). Commits are acknowledged only after their WAL entries are durable, and are only published once durable.",
+        "type": "BOOLEAN",
+        "scope": "global",
+        "default_value": "false"
+    },
+    {
         "name": "experimental_metadata_reuse",
         "description": "EXPERIMENTAL: Re-use row group and table metadata when checkpointing.",
         "type": "BOOLEAN",

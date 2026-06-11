@@ -281,9 +281,15 @@ void DuckTransactionManager::CleanupTransactions() {
 	}
 }
 
-void DuckTransactionManager::RegisterPendingCommit(transaction_t commit_id) {
+bool DuckTransactionManager::RegisterPendingCommit(transaction_t commit_id) {
 	lock_guard<mutex> guard(publish_lock);
+	if (catalog_gate_waiters > 0) {
+		// a DDL operation is waiting for pending commits to drain - do not admit new deferred commits,
+		// the caller must fall back to the synchronous commit path
+		return false;
+	}
 	pending_commit_publishes.insert(commit_id);
+	return true;
 }
 
 void DuckTransactionManager::WaitForPublishTurn(transaction_t commit_id) {
@@ -305,6 +311,18 @@ void DuckTransactionManager::FinishPendingCommit(transaction_t commit_id) {
 void DuckTransactionManager::WaitForPendingCommits() {
 	std::unique_lock<mutex> guard(publish_lock);
 	publish_cv.wait(guard, [&]() { return pending_commit_publishes.empty(); });
+}
+
+unique_lock<mutex> DuckTransactionManager::BlockPendingCommits() {
+	unique_lock<mutex> guard(publish_lock);
+	// while we wait, new commits cannot register as pending (they fall back to the synchronous path) -
+	// otherwise a steady stream of deferred commits could starve the DDL operation indefinitely
+	catalog_gate_waiters++;
+	publish_cv.wait(guard, [&]() { return pending_commit_publishes.empty(); });
+	catalog_gate_waiters--;
+	// return while holding the publish lock: registration stays blocked until the caller releases it,
+	// covering the catalog version attachment
+	return guard;
 }
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
@@ -400,14 +418,24 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	CommitInfo info;
 	info.commit_id = GetCommitTimestamp();
 
-	// Group commit: data-only commits that write to the WAL defer publishing (making their changes visible) until
-	// after their WAL entries have been fsynced. This way no transaction can ever observe a commit that is not yet
-	// durable, while the fsync itself happens outside of the transaction lock and the WAL lock, so that
-	// concurrently committing transactions can share a single fsync.
+	// Group commit (experimental, off by default): data-only commits that write to the WAL defer publishing
+	// (making their changes visible) until after their WAL entries have been fsynced. This way no transaction can
+	// ever observe a commit that is not yet durable, while the fsync itself happens outside of the transaction
+	// lock and the WAL lock, so that concurrently committing transactions can share a single fsync.
 	// Catalog-changing commits take the non-deferred path: they publish under the transaction lock and fsync inline
 	// before releasing it - no new transaction can start in the meantime, so those commits are also never visible
 	// before they are durable.
-	bool defer_publish = !error.HasError() && commit_state && !has_catalog_changes;
+	// With the setting disabled, all commits take the non-deferred path, which behaves exactly like the
+	// pre-group-commit code (publish + inline durable fsync under the locks). The pending-commit drains and the
+	// catalog gate are kept unconditional: they are no-ops while no deferred commits exist, which also makes
+	// toggling the setting at runtime safe.
+	bool defer_publish = !error.HasError() && commit_state && !has_catalog_changes &&
+	                     Settings::Get<ExperimentalGroupCommitSetting>(db.GetDatabase());
+	if (defer_publish && !RegisterPendingCommit(info.commit_id)) {
+		// a DDL operation is waiting for pending commits to drain before attaching a new catalog version -
+		// fall back to the synchronous commit path (publish + inline fsync under the locks)
+		defer_publish = false;
+	}
 
 	// commit the UndoBuffer of the transaction
 	if (!error.HasError()) {
@@ -417,9 +445,13 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			info.active_transactions = ActiveTransactionState::NO_OTHER_TRANSACTIONS;
 		}
 		if (defer_publish) {
-			// only validate the commit and write the WAL flush marker
-			// the commit is published after the group fsync below
+			// only validate the commit and write the WAL flush marker - the commit is published after the group
+			// fsync below. We registered as pending BEFORE validating: until we publish, no catalog version can be
+			// attached to any table (see BlockPendingCommits), so the validation stays authoritative.
 			error = transaction.CommitToWAL(db, info, *commit_state);
+			if (error.HasError()) {
+				FinishPendingCommit(info.commit_id);
+			}
 		} else {
 			error = transaction.Commit(db, info, std::move(commit_state));
 		}
@@ -447,10 +479,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		if (transaction.catalog_version >= TRANSACTION_ID_START) {
 			transaction.catalog_version = ++last_committed_version;
 		}
-	} else {
-		// deferred publish: the commit is complete in the WAL but not yet visible
-		RegisterPendingCommit(info.commit_id);
 	}
+	// (deferred commits remain registered as pending: the commit is complete in the WAL but not yet visible)
 	OnCommitCheckpointDecision(checkpoint_decision, transaction);
 
 	if (!checkpoint_decision.can_checkpoint && lock) {

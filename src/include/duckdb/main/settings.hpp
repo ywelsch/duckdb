@@ -1028,6 +1028,18 @@ struct ErrorsAsJSONSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct ExperimentalGroupCommitSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "experimental_group_commit";
+	static constexpr const char *Description =
+	    "EXPERIMENTAL: Batch the WAL fsync of concurrently committing transactions (group commit). Commits are "
+	    "acknowledged only after their WAL entries are durable, and are only published once durable.";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct ExperimentalMetadataReuseSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "experimental_metadata_reuse";

@@ -90,6 +90,13 @@ public:
 	//! visibility. The caller must hold the WAL lock (so no new pending commits can register) and must NOT hold
 	//! the transaction lock (pending commits need it to publish).
 	void WaitForPendingCommits();
+	//! Wait until no pending (unpublished) commits exist, then return while holding the publish lock - blocking
+	//! new deferred commits from registering until the returned lock is released. Used by DDL (ALTER/DROP) to
+	//! attach a new catalog version: a deferred commit validates against the catalog before writing its WAL flush
+	//! marker, and that validation must stay authoritative until the commit is published. While a caller is
+	//! waiting, new commits fall back to the synchronous commit path instead of deferring (avoids starvation).
+	//! The caller must NOT hold the transaction lock or the WAL lock.
+	unique_lock<mutex> BlockPendingCommits();
 
 protected:
 	struct CheckpointDecision {
@@ -119,8 +126,10 @@ private:
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
 
-	//! Register a commit that has written its WAL flush marker but is not yet published.
-	void RegisterPendingCommit(transaction_t commit_id);
+	//! Register a commit that is about to write its WAL flush marker and defer its publish.
+	//! Returns false if a DDL gate is currently waiting (see BlockPendingCommits) - the commit must then
+	//! fall back to the synchronous commit path.
+	bool RegisterPendingCommit(transaction_t commit_id);
 	//! Wait until all earlier pending commits have been published. Publishing in commit order keeps
 	//! recently_committed_transactions ordered on commit_id and matches WAL replay order.
 	void WaitForPublishTurn(transaction_t commit_id);
@@ -164,6 +173,9 @@ private:
 	//! Lock ordering: transaction_lock -> publish_lock. Waiting on publish_cv requires holding neither
 	//! the transaction lock nor the WAL lock.
 	set<transaction_t> pending_commit_publishes;
+	//! Number of DDL operations currently waiting in BlockPendingCommits. While non-zero, new commits
+	//! cannot register as pending and fall back to the synchronous commit path.
+	idx_t catalog_gate_waiters = 0;
 
 	//! Only one cleanup can be active at any time.
 	mutex cleanup_lock;

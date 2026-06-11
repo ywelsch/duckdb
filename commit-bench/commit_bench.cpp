@@ -32,6 +32,13 @@ int main(int argc, char **argv) {
 			fprintf(stderr, "setup failed: %s\n", res->GetError().c_str());
 			return 1;
 		}
+		if (getenv("DUCKDB_BENCH_GROUP_COMMIT")) {
+			res = con.Query("SET experimental_group_commit=true");
+			if (res->HasError()) {
+				fprintf(stderr, "enabling group commit failed: %s\n", res->GetError().c_str());
+				return 1;
+			}
+		}
 		con.Query("CREATE TABLE t (i BIGINT)");
 	}
 

@@ -23,6 +23,16 @@
 
 namespace duckdb {
 
+//! Block deferred (group) commits from being in-flight while a new catalog version is attached - see
+//! DuckTransactionManager::BlockPendingCommits. Returns a lock that must be held during the attachment.
+static unique_lock<mutex> BlockPendingDeferredCommits(Catalog &catalog) {
+	auto &transaction_manager = catalog.GetAttached().GetTransactionManager();
+	if (!transaction_manager.IsDuckTransactionManager()) {
+		return unique_lock<mutex>();
+	}
+	return transaction_manager.Cast<DuckTransactionManager>().BlockPendingCommits();
+}
+
 void CatalogEntryMap::AddEntry(unique_ptr<CatalogEntry> entry) {
 	auto name = entry->name;
 
@@ -349,6 +359,10 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 		}
 	}
 
+	// Block deferred (group) commits from being in-flight while we attach the new catalog version:
+	// a deferred commit validates against the catalog before writing its WAL flush marker, and that validation
+	// must stay authoritative until the commit is published (see DuckTransactionManager::BlockPendingCommits).
+	auto publish_gate = BlockPendingDeferredCommits(catalog);
 	// lock the catalog for writing
 	unique_lock<mutex> write_lock(catalog.GetWriteLock());
 	// lock this catalog set to disallow reading
@@ -391,6 +405,11 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 
 	read_lock.unlock();
 	write_lock.unlock();
+	// release the publish gate BEFORE updating the dependency manager: it drops/creates dependency entries
+	// through CatalogSet::DropEntry, which acquires the publish gate itself (it is not re-entrant)
+	if (publish_gate.owns_lock()) {
+		publish_gate.unlock();
+	}
 
 	// Check the dependency manager to verify that there are no conflicting dependencies with this alter
 	catalog.GetDependencyManager()->AlterObject(transaction, *entry, *new_entry, alter_info);
@@ -447,6 +466,8 @@ bool CatalogSet::DropEntry(CatalogTransaction transaction, const Identifier &nam
 	if (!DropDependencies(transaction, name, cascade, allow_drop_internal)) {
 		return false;
 	}
+	// block deferred (group) commits while attaching the tombstone version (see AlterEntry)
+	auto publish_gate = BlockPendingDeferredCommits(catalog);
 	lock_guard<mutex> write_lock(catalog.GetWriteLock());
 	lock_guard<mutex> read_lock(catalog_lock);
 	return DropEntryInternal(transaction, name, allow_drop_internal);
