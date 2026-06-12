@@ -20,6 +20,8 @@
 #include "duckdb/storage/index.hpp"
 #include "duckdb/storage/single_file_block_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/storage/table/column_data.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -621,25 +623,50 @@ void WriteAheadLog::SyncUpTo(idx_t target_offset, bool wait_for_batch) {
 		lock.unlock();
 		auto sync_target = written_offset.load();
 		if (do_batch_wait) {
-			// other transactions were committing concurrently during the previous fsync
-			// before fsync-ing, give concurrently committing transactions a brief window to finish appending
-			// their flush markers, so that this fsync covers them as well and they do not have to wait for the
-			// next one (micro-batching, similar in spirit to PostgreSQL's commit_delay)
-			for (idx_t i = 0; i < 10; i++) {
-				std::this_thread::sleep_for(std::chrono::microseconds(100));
-				auto new_target = written_offset.load();
-				if (new_target == sync_target) {
-					// no new appends - stop waiting
-					break;
+			// Other transactions were committing concurrently during the previous fsync.
+			// Before fsync-ing, give concurrently committing transactions a window to finish appending their
+			// flush markers, so that this fsync covers them as well and they do not have to wait for the next
+			// one (micro-batching, similar in spirit to PostgreSQL's commit_delay).
+			// The maximum window is experimental_group_commit_delay microseconds; with -1 (automatic, the
+			// default) it is scaled to a fraction of the observed fsync duration: a wait that is small relative
+			// to the fsync adds little commit latency, while letting (at best) an entire round of concurrent
+			// committers share this fsync. The wait stops early as soon as no new appends arrive.
+			auto delay_micros = Settings::Get<ExperimentalGroupCommitDelaySetting>(GetDatabase().GetDatabase());
+			if (delay_micros < 0) {
+				delay_micros = static_cast<int64_t>(sync_duration_micros.load() / 4);
+			}
+			if (delay_micros > 0) {
+				auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_micros);
+				// note that the effective poll granularity is limited by the operating system timer resolution
+				auto poll_interval = std::chrono::microseconds(MaxValue<int64_t>(delay_micros / 10, 20));
+				while (true) {
+					std::this_thread::sleep_for(poll_interval);
+					auto new_target = written_offset.load();
+					if (new_target == sync_target) {
+						// no new appends - stop waiting
+						break;
+					}
+					sync_target = new_target;
+					if (std::chrono::steady_clock::now() >= deadline) {
+						break;
+					}
 				}
-				sync_target = new_target;
 			}
 		}
 		ErrorData error;
+		auto sync_start = std::chrono::steady_clock::now();
 		try {
 			writer->SyncData();
 		} catch (std::exception &ex) {
 			error = ErrorData(ex);
+		}
+		if (!error.HasError()) {
+			// update the moving average of the fsync duration (drives the automatic micro-batching window)
+			auto sync_micros = static_cast<idx_t>(
+			    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - sync_start)
+			        .count());
+			auto previous = sync_duration_micros.load();
+			sync_duration_micros = previous == 0 ? sync_micros : (3 * previous + sync_micros) / 4;
 		}
 		// detect concurrent commit activity: did other transactions append while we were syncing?
 		auto post_sync_written = written_offset.load();

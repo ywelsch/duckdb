@@ -166,7 +166,11 @@ protected:
 	idx_t sync_waiters = 0;
 	//! Whether concurrent commit activity was detected during the last fsync - if set, the next sync leader
 	//! briefly waits for concurrent committers to append their flush markers before fsync-ing (micro-batching).
+	//! The maximum wait is controlled by the experimental_group_commit_delay setting.
 	bool batch_commits = false;
+	//! Exponentially weighted moving average of the observed fsync duration in microseconds - used to scale the
+	//! micro-batching window when experimental_group_commit_delay is -1 (automatic).
+	atomic<idx_t> sync_duration_micros {0};
 };
 
 } // namespace duckdb

@@ -39,6 +39,14 @@ int main(int argc, char **argv) {
 				return 1;
 			}
 		}
+		if (getenv("DUCKDB_BENCH_GROUP_COMMIT_DELAY")) {
+			res = con.Query(std::string("SET experimental_group_commit_delay=") +
+			                getenv("DUCKDB_BENCH_GROUP_COMMIT_DELAY"));
+			if (res->HasError()) {
+				fprintf(stderr, "setting group commit delay failed: %s\n", res->GetError().c_str());
+				return 1;
+			}
+		}
 		con.Query("CREATE TABLE t (i BIGINT)");
 	}
 
