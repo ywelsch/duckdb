@@ -448,7 +448,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			// only validate the commit and write the WAL flush marker - the commit is published after the group
 			// fsync below. We registered as pending BEFORE validating: until we publish, no catalog version can be
 			// attached to any table (see BlockPendingCommits), so the validation stays authoritative.
-			error = transaction.CommitToWAL(db, info, *commit_state);
+			error = transaction.CommitToWAL(db, info, std::move(commit_state));
 			if (error.HasError()) {
 				FinishPendingCommit(info.commit_id);
 			}

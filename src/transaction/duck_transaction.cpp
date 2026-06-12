@@ -284,8 +284,9 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 }
 
 ErrorData DuckTransaction::CommitToWAL(AttachedDatabase &db, CommitInfo &commit_info,
-                                       StorageCommitState &commit_state) noexcept {
+                                       unique_ptr<StorageCommitState> commit_state) noexcept {
 	this->commit_id = commit_info.commit_id;
+	D_ASSERT(commit_state);
 	D_ASSERT(ChangesMade());
 	D_ASSERT(!IsReadOnly());
 	try {
@@ -293,15 +294,15 @@ ErrorData DuckTransaction::CommitToWAL(AttachedDatabase &db, CommitInfo &commit_
 		// once the marker is written, the commit must complete - it can be replayed after a crash
 		auto error = undo_buffer.ValidateCommitConflicts();
 		if (error.HasError()) {
-			commit_state.RevertCommit();
+			commit_state->RevertCommit();
 			return error;
 		}
 		// write the WAL flush marker (without fsync - the caller batches the fsync across transactions)
-		commit_state.FlushCommitMarker();
+		commit_state->FlushCommitMarker();
 		return ErrorData();
 	} catch (std::exception &ex) {
 		try {
-			commit_state.RevertCommit();
+			commit_state->RevertCommit();
 		} catch (...) { // NOLINT
 		}
 		return ErrorData(ex);
