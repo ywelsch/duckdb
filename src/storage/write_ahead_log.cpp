@@ -578,7 +578,7 @@ void WriteAheadLog::Flush() {
 	SyncUpTo(target_offset, false);
 }
 
-idx_t WriteAheadLog::WriteFlushMarker() {
+idx_t WriteAheadLog::WriteFlushMarker(bool requires_block_sync) {
 	if (!writer) {
 		return 0;
 	}
@@ -590,6 +590,12 @@ idx_t WriteAheadLog::WriteFlushMarker() {
 	// push all buffered data to the operating system - the fsync happens separately in SyncUpTo
 	writer->Flush();
 	auto target_offset = writer->GetTotalWritten();
+	if (requires_block_sync) {
+		// record that this marker references optimistically written row group data
+		// this must happen BEFORE written_offset advances: any sync leader whose fsync covers this marker
+		// must observe the block sync requirement (see SyncUpTo)
+		block_sync_pending_offset = MaxValue<idx_t>(block_sync_pending_offset.load(), target_offset);
+	}
 	written_offset = target_offset;
 	storage_manager.SetWALSize(writer->GetFileSize());
 	return target_offset;
@@ -654,19 +660,25 @@ void WriteAheadLog::SyncUpTo(idx_t target_offset, bool wait_for_batch) {
 			}
 		}
 		ErrorData error;
-		auto sync_start = std::chrono::steady_clock::now();
 		try {
+			if (block_sync_pending_offset.load() > block_synced_offset.load()) {
+				// one or more flush markers covered by this fsync reference optimistically written row group
+				// data: the referenced blocks must be durable in the database file BEFORE the WAL fsync makes
+				// those markers durable. Perform one (batched) database file sync covering all of them.
+				// A marker above sync_target conservatively triggers another sync in a later round.
+				storage_manager.GetBlockManager().FileSync();
+				block_synced_offset = MaxValue<idx_t>(block_synced_offset.load(), sync_target);
+			}
+			auto sync_start = std::chrono::steady_clock::now();
 			writer->SyncData();
-		} catch (std::exception &ex) {
-			error = ErrorData(ex);
-		}
-		if (!error.HasError()) {
 			// update the moving average of the fsync duration (drives the automatic micro-batching window)
 			auto sync_micros = static_cast<idx_t>(
 			    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - sync_start)
 			        .count());
 			auto previous = sync_duration_micros.load();
 			sync_duration_micros = previous == 0 ? sync_micros : (3 * previous + sync_micros) / 4;
+		} catch (std::exception &ex) {
+			error = ErrorData(ex);
 		}
 		// detect concurrent commit activity: did other transactions append while we were syncing?
 		auto post_sync_written = written_offset.load();

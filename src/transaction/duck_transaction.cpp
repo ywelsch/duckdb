@@ -15,6 +15,7 @@
 #include "duckdb/transaction/update_info.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/storage/table/column_data.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
@@ -224,7 +225,14 @@ ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &
 			// if we have optimistically written any data AND we are writing to the WAL, we have written references to
 			// optimistically written blocks
 			// hence we need to ensure those optimistically written blocks are persisted
-			storage_manager.GetBlockManager().FileSync();
+			if (Settings::Get<ExperimentalGroupCommitSetting>(db.GetDatabase())) {
+				// group commit: defer the database file sync to the WAL sync leader, which performs it (batched
+				// across transactions, outside of the WAL lock) before any WAL fsync that makes this commit's
+				// flush marker durable - preserving the blocks-before-references ordering
+				commit_state->DeferBlockSync();
+			} else {
+				storage_manager.GetBlockManager().FileSync();
+			}
 		}
 		wal_timer.EndTimer();
 

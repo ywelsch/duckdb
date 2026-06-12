@@ -43,6 +43,11 @@ public:
 	virtual void FlushCommitMarker() {
 		FlushCommit();
 	}
+	//! Mark that the database file sync for optimistically written row group data is deferred to the WAL sync
+	//! leader (group commit), instead of being performed by the committing transaction itself. Must be called
+	//! before the flush marker is written. The default implementation ignores this.
+	virtual void DeferBlockSync() {
+	}
 
 	virtual void AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
 	                             unique_ptr<PersistentCollectionData> row_group_data) = 0;

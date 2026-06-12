@@ -126,7 +126,10 @@ public:
 	//! Write a WAL_FLUSH marker and push all buffered data to the operating system, WITHOUT fsync-ing.
 	//! Returns the WAL offset that a subsequent SyncUpTo() call must reach to make the data durable.
 	//! The caller must hold the WAL lock of the storage manager.
-	idx_t WriteFlushMarker();
+	//! If requires_block_sync is set, the commit completed by this marker references optimistically written
+	//! row group data: the database file is fsynced (once, batched) by the sync leader BEFORE any WAL fsync
+	//! that makes this marker durable, so that the referenced blocks are always durable first.
+	idx_t WriteFlushMarker(bool requires_block_sync = false);
 	//! Ensure the WAL is fsynced at least up to the given target offset (as returned by WriteFlushMarker).
 	//! Safe to call without holding the WAL lock: concurrent callers elect a leader whose single fsync
 	//! covers all data pushed to the operating system so far (group commit).
@@ -171,6 +174,13 @@ protected:
 	//! Exponentially weighted moving average of the observed fsync duration in microseconds - used to scale the
 	//! micro-batching window when experimental_group_commit_delay is -1 (automatic).
 	atomic<idx_t> sync_duration_micros {0};
+	//! Highest marker offset whose commit references optimistically written row group data (group commit only).
+	//! Updated in WriteFlushMarker BEFORE written_offset advances, so that any sync leader whose fsync covers
+	//! the marker observes the block sync requirement.
+	atomic<idx_t> block_sync_pending_offset {0};
+	//! Marker offset up to which the referenced row group blocks are known durable in the database file.
+	//! Only updated by sync leaders (serialized via sync_in_progress).
+	atomic<idx_t> block_synced_offset {0};
 };
 
 } // namespace duckdb

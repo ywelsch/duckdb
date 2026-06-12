@@ -633,6 +633,8 @@ public:
 	void FlushCommit() override;
 	// Write the WAL flush marker only - the fsync happens later via WriteAheadLog::SyncUpTo (group commit)
 	void FlushCommitMarker() override;
+	// Defer the database file sync for optimistic row group data to the WAL sync leader (group commit)
+	void DeferBlockSync() override;
 
 	void AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
 	                     unique_ptr<PersistentCollectionData> row_group_data) override;
@@ -644,6 +646,9 @@ private:
 	idx_t initial_written = 0;
 	WriteAheadLog &wal;
 	WALCommitState state;
+	//! Whether the database file sync for optimistic row group data is deferred to the WAL sync leader.
+	//! If not (the default), the committing transaction performs the sync itself before writing to the WAL.
+	bool defer_block_sync = false;
 	reference_map_t<DataTable, unordered_map<idx_t, OptimisticallyWrittenRowGroupData>> optimistically_written_data;
 };
 
@@ -688,7 +693,13 @@ void SingleFileStorageCommitState::FlushCommit() {
 		return;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	wal.Flush();
+	if (defer_block_sync) {
+		// deferred block sync: the marker must record the requirement before the (inline) durable sync
+		auto target_offset = wal.WriteFlushMarker(HasRowGroupData());
+		wal.SyncUpTo(target_offset, false);
+	} else {
+		wal.Flush();
+	}
 	state = WALCommitState::FLUSHED;
 }
 
@@ -700,8 +711,12 @@ void SingleFileStorageCommitState::FlushCommitMarker() {
 	// Only the flush marker is written and the data is pushed to the operating system - the fsync that makes the
 	// commit durable happens later via WriteAheadLog::SyncUpTo, outside of the transaction and WAL locks, so that
 	// concurrently committing transactions can share a single fsync (group commit).
-	wal.WriteFlushMarker();
+	wal.WriteFlushMarker(defer_block_sync && HasRowGroupData());
 	state = WALCommitState::FLUSHED;
+}
+
+void SingleFileStorageCommitState::DeferBlockSync() {
+	defer_block_sync = true;
 }
 
 void SingleFileStorageCommitState::AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
