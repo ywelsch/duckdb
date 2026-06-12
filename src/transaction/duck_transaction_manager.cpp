@@ -362,7 +362,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	// Catalog-changing commits cannot defer publishing their changes (see below) - they publish while holding the
 	// transaction lock. To guarantee that no catalog change can interleave between a data commit's WAL flush marker
 	// and its publish, they first wait for all pending (unpublished) commits to be published.
-	bool has_catalog_changes = undo_properties.has_catalog_changes || undo_properties.has_dropped_entries;
+	// Note: dropped entries are catalog entries in the undo buffer, so this also covers has_dropped_entries.
+	bool has_catalog_changes = undo_properties.has_catalog_changes;
 	if (should_write_to_wal) {
 		auto &storage_manager = db.GetStorageManager().Cast<SingleFileStorageManager>();
 		// if we are committing changes and we are not doing a "checkpoint instead of WAL write"
