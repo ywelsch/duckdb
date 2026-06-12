@@ -403,14 +403,13 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 		entry_to_destroy = new_entry->TakeChild();
 	}
 
-	// the new catalog version has been attached - release the publish gate, which must happen BEFORE updating the
-	// dependency manager below: it drops/creates dependency entries through CatalogSet::DropEntry, which acquires
-	// the publish gate itself (it is not re-entrant)
+	read_lock.unlock();
+	write_lock.unlock();
+	// release the publish gate BEFORE updating the dependency manager: it drops/creates dependency entries
+	// through CatalogSet::DropEntry, which acquires the publish gate itself (it is not re-entrant)
 	if (publish_gate.owns_lock()) {
 		publish_gate.unlock();
 	}
-	read_lock.unlock();
-	write_lock.unlock();
 
 	// Check the dependency manager to verify that there are no conflicting dependencies with this alter
 	catalog.GetDependencyManager()->AlterObject(transaction, *entry, *new_entry, alter_info);
