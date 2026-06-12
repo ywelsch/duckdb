@@ -252,11 +252,22 @@ Deadlock safety: lock order is WAL lock → `transaction_lock` → `publish_lock
 
 The WAL-swap safety argument (drain in `WALStartCheckpoint` + WAL-lock exclusion of registrations + shared_ptr lifetime + move-not-delete in `WALFinishCheckpoint`) is documented in the session notes; the checkpoint stress above exercises both swap directions under load.
 
+## ART index interactions (2026-06-12)
+
+Analysis of index state vs the deferred window, plus a new stress test (`commit-bench/index_race_stress.cpp`): concurrent unique inserts + occasional deletes racing a CREATE UNIQUE INDEX / probe / DROP INDEX loop. The probe inserts a duplicate of the newest visible row right after each successful index build — if it succeeds, the "unique" index silently misses a committed row.
+
+**Covered by the existing design:** physical ART insertions happen at WAL-flush time (pre-marker, irrevocable together with the marker); readers MVCC-filter early entries; publish-time delete removals recompute their `ActiveTransactionState` under the re-acquired lock; DROP INDEX / ADD PRIMARY KEY are catalog commits (synchronous + drained; ADD PK versions the table entry through the gated `AlterEntry`); index vacuum is excluded by the transaction-lifetime vacuum lock.
+
+**New gate:** `PhysicalCreateIndex::Finalize` now takes the publish gate (`BlockPendingCommits`) before `storage.AddIndex` — attaching a new index to the live table is the index analog of a catalog version attachment. Acquired after the catalog operations in `Finalize`, which re-acquire the gate internally (it is not re-entrant). Index (142 tests) and alter suites pass.
+
+**UPSTREAM BUG FOUND (reproduces on pristine `main`, no group commit involved):** a `CREATE UNIQUE INDEX` built while other connections commit inserts silently misses rows that commit during the build — such rows are invisible to the build scan AND their flush does not insert into the not-yet-attached index. Result: a unique index that accepts duplicates of committed rows and misses index-scan results. The stress test triggers it within seconds on `main` (4 writers, 12 s, exit code 2), and equally on the branch with group commit off/on, gate or no gate — the Finalize gate cannot fix it because the root cause is the index build protocol (build-scan visibility vs index-list attachment timing). Candidate upstream fixes: include flushed-but-uncommitted physical rows in the build scan (their revert already removes them from all listed indexes), or detect table modifications overlapping the build and abort the CREATE INDEX with a transaction conflict. **Should be reported upstream with the reproducer.**
+
 ### Remaining open questions for productionizing
 
 1. **fsync/publish failure after the marker is durable** is `FatalException` — principled (matches Postgres PANIC semantics), but should be reviewed; the validation pass is the safeguard that keeps it unreachable.
 2. **Micro-wait tuning**: 100 µs × 10 rounds is calibrated for ms-class sync latency; on very fast devices (PLP NVMe, ~20 µs fsync) the wait should scale down or be a setting (cf. PostgreSQL `commit_delay`/`commit_siblings`).
 3. The optimistic-row-group `FileSync` on the DB file (`duck_transaction.cpp` in `WriteToWAL`) is still per-transaction, under the WAL lock.
-4. `ValidateCommitConflicts` duplicates the conflict conditions in `CommitState::CommitEntry` — keep in sync, or refactor to share.
-5. Out-of-tree storage extensions implementing `StorageCommitState` need the `FlushCommit(bool durable)` signature change.
+4. ~~`ValidateCommitConflicts` duplicates the conflict conditions in `CommitState::CommitEntry`~~ — resolved: shared via `CommitState::VerifyTableModification`.
+5. ~~Out-of-tree storage extensions implementing `StorageCommitState` need a signature change~~ — resolved: `FlushCommit()` kept its original signature; `FlushCommitMarker()` is a new virtual with a durable default.
 6. `make test_configs` / full extensive CI sweep not yet run; thread-sanitizer run advisable for the condvar protocols.
+7. The upstream CREATE INDEX race above needs an upstream fix; until then, concurrent CREATE INDEX + writes can corrupt unique indexes regardless of group commit.
