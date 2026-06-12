@@ -630,7 +630,9 @@ public:
 	//! Revert the commit
 	void RevertCommit() override;
 	// Make the commit persistent
-	void FlushCommit(bool durable) override;
+	void FlushCommit() override;
+	// Write the WAL flush marker only - the fsync happens later via WriteAheadLog::SyncUpTo (group commit)
+	void FlushCommitMarker() override;
 
 	void AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
 	                     unique_ptr<PersistentCollectionData> row_group_data) override;
@@ -681,19 +683,24 @@ void SingleFileStorageCommitState::RevertCommit() {
 	state = WALCommitState::TRUNCATED;
 }
 
-void SingleFileStorageCommitState::FlushCommit(bool durable) {
+void SingleFileStorageCommitState::FlushCommit() {
 	if (state != WALCommitState::IN_PROGRESS) {
 		return;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	auto target_offset = wal.WriteFlushMarker();
-	if (durable) {
-		// make the commit durable before returning (the caller holds the WAL lock - no batch can form)
-		wal.SyncUpTo(target_offset, false);
+	wal.Flush();
+	state = WALCommitState::FLUSHED;
+}
+
+void SingleFileStorageCommitState::FlushCommitMarker() {
+	if (state != WALCommitState::IN_PROGRESS) {
+		return;
 	}
-	// otherwise only the flush marker is written and the data is pushed to the operating system - the fsync that
-	// makes the commit durable happens later via WriteAheadLog::SyncUpTo, outside of the transaction and WAL locks,
-	// so that concurrently committing transactions can share a single fsync (group commit)
+	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
+	// Only the flush marker is written and the data is pushed to the operating system - the fsync that makes the
+	// commit durable happens later via WriteAheadLog::SyncUpTo, outside of the transaction and WAL locks, so that
+	// concurrently committing transactions can share a single fsync (group commit).
+	wal.WriteFlushMarker();
 	state = WALCommitState::FLUSHED;
 }
 

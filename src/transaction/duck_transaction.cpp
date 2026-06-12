@@ -269,9 +269,7 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 		// }
 		if (commit_state) {
 			// if we have written to the WAL - flush after the commit has been successful
-			// the commit has already been made visible (we hold the transaction lock, so no new transaction can
-			// observe it before it is durable) - hence we must make it durable here, before the lock is released
-			commit_state->FlushCommit(true);
+			commit_state->FlushCommit();
 		}
 		drop_state.FinalizeCommit();
 		return ErrorData();
@@ -299,7 +297,7 @@ ErrorData DuckTransaction::CommitToWAL(AttachedDatabase &db, CommitInfo &commit_
 			return error;
 		}
 		// write the WAL flush marker (without fsync - the caller batches the fsync across transactions)
-		commit_state.FlushCommit(false);
+		commit_state.FlushCommitMarker();
 		return ErrorData();
 	} catch (std::exception &ex) {
 		try {

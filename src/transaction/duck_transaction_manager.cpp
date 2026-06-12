@@ -473,7 +473,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		}
 	} else if (!defer_publish) {
 		DUCKDB_LOG(context, TransactionLogType, db, "Commit", info.commit_id);
-		last_commit = MaxValue<transaction_t>(last_commit, info.commit_id);
+		last_commit = info.commit_id;
 
 		// check if catalog changes were made
 		if (transaction.catalog_version >= TRANSACTION_ID_START) {
@@ -537,6 +537,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			                     publish_error.Message());
 		}
 		DUCKDB_LOG(context, TransactionLogType, db, "Commit", info.commit_id);
+		// take the maximum: between our commit id assignment and this point the transaction lock was released,
+		// so a commit with a higher id (e.g. a read-only commit) may have already updated last_commit
 		last_commit = MaxValue<transaction_t>(last_commit, info.commit_id);
 	}
 
