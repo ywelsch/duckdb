@@ -79,6 +79,10 @@ void BufferedFileWriter::Sync() {
 	handle->Sync();
 }
 
+void BufferedFileWriter::SyncData() {
+	handle->Sync();
+}
+
 void BufferedFileWriter::Truncate(idx_t size) {
 	auto persistent = NumericCast<idx_t>(fs.GetFileSize(*handle));
 	D_ASSERT(size <= persistent + offset);
