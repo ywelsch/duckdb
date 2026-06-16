@@ -178,11 +178,7 @@ SinkFinalizeType PhysicalCreateIndex::Finalize(Pipeline &pipeline, Event &event,
 	// which can re-acquire the gate internally (it is not re-entrant).
 	// NOTE: this does NOT fix the pre-existing race where rows committed during the index build are missing from
 	// the new index - that race reproduces on upstream main and needs a separate fix in the index build protocol.
-	unique_lock<mutex> publish_gate;
-	auto &transaction_manager = table.ParentCatalog().GetAttached().GetTransactionManager();
-	if (transaction_manager.IsDuckTransactionManager()) {
-		publish_gate = transaction_manager.Cast<DuckTransactionManager>().BlockPendingCommits();
-	}
+	auto publish_gate = DuckTransactionManager::Get(table.ParentCatalog().GetAttached()).BlockPendingCommits();
 
 	// Add the index to the storage.
 	storage.AddIndex(std::move(bound_index));
