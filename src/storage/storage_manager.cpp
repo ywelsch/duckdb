@@ -632,7 +632,7 @@ public:
 	// Make the commit persistent
 	void FlushCommit() override;
 	// Write the WAL flush marker only - the fsync happens later via WriteAheadLog::SyncUpTo (group commit)
-	void FlushCommitMarker() override;
+	idx_t FlushCommitMarker() override;
 	// Defer the database file sync for optimistic row group data to the WAL sync leader (group commit)
 	void DeferBlockSync() override;
 
@@ -703,16 +703,19 @@ void SingleFileStorageCommitState::FlushCommit() {
 	state = WALCommitState::FLUSHED;
 }
 
-void SingleFileStorageCommitState::FlushCommitMarker() {
+idx_t SingleFileStorageCommitState::FlushCommitMarker() {
 	if (state != WALCommitState::IN_PROGRESS) {
-		return;
+		return 0;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	// Only the flush marker is written and the data is pushed to the operating system - the fsync that makes the
-	// commit durable happens later via WriteAheadLog::SyncUpTo, outside of the transaction and WAL locks, so that
-	// concurrently committing transactions can share a single fsync (group commit).
-	wal.WriteFlushMarker(defer_block_sync && HasRowGroupData());
+	// Only the flush marker is appended to the in-memory WAL buffer (push_to_os=false): both the push to the
+	// operating system AND the fsync that makes the commit durable happen later, batched, in the group commit sync
+	// leader's WriteAheadLog::SyncUpTo (outside the transaction and WAL locks), so that concurrently committing
+	// transactions share a single write() and a single fsync.
+	// Return the WAL offset of this marker - the caller passes it to SyncUpTo as the durability target.
+	auto target_offset = wal.WriteFlushMarker(defer_block_sync && HasRowGroupData(), /*push_to_os=*/false);
 	state = WALCommitState::FLUSHED;
+	return target_offset;
 }
 
 void SingleFileStorageCommitState::DeferBlockSync() {

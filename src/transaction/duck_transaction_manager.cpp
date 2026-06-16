@@ -345,6 +345,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	unique_lock<mutex> held_wal_lock;
 	unique_ptr<StorageCommitState> commit_state;
 	bool skip_wal_write_due_to_checkpoint = false;
+	// WAL offset our flush marker requires for durability (set by CommitToWAL, used as the deferred SyncUpTo target)
+	idx_t flush_marker_offset = 0;
 	if (checkpoint_decision.can_checkpoint) {
 		// we can perform an automatic checkpoint
 		// we have two options:
@@ -445,10 +447,12 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			info.active_transactions = ActiveTransactionState::NO_OTHER_TRANSACTIONS;
 		}
 		if (defer_publish) {
-			// only validate the commit and write the WAL flush marker - the commit is published after the group
-			// fsync below. We registered as pending BEFORE validating: until we publish, no catalog version can be
-			// attached to any table (see BlockPendingCommits), so the validation stays authoritative.
-			error = transaction.CommitToWAL(db, info, std::move(commit_state));
+			// write the WAL flush marker - the commit is published after the group fsync below. Conflicts were
+			// already validated in WriteToWAL (before any entries were written). We registered as pending BEFORE
+			// that validation: until we publish, no catalog version can be attached to any table (see
+			// BlockPendingCommits), so the validation stays authoritative. flush_marker_offset is the WAL offset we
+			// must SyncUpTo() to make this commit durable.
+			error = transaction.CommitToWAL(db, info, std::move(commit_state), flush_marker_offset);
 			if (error.HasError()) {
 				FinishPendingCommit(info.commit_id);
 			}
@@ -490,12 +494,14 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	if (defer_publish) {
-		// deferred (group) commit: capture the WAL and the offset we need to sync to make this commit durable
+		// deferred (group) commit: capture the WAL; the offset we must sync to is the one our flush marker returned
+		// from CommitToWAL (flush_marker_offset), threaded through explicitly rather than re-read from the WAL - so
+		// the durability target is exactly our marker and does not depend on no other commit having appended since.
 		// the shared_ptr keeps the WAL alive even if a concurrent checkpoint swaps it out (the swap fully syncs
 		// the old WAL before replacing it, so our sync target is always reachable)
 		D_ASSERT(held_wal_lock.owns_lock());
 		auto sync_wal = db.GetStorageManager().GetWALShared();
-		idx_t sync_target = sync_wal ? sync_wal->GetWrittenOffset() : 0;
+		idx_t sync_target = flush_marker_offset;
 
 		// release all locks - other transactions can start, commit and append to the WAL while we wait for the
 		// fsync, and their flush markers are covered by the same fsync (or a later one)
@@ -505,7 +511,12 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 		try {
 			if (sync_wal) {
-				sync_wal->SyncUpTo(sync_target, true);
+				// leader_pushes_batch: the flush markers were only appended to the in-memory WAL buffer
+				// (FlushCommitMarker with push_to_os=false), so the sync leader pushes the whole batch to the OS in
+				// one write() before its fsync - batching the write too, not just the fsync. The push runs under the
+				// WAL flush_lock (not the WAL lock), so it cannot deadlock against a concurrent checkpoint / catalog
+				// commit / synchronous commit that holds the WAL lock and waits.
+				sync_wal->SyncUpTo(sync_target, true, /*leader_pushes_batch=*/true);
 			}
 		} catch (std::exception &ex) {
 			// the WAL cannot be guaranteed to be durable, and the flush marker can no longer be truncated

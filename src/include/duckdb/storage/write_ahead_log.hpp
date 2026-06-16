@@ -123,22 +123,35 @@ public:
 	void Truncate(idx_t size);
 	//! Write a WAL_FLUSH marker, push all buffered data to the operating system and fsync (fully durable).
 	void Flush();
-	//! Write a WAL_FLUSH marker and push all buffered data to the operating system, WITHOUT fsync-ing.
-	//! Returns the WAL offset that a subsequent SyncUpTo() call must reach to make the data durable.
-	//! The caller must hold the WAL lock of the storage manager.
+	//! Write a WAL_FLUSH marker. Returns the WAL offset that a subsequent SyncUpTo() call must reach to make the
+	//! data durable. The caller must hold the WAL lock of the storage manager.
+	//! If push_to_os is true the buffered data is pushed to the operating system inline (the synchronous commit
+	//! path). If false, only the in-memory buffer is advanced and the push to the OS is deferred to the group
+	//! commit sync leader (SyncUpTo with leader_pushes_batch), so that a single write() covers the whole batch -
+	//! this matters on network storage (e.g. EFS) where the per-commit write is itself a multi-ms round-trip.
 	//! If requires_block_sync is set, the commit completed by this marker references optimistically written
 	//! row group data: the database file is fsynced (once, batched) by the sync leader BEFORE any WAL fsync
 	//! that makes this marker durable, so that the referenced blocks are always durable first.
-	idx_t WriteFlushMarker(bool requires_block_sync = false);
+	idx_t WriteFlushMarker(bool requires_block_sync = false, bool push_to_os = true);
 	//! Ensure the WAL is fsynced at least up to the given target offset (as returned by WriteFlushMarker).
 	//! Safe to call without holding the WAL lock: concurrent callers elect a leader whose single fsync
 	//! covers all data pushed to the operating system so far (group commit).
 	//! wait_for_batch enables the adaptive micro-batching wait - pass false when the caller holds the WAL lock
 	//! (no concurrent appends can arrive, so there is nothing to wait for).
-	void SyncUpTo(idx_t target_offset, bool wait_for_batch);
+	//! leader_pushes_batch makes the sync leader push the buffered WAL data to the OS (one write() for the whole
+	//! batch) before its fsync, under the WAL flush_lock - NOT the storage manager WAL lock. Pass true only when the
+	//! caller does NOT hold the WAL lock and the markers were written with push_to_os=false (the deferred path).
+	void SyncUpTo(idx_t target_offset, bool wait_for_batch, bool leader_pushes_batch = false);
 	//! The WAL offset (logical bytes written) that has been pushed to the operating system so far
 	idx_t GetWrittenOffset() const {
 		return written_offset;
+	}
+	//! Acquire the WAL flush lock. Serializes pushes of the in-memory WAL buffer to the OS (the group commit sync
+	//! leader's batched write, and the synchronous push-to-OS) against all writes into that buffer (entry appends,
+	//! flush markers), truncation, and header writes. Distinct from the storage manager WAL lock so the sync
+	//! leader's push cannot deadlock a checkpoint / catalog commit / synchronous commit that holds the WAL lock.
+	unique_lock<mutex> LockFlush() {
+		return unique_lock<mutex>(flush_lock);
 	}
 	//! Increment the WAL entry count, which is used for the auto-checkpoint threshold.
 	void IncrementWALEntriesCount();
@@ -152,10 +165,15 @@ protected:
 	atomic<WALInitState> init_state;
 	optional_idx checkpoint_iteration;
 
+	//! Serializes pushes of the in-memory WAL buffer to the OS against writes into it (entry appends, flush
+	//! markers), truncation, header writes, and updates of written_offset - see LockFlush(). Distinct from the
+	//! storage manager WAL lock so the sync leader's batched push does not deadlock pending-commit drains.
+	mutex flush_lock;
+
 	//! Group commit state.
 	//! Offsets are logical byte counters (BufferedFileWriter::GetTotalWritten), they increase monotonically
 	//! across committed flush markers and are not affected by truncation of reverted (uncommitted) entries.
-	//! Logical bytes pushed to the operating system so far - only updated while holding the storage manager WAL lock.
+	//! Logical bytes pushed to the operating system so far - updated under flush_lock together with the buffer push.
 	atomic<idx_t> written_offset {0};
 	//! Protects synced_offset and sync_in_progress.
 	mutex sync_mutex;

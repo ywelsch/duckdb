@@ -90,8 +90,15 @@ void WriteAheadLog::Truncate(idx_t size) {
 		storage_manager.SetWALSize(size);
 		return;
 	}
-	writer->Truncate(size);
-	storage_manager.SetWALSize(writer->GetFileSize());
+	idx_t file_size;
+	{
+		// serialize the truncate (which removes reverted/uncommitted WAL entries) against the group commit sync
+		// leader's push-to-OS, which runs without the storage manager WAL lock (see LockFlush())
+		auto flush_guard = LockFlush();
+		writer->Truncate(size);
+		file_size = writer->GetFileSize();
+	}
+	storage_manager.SetWALSize(file_size);
 }
 
 bool WriteAheadLog::Initialized() const {
@@ -125,6 +132,9 @@ public:
 			return FlushEncrypted();
 		}
 
+		// serialize this entry's writes into the WAL buffer against the group commit sync leader's push-to-OS
+		// (which takes the same flush lock) - see WriteAheadLog::LockFlush()
+		auto flush_guard = wal.LockFlush();
 		auto data = memory_stream.GetData();
 		auto size = memory_stream.GetPosition();
 		// compute the checksum over the entry
@@ -142,6 +152,8 @@ public:
 		auto &catalog = wal.GetDatabase().GetCatalog().Cast<DuckCatalog>();
 		auto encryption_key_id = catalog.GetEncryptionKeyId();
 
+		// serialize this entry's writes into the WAL buffer against the sync leader's push-to-OS (see LockFlush())
+		auto flush_guard = wal.LockFlush();
 		auto data = memory_stream.GetData();
 		auto size = memory_stream.GetPosition();
 
@@ -244,6 +256,13 @@ private:
 //===--------------------------------------------------------------------===//
 void WriteAheadLog::WriteHeader() {
 	D_ASSERT(writer);
+	// Serialize the "has a header been written?" check + the header write against the group commit sync leader's
+	// push-to-OS. GetFileSize() = on-disk size + buffered offset, read non-atomically, while the leader's Flush()
+	// mutates both (fs.Write grows the file, then sets offset=0). Without this lock a committer can observe
+	// GetFileSize()==0 after the header was already written (torn read across the leader's flush) and write a
+	// SECOND header mid-WAL, which corrupts replay. The header is written directly to the writer (not via
+	// ChecksumWriter), so it would otherwise bypass the flush lock entirely.
+	auto flush_guard = LockFlush();
 	if (writer->GetFileSize() > 0) {
 		// Already written - no need to write a header.
 		return;
@@ -578,30 +597,43 @@ void WriteAheadLog::Flush() {
 	SyncUpTo(target_offset, false);
 }
 
-idx_t WriteAheadLog::WriteFlushMarker(bool requires_block_sync) {
+idx_t WriteAheadLog::WriteFlushMarker(bool requires_block_sync, bool push_to_os) {
 	if (!writer) {
 		return 0;
 	}
 
-	// write an empty entry
+	// write an empty entry (appended to the in-memory WAL buffer under flush_lock, via ChecksumWriter::Flush)
 	WriteAheadLogSerializer serializer(*this, WALType::WAL_FLUSH);
 	serializer.End();
 
-	// push all buffered data to the operating system - the fsync happens separately in SyncUpTo
-	writer->Flush();
-	auto target_offset = writer->GetTotalWritten();
-	if (requires_block_sync) {
-		// record that this marker references optimistically written row group data
-		// this must happen BEFORE written_offset advances: any sync leader whose fsync covers this marker
-		// must observe the block sync requirement (see SyncUpTo)
-		block_sync_pending_offset = MaxValue<idx_t>(block_sync_pending_offset.load(), target_offset);
+	idx_t target_offset;
+	idx_t file_size;
+	{
+		// Under flush_lock: (optionally) push the buffered data to the OS now, and snapshot + advance written_offset.
+		// Holding flush_lock keeps the push and the written_offset update atomic with respect to the sync leader
+		// (which also pushes the buffer + reads written_offset under flush_lock). In the deferred path
+		// (push_to_os=false) the bytes stay buffered until the sync leader flushes them.
+		auto flush_guard = LockFlush();
+		if (push_to_os) {
+			// synchronous path: push all buffered data to the operating system now (the fsync happens in SyncUpTo)
+			writer->Flush();
+		}
+		// note: GetTotalWritten() is the logical byte count (buffered + flushed), the same whether or not we pushed
+		target_offset = writer->GetTotalWritten();
+		file_size = writer->GetFileSize();
+		if (requires_block_sync) {
+			// record that this marker references optimistically written row group data
+			// this must happen BEFORE written_offset advances: any sync leader whose fsync covers this marker
+			// must observe the block sync requirement (see SyncUpTo)
+			block_sync_pending_offset = MaxValue<idx_t>(block_sync_pending_offset.load(), target_offset);
+		}
+		written_offset = target_offset;
 	}
-	written_offset = target_offset;
-	storage_manager.SetWALSize(writer->GetFileSize());
+	storage_manager.SetWALSize(file_size);
 	return target_offset;
 }
 
-void WriteAheadLog::SyncUpTo(idx_t target_offset, bool wait_for_batch) {
+void WriteAheadLog::SyncUpTo(idx_t target_offset, bool wait_for_batch, bool leader_pushes_batch) {
 	// PROTOTYPE BENCHMARK HACK - DO NOT COMMIT
 	// when DUCKDB_BENCH_SKIP_WAL_SYNC is set we skip the fsync to measure the no-fsync commit throughput ceiling
 	static const bool skip_wal_sync = getenv("DUCKDB_BENCH_SKIP_WAL_SYNC") != nullptr;
@@ -658,6 +690,21 @@ void WriteAheadLog::SyncUpTo(idx_t target_offset, bool wait_for_batch) {
 					}
 				}
 			}
+		}
+		if (leader_pushes_batch && writer) {
+			// Deferred group commit: committers only appended their flush markers to the in-memory WAL buffer
+			// (WriteFlushMarker with push_to_os=false). The sync leader now pushes the whole accumulated batch to
+			// the operating system in a single write(), so the per-write round-trip (multi-ms on network storage
+			// like EFS, and worse under concurrency) is shared across all batched commits instead of paid per
+			// commit. The push runs under the WAL flush_lock - NOT the storage manager WAL lock - so it cannot
+			// deadlock against a checkpoint / catalog commit / synchronous commit that holds the WAL lock and waits.
+			// Pushing the whole buffer is safe: deferred commits write their WAL entries only after
+			// ValidateCommitConflicts (so they cannot be reverted/truncated), and any not-yet-marked trailing bytes
+			// are ignored on crash recovery (replay stops at the last flush marker). sync_target stays at the last
+			// committed marker, so durability is only ever promised up to a committed point.
+			lock_guard<mutex> flush_guard(flush_lock);
+			writer->Flush();
+			sync_target = written_offset.load();
 		}
 		ErrorData error;
 		try {
