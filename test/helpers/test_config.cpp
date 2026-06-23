@@ -398,6 +398,9 @@ void TestConfiguration::LoadConfig(const string &config_path) {
 		}
 
 		for (auto &entry : json_values) {
+			if (StringUtil::CIEquals(entry.first, "extends")) {
+				continue;
+			}
 			ParseOption(entry.first, Value(entry.second));
 		}
 		auto inherit_entry = options.find("inherit_skip_tests");
