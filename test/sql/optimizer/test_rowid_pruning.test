@@ -1,0 +1,48 @@
+# name: test/sql/optimizer/test_rowid_pruning.test
+# description: Row-group pruning based on rowid filters (#23625)
+# group: [optimizer]
+
+require json
+
+# 300K rows -> 3 row groups (DEFAULT_ROW_GROUP_SIZE = 122880)
+statement ok
+CREATE TABLE rowid_prune AS SELECT range AS v FROM range(300000);
+
+statement ok
+PRAGMA enable_profiling = 'json';
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/rowid_pruning_profile.json';
+
+statement ok
+PRAGMA custom_profiling_settings = '{"CUMULATIVE_ROW_GROUPS_SCANNED": "true"}';
+
+query I
+SELECT count(*) FROM rowid_prune WHERE rowid = 0;
+----
+1
+
+statement ok
+PRAGMA disable_profiling;
+
+# only 1 of the 3 row groups is scanned
+query I
+SELECT cumulative_row_groups_scanned FROM '__TEST_DIR__/rowid_pruning_profile.json';
+----
+1
+
+statement ok
+PRAGMA enable_profiling = 'json';
+
+query I
+SELECT count(*) FROM rowid_prune WHERE rowid BETWEEN 0 AND 10;
+----
+11
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT cumulative_row_groups_scanned FROM '__TEST_DIR__/rowid_pruning_profile.json';
+----
+1
