@@ -453,6 +453,13 @@
         "default_value": "NONE"
     },
     {
+        "name": "debug_wal_sync_parallelism",
+        "description": "DEBUG SETTING: force the number of concurrent WAL fsync lanes (0 = derive from the file system's declared sync parallelism)",
+        "type": "UBIGINT",
+        "scope": "global",
+        "default_value": "0"
+    },
+    {
         "name": "debug_window_mode",
         "description": "DEBUG SETTING: switch window mode to use",
         "type": "ENUM<WindowAggregationMode>",
@@ -851,13 +858,6 @@
         "scope": "global",
         "default_value": "30000",
         "struct": "GeometryMinimumShreddingSize"
-    },
-    {
-        "name": "group_commit_delay",
-        "description": "Maximum time in microseconds that a group commit leader waits for concurrently committing transactions to join its WAL fsync (-1 = automatic, scaled to the observed fsync duration, 0 = no wait).",
-        "type": "BIGINT",
-        "scope": "global",
-        "default_value": "-1"
     },
     {
         "name": "home_directory",

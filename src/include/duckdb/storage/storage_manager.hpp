@@ -39,8 +39,8 @@ public:
 	// Make the commit persistent
 	virtual void FlushCommit() = 0;
 	//! Write only the WAL flush marker that completes the commit in the WAL, WITHOUT making it durable - the
-	//! caller must fsync via WriteAheadLog::SyncUpTo before acknowledging the commit (group commit). Returns the
-	//! WAL offset that SyncUpTo() must reach to make this commit durable (the offset of the flush marker).
+	//! caller must fsync via WriteAheadLog::GroupSync before acknowledging the commit (group commit). Returns the
+	//! WAL offset that GroupSync() must reach to make this commit durable (the offset of the flush marker).
 	//! The default implementation falls back to the fully durable FlushCommit.
 	virtual idx_t FlushCommitMarker() {
 		FlushCommit();

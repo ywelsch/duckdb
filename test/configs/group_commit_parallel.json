@@ -1,0 +1,7 @@
+{
+  "description": "Run on persistent databases with parallel WAL fsync lanes forced (pipelined group commit path).",
+  "initial_db": "{TEST_DIR}/{BASE_TEST_NAME}__test__config__group_commit_parallel.db",
+  "on_init": "SET debug_wal_sync_parallelism=4;",
+  "skip_compiled": "true",
+  "inherit_skip_tests": "test/configs/force_storage.json"
+}

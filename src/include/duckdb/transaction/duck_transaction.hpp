@@ -72,8 +72,8 @@ public:
 	                 unique_ptr<StorageCommitState> commit_state) noexcept;
 	//! First phase of a deferred (group) commit: write the WAL flush marker (conflicts were already validated in
 	//! WriteToWAL, before any entries were written). Caller must hold the transaction lock and the WAL lock. After
-	//! this succeeds, the commit can no longer be aborted - it must be made durable (WriteAheadLog::SyncUpTo) and
-	//! then published (PublishCommit). On success, `flush_marker_offset` is set to the WAL offset that SyncUpTo()
+	//! this succeeds, the commit can no longer be aborted - it must be made durable (WriteAheadLog::GroupSync) and
+	//! then published (PublishCommit). On success, `flush_marker_offset` is set to the WAL offset that GroupSync()
 	//! must reach to make this commit durable (the offset of the flush marker just written).
 	ErrorData CommitToWAL(unique_ptr<StorageCommitState> commit_state, idx_t &flush_marker_offset) noexcept;
 	//! Second phase of a deferred (group) commit: make the committed changes visible to other transactions.

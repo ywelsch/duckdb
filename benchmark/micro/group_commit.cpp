@@ -25,6 +25,13 @@ public:
 		}
 		LocalFileSystem::FileSync(handle);
 	}
+	FileSyncParallelism SyncParallelism(FileHandle &handle) override {
+		if (delay_us > 0) {
+			// the simulated latency stands in for a network file system, where a sync is a per-call round trip
+			return FileSyncParallelism::PARALLEL;
+		}
+		return LocalFileSystem::SyncParallelism(handle);
+	}
 
 private:
 	int64_t delay_us;

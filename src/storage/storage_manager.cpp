@@ -626,7 +626,7 @@ public:
 	void RevertCommit() override;
 	// Make the commit persistent
 	void FlushCommit() override;
-	// Write the WAL flush marker only - the fsync happens later via WriteAheadLog::SyncUpTo (group commit)
+	// Write the WAL flush marker only - the fsync happens later via WriteAheadLog::GroupSync (group commit)
 	idx_t FlushCommitMarker() override;
 	// Defer the database file sync for optimistic row group data to the WAL sync leader (group commit)
 	void DeferBlockSync() override;
@@ -691,7 +691,7 @@ void SingleFileStorageCommitState::FlushCommit() {
 	if (defer_block_sync) {
 		// deferred block sync: the marker must record the requirement before the (inline) durable sync
 		auto target_offset = wal.WriteFlushMarker(HasRowGroupData());
-		wal.SyncUpTo(target_offset, false);
+		wal.GroupSync(target_offset);
 	} else {
 		wal.Flush();
 	}
@@ -703,12 +703,11 @@ idx_t SingleFileStorageCommitState::FlushCommitMarker() {
 		return 0;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	// Only the flush marker is appended to the in-memory WAL buffer (push_to_os=false): both the push to the
-	// operating system AND the fsync that makes the commit durable happen later, batched, in the group commit sync
-	// leader's WriteAheadLog::SyncUpTo (outside the transaction and WAL locks), so that concurrently committing
-	// transactions share a single write() and a single fsync.
-	// Return the WAL offset of this marker - the caller passes it to SyncUpTo as the durability target.
-	auto target_offset = wal.WriteFlushMarker(defer_block_sync && HasRowGroupData(), /*push_to_os=*/false);
+	// The flush marker is appended and pushed to the OS page cache, WITHOUT an fsync: the fsync that makes the
+	// commit durable happens later in WriteAheadLog::GroupSync (outside the transaction lock and the WAL append
+	// serialization), where concurrently committing transactions overlap or share fsyncs.
+	// Return the WAL offset of this marker - the caller passes it to GroupSync as the durability target.
+	auto target_offset = wal.WriteFlushMarker(defer_block_sync && HasRowGroupData());
 	state = WALCommitState::FLUSHED;
 	return target_offset;
 }

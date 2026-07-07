@@ -384,7 +384,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	unique_ptr<StorageCommitState> commit_state;
 	bool skip_wal_write_due_to_checkpoint = false;
 	bool wal_written = false;
-	// WAL offset our flush marker requires for durability (set by CommitToWAL, used as the deferred SyncUpTo target)
+	// WAL offset our flush marker requires for durability (set by CommitToWAL, used as the GroupSync target)
 	idx_t flush_marker_offset = 0;
 	if (checkpoint_decision.can_checkpoint) {
 		// we can perform an automatic checkpoint
@@ -503,7 +503,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		if (defer_publish) {
 			// write the WAL flush marker - published after the group fsync below. Conflicts were already validated in
 			// WriteToWAL; the per-table gate (held through publish) keeps that validation authoritative.
-			// flush_marker_offset is the WAL offset SyncUpTo() must reach to make this commit durable.
+			// flush_marker_offset is the WAL offset GroupSync() must reach to make this commit durable.
 			error = transaction.CommitToWAL(std::move(commit_state), flush_marker_offset);
 			if (error.HasError()) {
 				pending_guard.Finish();
@@ -572,12 +572,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 		try {
 			if (sync_wal) {
-				// leader_pushes_batch: the flush markers were only appended to the in-memory WAL buffer
-				// (FlushCommitMarker with push_to_os=false), so the sync leader pushes the whole batch to the OS in
-				// one write() before its fsync - batching the write too, not just the fsync. The push runs under the
-				// WAL flush_lock (not the WAL lock), so it cannot deadlock against a concurrent checkpoint / catalog
-				// commit / synchronous commit that holds the WAL lock and waits.
-				sync_wal->SyncUpTo(sync_target, true, /*leader_pushes_batch=*/true);
+				// make our flush marker durable: overlap with fsyncs already in flight (up to the file system's
+				// declared sync parallelism), or park if an in-flight fsync's target already covers our bytes.
+				// Runs without the transaction lock and outside the WAL append serialization, so concurrent
+				// committers overlap or share fsyncs (group commit).
+				sync_wal->GroupSync(sync_target);
 			}
 		} catch (std::exception &ex) {
 			// the WAL cannot be guaranteed to be durable, and the flush marker can no longer be truncated

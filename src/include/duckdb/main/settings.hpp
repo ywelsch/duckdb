@@ -744,6 +744,17 @@ struct DebugVerifyVectorSetting {
 	static void OnSet(SettingCallbackInfo &info, Value &input);
 };
 
+struct DebugWalSyncParallelismSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "debug_wal_sync_parallelism";
+	static constexpr const char *Description = "DEBUG SETTING: force the number of concurrent WAL fsync lanes (0 = "
+	                                           "derive from the file system's declared sync parallelism)";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct DebugWindowModeSetting {
 	using RETURN_TYPE = WindowAggregationMode;
 	static constexpr const char *Name = "debug_window_mode";
@@ -1275,18 +1286,6 @@ struct GeometryMinimumShreddingSize {
 	                                           "to disable entirely. Defaults to 1/4th of a rowgroup";
 	static constexpr const char *InputType = "BIGINT";
 	static constexpr const char *DefaultValue = "30000";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
-struct GroupCommitDelaySetting {
-	using RETURN_TYPE = int64_t;
-	static constexpr const char *Name = "group_commit_delay";
-	static constexpr const char *Description =
-	    "Maximum time in microseconds that a group commit leader waits for concurrently committing transactions to "
-	    "join its WAL fsync (-1 = automatic, scaled to the observed fsync duration, 0 = no wait).";
-	static constexpr const char *InputType = "BIGINT";
-	static constexpr const char *DefaultValue = "-1";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };

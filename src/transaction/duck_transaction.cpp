@@ -344,7 +344,7 @@ ErrorData DuckTransaction::CommitToWAL(unique_ptr<StorageCommitState> commit_sta
 		// data-only, so that check is complete). This commit can no longer fail, and its entries are already in the
 		// WAL - so we just write the flush marker. Once the marker is written the commit must complete; it can be
 		// replayed after a crash. The marker is written without fsync (the caller batches the fsync across
-		// transactions); we capture the WAL offset the caller must SyncUpTo() to make this commit durable.
+		// transactions); we capture the WAL offset the caller must GroupSync() to make this commit durable.
 		flush_marker_offset = commit_state->FlushCommitMarker();
 		return ErrorData();
 	} catch (std::exception &ex) {

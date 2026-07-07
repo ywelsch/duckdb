@@ -552,7 +552,7 @@ TEST_CONFIGS := \
 	test/configs/verify_functions.json \
 	test/configs/shredded_vector.json \
 	test/configs/group_commit.json \
-	test/configs/group_commit_delay.json
+	test/configs/group_commit_parallel.json
 
 test_configs:
 	./build/release/test/run $(foreach cfg,$(TEST_CONFIGS),--test-config=$(cfg))

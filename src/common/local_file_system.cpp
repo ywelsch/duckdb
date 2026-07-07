@@ -28,6 +28,12 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/vfs.h>
+#elif defined(__APPLE__)
+#include <sys/param.h>
+#include <sys/mount.h>
+#endif
 #else
 #include "duckdb/common/windows_util.hpp"
 
@@ -892,6 +898,50 @@ void LocalFileSystem::FileSync(FileHandle &handle) {
 	throw IOException("Could not fsync file \"%s\": %s", handle.GetPath(), strerror(errno));
 }
 
+FileSyncParallelism LocalFileSystem::SyncParallelism(FileHandle &handle) {
+#if defined(__linux__)
+	struct statfs fs_info;
+	if (fstatfs(handle.Cast<UnixFileHandle>().fd, &fs_info) != 0) {
+		return FileSyncParallelism::SERIAL;
+	}
+	switch (static_cast<uint64_t>(fs_info.f_type)) {
+	case 0x6969:     // NFS
+	case 0xFF534D42: // CIFS
+	case 0xFE534D42: // SMB2
+	case 0x517B:     // SMB
+	case 0x65735546: // FUSE (includes virtiofs and most userspace network file systems)
+	case 0x01021997: // 9P
+	case 0x73757245: // Coda
+	case 0x5346414F: // AFS
+	case 0x0BD00BD0: // Lustre
+	case 0x00C36400: // Ceph
+	case 0x013111A8: // iBRIX
+	case 0x61756673: // ACFS
+	case 0x0062656C: // BeeGFS
+	case 0xA501FCF5: // VxFS (clustered)
+		// a sync of these is a round trip to a server: concurrent syncs overlap and hide latency
+		return FileSyncParallelism::PARALLEL;
+	default:
+		// local (journaled) file systems: a sync commits the shared journal, concurrent syncs serialize
+		return FileSyncParallelism::SERIAL;
+	}
+#elif defined(__APPLE__)
+	struct statfs fs_info;
+	if (fstatfs(handle.Cast<UnixFileHandle>().fd, &fs_info) != 0) {
+		return FileSyncParallelism::SERIAL;
+	}
+	const char *fs_name = fs_info.f_fstypename;
+	if (strcmp(fs_name, "nfs") == 0 || strcmp(fs_name, "smbfs") == 0 || strcmp(fs_name, "afpfs") == 0 ||
+	    strcmp(fs_name, "webdav") == 0 || strncmp(fs_name, "fuse", 4) == 0 || strcmp(fs_name, "macfuse") == 0 ||
+	    strcmp(fs_name, "osxfuse") == 0) {
+		return FileSyncParallelism::PARALLEL;
+	}
+	return FileSyncParallelism::SERIAL;
+#else
+	return FileSyncParallelism::SERIAL;
+#endif
+}
+
 void LocalFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
 	auto normalized_source = ExpandPath(source, opener);
 	auto normalized_target = ExpandPath(target, opener);
@@ -1609,6 +1659,21 @@ void LocalFileSystem::FileSync(FileHandle &handle) {
 	if (FlushFileBuffers(hFile) == 0) {
 		throw IOException("Could not flush file handle to disk!");
 	}
+}
+
+FileSyncParallelism LocalFileSystem::SyncParallelism(FileHandle &handle) {
+	auto path = handle.GetPath();
+	if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\') {
+		// UNC path: a network share, where a sync is a round trip
+		return FileSyncParallelism::PARALLEL;
+	}
+	if (path.size() >= 2 && path[1] == ':') {
+		wchar_t root[4] = {static_cast<wchar_t>(path[0]), L':', L'\\', L'\0'};
+		if (GetDriveTypeW(root) == DRIVE_REMOTE) {
+			return FileSyncParallelism::PARALLEL;
+		}
+	}
+	return FileSyncParallelism::SERIAL;
 }
 
 void LocalFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {

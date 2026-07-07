@@ -28,9 +28,6 @@
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/wal_entry.hpp"
 
-#include <chrono>
-#include <thread>
-
 namespace duckdb {
 
 constexpr uint64_t WAL_VERSION_NUMBER = 2;
@@ -72,6 +69,15 @@ BufferedFileWriter &WriteAheadLog::Initialize() {
 		} else {
 			storage_manager.SetWALSize(writer->GetFileSize());
 		}
+		// how many concurrent fsyncs are worth issuing on this storage (see sync_lane_cap in the header)
+		auto forced_lanes = Settings::Get<DebugWalSyncParallelismSetting>(GetDatabase().GetDatabase());
+		if (forced_lanes > 0) {
+			sync_lane_cap = NumericCast<idx_t>(forced_lanes);
+		} else if (writer->handle->file_system.SyncParallelism(*writer->handle) == FileSyncParallelism::PARALLEL) {
+			sync_lane_cap = NumericLimits<idx_t>::Maximum();
+		} else {
+			sync_lane_cap = 1;
+		}
 		init_state = WALInitState::INITIALIZED;
 	}
 	return *writer;
@@ -81,8 +87,8 @@ idx_t WriteAheadLog::GetTotalWritten() const {
 	if (!Initialized()) {
 		return 0;
 	}
-	// serialize against the group commit sync leader's buffer push (writer->Flush() under flush_lock), which mutates
-	// the same offset/total_written fields this read sums
+	// serialize against concurrent buffer writes (under flush_lock), which mutate the offset/total_written fields
+	// this read sums
 	lock_guard<mutex> flush_guard(flush_lock);
 	return writer->GetTotalWritten();
 }
@@ -99,13 +105,15 @@ void WriteAheadLog::Truncate(idx_t size) {
 	}
 	idx_t file_size;
 	{
-		// serialize the truncate (which removes reverted/uncommitted WAL entries) against the group commit sync
-		// leader's push-to-OS, which runs without the storage manager WAL lock (see LockFlush())
+		// serialize the truncate (which removes reverted/uncommitted WAL entries) against concurrent buffer writes
 		auto flush_guard = LockFlush();
 		writer->Truncate(size);
 		file_size = writer->GetFileSize();
 	}
 	storage_manager.SetWALSize(file_size);
+	// The fsync-lane offsets stay untouched: on the deferred path a reverted commit never completed its flush
+	// marker, so flushed_offset never covered the removed bytes. On the exclusive path a completed marker is only
+	// reverted after a failed fsync, which poisoned the WAL (no further durability is promised on it).
 }
 
 bool WriteAheadLog::Initialized() const {
@@ -139,8 +147,8 @@ public:
 			return FlushEncrypted();
 		}
 
-		// serialize this entry's writes into the WAL buffer against the group commit sync leader's push-to-OS
-		// (which takes the same flush lock) - see WriteAheadLog::LockFlush()
+		// serialize this entry's writes into the WAL buffer against concurrent buffer readers/writers
+		// (which take the same flush lock) - see WriteAheadLog::LockFlush()
 		auto flush_guard = wal.LockFlush();
 		auto data = memory_stream.GetData();
 		auto size = memory_stream.GetPosition();
@@ -159,7 +167,7 @@ public:
 		auto &catalog = wal.GetDatabase().GetCatalog().Cast<DuckCatalog>();
 		auto encryption_key_id = catalog.GetEncryptionKeyId();
 
-		// serialize this entry's writes into the WAL buffer against the sync leader's push-to-OS (see LockFlush())
+		// serialize this entry's writes into the WAL buffer against concurrent buffer access (see LockFlush())
 		auto flush_guard = wal.LockFlush();
 		auto data = memory_stream.GetData();
 		auto size = memory_stream.GetPosition();
@@ -603,11 +611,10 @@ void WriteAheadLog::Flush() {
 		return;
 	}
 	auto target_offset = WriteFlushMarker();
-	// the caller holds the WAL lock, so no concurrent appends can arrive - no point waiting for a batch
-	SyncUpTo(target_offset, false);
+	GroupSync(target_offset);
 }
 
-idx_t WriteAheadLog::WriteFlushMarker(bool requires_block_sync, bool push_to_os) {
+idx_t WriteAheadLog::WriteFlushMarker(bool requires_block_sync) {
 	if (!writer) {
 		return 0;
 	}
@@ -619,145 +626,118 @@ idx_t WriteAheadLog::WriteFlushMarker(bool requires_block_sync, bool push_to_os)
 	idx_t target_offset;
 	idx_t file_size;
 	{
-		// Under flush_lock: (optionally) push the buffered data to the OS now, and snapshot + advance written_offset.
-		// Holding flush_lock keeps the push and the written_offset update atomic with respect to the sync leader
-		// (which also pushes the buffer + reads written_offset under flush_lock). In the deferred path
-		// (push_to_os=false) the bytes stay buffered until the sync leader flushes them.
+		// Under flush_lock: push the buffered bytes into the OS page cache (no fsync - that happens in GroupSync,
+		// where concurrent committers overlap or share fsyncs) and snapshot + advance flushed_offset. Callers are
+		// serialized (WAL append lock or exclusive WAL lock), so flushed_offset advances monotonically and only at
+		// completed markers - the invariant the fsync lanes rely on (see the header).
 		auto flush_guard = LockFlush();
-		if (push_to_os) {
-			// synchronous path: push all buffered data to the operating system now (the fsync happens in SyncUpTo)
-			writer->Flush();
-		}
-		// note: GetTotalWritten() is the logical byte count (buffered + flushed), the same whether or not we pushed
+		writer->Flush();
 		target_offset = writer->GetTotalWritten();
 		file_size = writer->GetFileSize();
 		if (requires_block_sync) {
 			// record that this marker references optimistically written row group data
-			// this must happen BEFORE written_offset advances: any sync leader whose fsync covers this marker
-			// must observe the block sync requirement (see SyncUpTo)
+			// this must happen BEFORE flushed_offset advances: any fsync lane whose target covers this marker
+			// must observe the block sync requirement (see GroupSync)
 			block_sync_pending_offset = MaxValue<idx_t>(block_sync_pending_offset.load(), target_offset);
 		}
-		written_offset = target_offset;
+		flushed_offset.store(target_offset, std::memory_order_release);
 	}
 	storage_manager.SetWALSize(file_size);
 	return target_offset;
 }
 
-void WriteAheadLog::SyncUpTo(idx_t target_offset, bool wait_for_batch, bool leader_pushes_batch) {
-	std::unique_lock<mutex> lock(sync_mutex);
-	while (synced_offset < target_offset) {
-		if (sync_failed) {
-			// A previous batched fsync failed. The OS may have dropped the failed dirty pages (marking them clean)
-			// without them reaching disk, so a retried fsync could falsely report success for flush markers that
-			// were never persisted. Those markers cannot be truncated anymore - fail every waiter instead of
-			// acknowledging durability that cannot be guaranteed. (Targets covered by an earlier successful fsync
-			// do not reach this point: synced_offset already covers them.)
-			throw FatalException(
-			    "Failed to sync WAL during commit: an earlier WAL sync failed, durability can no longer be "
-			    "guaranteed");
+void WriteAheadLog::BumpSyncEpochNotify() {
+	{
+		// the epoch advances under the same mutex that guards the waiters' predicate check, so a waiter either sees
+		// the new epoch and does not park, or is parked and receives the notify; notifying after the unlock keeps
+		// woken waiters from immediately colliding with a held mutex
+		std::lock_guard<std::mutex> guard(sync_wait_mutex);
+		sync_epoch.fetch_add(1, std::memory_order_acq_rel);
+	}
+	sync_wait_cv.notify_all();
+}
+
+void WriteAheadLog::WaitSyncEpochChange(uint64_t current) {
+	std::unique_lock<std::mutex> guard(sync_wait_mutex);
+	sync_wait_cv.wait(guard, [&]() { return sync_epoch.load(std::memory_order_acquire) != current; });
+}
+
+void WriteAheadLog::GroupSync(idx_t target_offset) {
+	if (!writer || target_offset == 0) {
+		return;
+	}
+	for (;;) {
+		// the epoch must be read BEFORE the durable/failed checks: a bump between those checks and the park then
+		// makes the park return immediately instead of missing the update
+		uint64_t epoch = sync_epoch.load(std::memory_order_acquire);
+		if (durable_offset.load(std::memory_order_acquire) >= target_offset) {
+			return;
 		}
-		if (sync_in_progress) {
-			// another thread is currently performing an fsync - wait for it to finish
-			// its fsync might not cover our target offset (it could have started before our data was written),
-			// in which case we loop around and either become the next leader or wait again
-			sync_waiters++;
-			sync_cv.wait(lock);
-			sync_waiters--;
+		if (sync_failed.load(std::memory_order_acquire)) {
+			// a previous fsync failed: the OS may have dropped the failed dirty pages as clean, so a retried fsync
+			// could falsely report success for flush markers that never reached disk - fail every waiter instead of
+			// acknowledging durability that cannot be guaranteed
+			throw FatalException("Failed to sync WAL during commit: an earlier WAL sync failed, durability can no "
+			                     "longer be guaranteed");
+		}
+		// A committer fsyncs itself - overlapping with any fsyncs already in flight, up to the file system's declared
+		// sync parallelism - unless an in-flight fsync's target already covers its bytes, in which case it parks
+		// until durability advances. Overlapping fsyncs pipeline the device/network round trips (a commit arriving
+		// mid-fsync does not wait out someone else's round trip); committers beyond the lane cap park, and the next
+		// fsync's late-snapped target covers them (group commit, no delay window).
+		idx_t lanes = active_syncs.load(std::memory_order_acquire);
+		if (lanes > 0 && syncing_target.load(std::memory_order_acquire) >= target_offset) {
+			// if the covering fsync completes between the two loads, its epoch bump makes this park return immediately
+			WaitSyncEpochChange(epoch);
 			continue;
 		}
-		// no fsync in progress - this thread becomes the sync leader
-		// the fsync covers everything pushed to the operating system up to this point, including the flush
-		// markers of other concurrently committing transactions - they share this single fsync (group commit)
-		sync_in_progress = true;
-		bool do_batch_wait = wait_for_batch && batch_commits;
-		lock.unlock();
-		auto sync_target = written_offset.load();
-		if (do_batch_wait) {
-			// Other transactions were committing concurrently during the previous fsync.
-			// Before fsync-ing, give concurrently committing transactions a window to finish appending their
-			// flush markers, so that this fsync covers them as well and they do not have to wait for the next
-			// one (micro-batching, similar in spirit to PostgreSQL's commit_delay).
-			// The maximum window is group_commit_delay microseconds; with -1 (automatic, the
-			// default) it is scaled to a fraction of the observed fsync duration: a wait that is small relative
-			// to the fsync adds little commit latency, while letting (at best) an entire round of concurrent
-			// committers share this fsync. The wait stops early as soon as no new appends arrive.
-			auto delay_micros = Settings::Get<GroupCommitDelaySetting>(GetDatabase().GetDatabase());
-			if (delay_micros < 0) {
-				delay_micros = static_cast<int64_t>(sync_duration_micros.load() / 4);
-			}
-			if (delay_micros > 0) {
-				auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_micros);
-				// note that the effective poll granularity is limited by the operating system timer resolution
-				auto poll_interval = std::chrono::microseconds(MaxValue<int64_t>(delay_micros / 10, 20));
-				while (true) {
-					std::this_thread::sleep_for(poll_interval);
-					auto new_target = written_offset.load();
-					if (new_target == sync_target) {
-						// no new appends - stop waiting
-						break;
-					}
-					sync_target = new_target;
-					if (std::chrono::steady_clock::now() >= deadline) {
-						break;
-					}
-				}
-			}
+		if (lanes >= sync_lane_cap || !active_syncs.compare_exchange_strong(lanes, lanes + 1, std::memory_order_acq_rel,
+		                                                                    std::memory_order_acquire)) {
+			WaitSyncEpochChange(epoch);
+			continue;
 		}
-		if (leader_pushes_batch && writer) {
-			// Deferred group commit: committers only appended their flush markers to the in-memory WAL buffer
-			// (WriteFlushMarker with push_to_os=false). The sync leader now pushes the whole accumulated batch to
-			// the operating system in a single write(), so the per-write round-trip is shared across all batched
-			// commits instead of paid per commit. The push runs under the WAL flush_lock - NOT the storage manager WAL
-			// lock - so it cannot deadlock against a checkpoint / catalog commit / synchronous commit that holds the
-			// WAL lock and waits. Pushing the whole buffer is safe: deferred commits write their WAL entries only after
-			// ValidateCommitConflicts (so they cannot be reverted/truncated), and any not-yet-marked trailing bytes
-			// are ignored on crash recovery (replay stops at the last flush marker). sync_target stays at the last
-			// committed marker, so durability is only ever promised up to a committed point.
-			lock_guard<mutex> flush_guard(flush_lock);
-			writer->Flush();
-			sync_target = written_offset.load();
+		// cover every byte flushed to the page cache up to now - includes our own bytes (late-snapped target)
+		idx_t target = flushed_offset.load(std::memory_order_acquire);
+		idx_t prev_syncing = syncing_target.load(std::memory_order_relaxed);
+		while (prev_syncing < target &&
+		       !syncing_target.compare_exchange_weak(prev_syncing, target, std::memory_order_release,
+		                                             std::memory_order_relaxed)) {
 		}
-		ErrorData error;
 		try {
-			if (block_sync_pending_offset.load() > block_synced_offset.load()) {
+			if (block_sync_pending_offset.load(std::memory_order_acquire) >
+			    block_synced_offset.load(std::memory_order_acquire)) {
 				// one or more flush markers covered by this fsync reference optimistically written row group
 				// data: the referenced blocks must be durable in the database file BEFORE the WAL fsync makes
 				// those markers durable. Perform one (batched) database file sync covering all of them.
-				// A marker above sync_target conservatively triggers another sync in a later round.
+				// A marker above our target conservatively triggers another sync in a later lane.
 				storage_manager.GetBlockManager().FileSync();
-				block_synced_offset = MaxValue<idx_t>(block_synced_offset.load(), sync_target);
+				idx_t prev_block = block_synced_offset.load(std::memory_order_relaxed);
+				while (prev_block < target &&
+				       !block_synced_offset.compare_exchange_weak(prev_block, target, std::memory_order_release,
+				                                                  std::memory_order_relaxed)) {
+				}
 			}
-			auto sync_start = std::chrono::steady_clock::now();
 			writer->SyncData();
-			// update the moving average of the fsync duration (drives the automatic micro-batching window)
-			auto sync_micros = static_cast<idx_t>(
-			    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - sync_start)
-			        .count());
-			auto previous = sync_duration_micros.load();
-			sync_duration_micros = previous == 0 ? sync_micros : (3 * previous + sync_micros) / 4;
-		} catch (std::exception &ex) {
-			error = ErrorData(ex);
+		} catch (const std::exception &ex) {
+			// A failed fsync is unrecoverable (see the sync_failed comment in the header): poison the WAL so every
+			// pending and future committer fails, and escalate. A later checkpoint replaces the WAL (object and
+			// file), which resets the poison; until then no durability is promised on this WAL.
+			sync_failed.store(true, std::memory_order_release);
+			active_syncs.fetch_sub(1, std::memory_order_acq_rel);
+			BumpSyncEpochNotify();
+			ErrorData error(ex);
+			throw FatalException("Failed to sync WAL during commit. Cannot continue operation.\nError: %s",
+			                     error.Message());
 		}
-		// detect concurrent commit activity: did other transactions append while we were syncing?
-		auto post_sync_written = written_offset.load();
-		lock.lock();
-		sync_in_progress = false;
-		// adaptive micro-batching: only wait for a batch to form when there is concurrent commit activity,
-		// i.e. other transactions are waiting on this fsync or appended to the WAL while we were syncing
-		batch_commits = sync_waiters > 0 || post_sync_written > sync_target;
-		if (!error.HasError()) {
-			synced_offset = MaxValue(synced_offset, sync_target);
-		} else if (leader_pushes_batch) {
-			// deferred (group) commit: the failed fsync covered other commits' non-truncatable flush markers -
-			// poison the sync state so no waiter acknowledges durability based on a retried fsync (see above).
-			// The exclusive path is not poisoned: a failed synchronous commit truncates its own bytes on revert,
-			// so later commits fsync fresh pages and can genuinely succeed.
-			sync_failed = true;
+		// raise durable_offset to (at least) this fsync's target; concurrent lanes may race, take the max.
+		// Offsets only advance at completed markers and truncation removes only marker-less bytes, so the
+		// snapshotted target is always covered by this fsync (no truncate generation needed).
+		idx_t durable = durable_offset.load(std::memory_order_relaxed);
+		while (durable < target && !durable_offset.compare_exchange_weak(durable, target, std::memory_order_release,
+		                                                                 std::memory_order_relaxed)) {
 		}
-		sync_cv.notify_all();
-		if (error.HasError()) {
-			error.Throw();
-		}
+		active_syncs.fetch_sub(1, std::memory_order_acq_rel);
+		BumpSyncEpochNotify();
 	}
 }
 

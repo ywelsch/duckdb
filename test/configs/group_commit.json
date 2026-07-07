@@ -1,7 +1,6 @@
 {
-  "description": "Run on persistent databases with the group-commit micro-batching delay disabled (delay=0, no-wait path).",
+  "description": "Run on persistent databases to exercise the WAL group-commit path (serial fsync lane).",
   "initial_db": "{TEST_DIR}/{BASE_TEST_NAME}__test__config__group_commit.db",
-  "on_init": "SET group_commit_delay=0;",
   "skip_compiled": "true",
   "inherit_skip_tests": "test/configs/force_storage.json"
 }

@@ -123,28 +123,19 @@ public:
 	void Truncate(idx_t size);
 	//! Write a WAL_FLUSH marker, push all buffered data to the operating system and fsync (fully durable).
 	void Flush();
-	//! Only writes a WAL_FLUSH marker. Returns the WAL offset that a subsequent SyncUpTo() call must reach to make the
-	//! data durable. The caller must hold the WAL lock of the storage manager.
-	//! If push_to_os is true the buffered data is pushed to the operating system inline (the synchronous commit
-	//! path). If false, only the in-memory buffer is advanced and the push to the OS is deferred to the group
-	//! commit sync leader (SyncUpTo with leader_pushes_batch), so that a single write() covers the whole batch.
+	//! Only writes a WAL_FLUSH marker and pushes the buffered bytes to the OS page cache, WITHOUT issuing an fsync.
+	//! Returns the WAL offset that a subsequent GroupSync() call must reach to make the data durable. Callers must be
+	//! serialized (the WAL append lock on the deferred path, the exclusive WAL lock otherwise) so the published
+	//! flushed_offset stays monotonic.
 	//! If requires_block_sync is set, the commit completed by this marker references optimistically written
-	//! row group data: the database file is fsynced (once, batched) by the sync leader BEFORE any WAL fsync
+	//! row group data: the database file is fsynced (once, batched) by an fsync lane BEFORE any WAL fsync
 	//! that makes this marker durable, so that the referenced blocks are always durable first.
-	idx_t WriteFlushMarker(bool requires_block_sync = false, bool push_to_os = true);
-	//! Ensure the WAL is fsynced at least up to the given target offset (as returned by WriteFlushMarker).
-	//! Safe to call without holding the WAL lock: concurrent callers elect a leader whose single fsync
-	//! covers all data pushed to the operating system so far (group commit).
-	//! wait_for_batch enables the adaptive micro-batching wait - pass false when the caller holds the WAL lock
-	//! (no concurrent appends can arrive, so there is nothing to wait for).
-	//! leader_pushes_batch makes the sync leader push the buffered WAL data to the OS (one write() for the whole
-	//! batch) before its fsync, under the WAL flush_lock - NOT the storage manager WAL lock. Pass true only when the
-	//! caller does NOT hold the WAL lock and the markers were written with push_to_os=false (the deferred path).
-	void SyncUpTo(idx_t target_offset, bool wait_for_batch, bool leader_pushes_batch = false);
-	//! The WAL offset (logical bytes written) that has been pushed to the operating system so far
-	idx_t GetWrittenOffset() const {
-		return written_offset;
-	}
+	idx_t WriteFlushMarker(bool requires_block_sync = false);
+	//! Group commit: make every WAL byte up to (at least) target_offset (as returned by WriteFlushMarker) durable.
+	//! Safe to call without holding the WAL lock: a committer fsyncs itself - overlapping with fsyncs already in
+	//! flight, up to the file system's declared sync parallelism - unless an in-flight fsync's target already covers
+	//! its bytes, in which case it parks until durability advances. Returns only once durable_offset >= target_offset.
+	void GroupSync(idx_t target_offset);
 	unique_lock<mutex> LockFlush() {
 		return unique_lock<mutex>(flush_lock);
 	}
@@ -160,44 +151,56 @@ protected:
 	atomic<WALInitState> init_state;
 	optional_idx checkpoint_iteration;
 
-	//! Serializes pushes of the in-memory WAL buffer to the OS against writes into it (entry appends, flush
-	//! markers), truncation, header writes, and updates of written_offset - see LockFlush(). Distinct from the
-	//! storage manager WAL lock so the sync leader's batched push does not deadlock pending-commit drains.
-	//! mutable so the const GetTotalWritten() reader can serialize against the sync leader's buffer push.
+	//! Serializes writes into the in-memory WAL buffer (entry appends, flush markers), truncation, header writes,
+	//! and updates of flushed_offset - see LockFlush().
+	//! mutable so the const GetTotalWritten() reader can serialize against concurrent buffer writes.
 	mutable mutex flush_lock;
 
-	//! Group commit state.
-	//! Offsets are logical byte counters (BufferedFileWriter::GetTotalWritten), they increase monotonically
-	//! across committed flush markers and are not affected by truncation of reverted (uncommitted) entries.
-	//! Logical bytes pushed to the operating system so far - updated under flush_lock together with the buffer push.
-	atomic<idx_t> written_offset {0};
-	//! Protects synced_offset and sync_in_progress.
-	mutex sync_mutex;
-	//! Signalled when a leader finishes an fsync.
-	std::condition_variable sync_cv;
-	//! Logical bytes that are durable on disk.
-	idx_t synced_offset = 0;
-	//! Whether a sync leader is currently performing an fsync.
-	bool sync_in_progress = false;
-	//! The number of threads currently waiting for an fsync to complete.
-	idx_t sync_waiters = 0;
-	//! Set when a batched (group commit) fsync failed: the failed pages may have been dropped by the OS, so a
-	//! retried fsync could falsely succeed for markers that never reached disk. Once set, every SyncUpTo whose
-	//! target is not yet durable fails instead of retrying.
-	bool sync_failed = false;
-	//! Whether concurrent commit activity was detected during the last fsync - if set, the next sync leader
-	//! briefly waits for concurrent committers to append their flush markers before fsync-ing (micro-batching).
-	//! The maximum wait is controlled by the group_commit_delay setting.
-	bool batch_commits = false;
-	//! Exponentially weighted moving average of the observed fsync duration in microseconds - used to scale the
-	//! micro-batching window when group_commit_delay is -1 (automatic).
-	atomic<idx_t> sync_duration_micros {0};
-	//! Highest marker offset whose commit references optimistically written row group data (group commit only).
-	//! Updated in WriteFlushMarker BEFORE written_offset advances, so that any sync leader whose fsync covers
+private:
+	//! Park until sync_epoch differs from current (slow path only; fast paths never touch the mutex).
+	void WaitSyncEpochChange(uint64_t current);
+	//! Bump sync_epoch and wake every parked committer (called after durable_offset advances or the WAL is poisoned).
+	void BumpSyncEpochNotify();
+
+	//! Group commit fsync engine (adapted from the design in duckdb/duckdb#23655).
+	//! Offsets are logical byte counters (BufferedFileWriter::GetTotalWritten). They only ever advance at COMPLETED
+	//! flush markers, so they increase monotonically across committed markers: truncation of reverted entries removes
+	//! only marker-less bytes (a reverted commit never completed its marker), which no published offset ever covered.
+	//! An fsync therefore always covers every published offset at or below its snapshotted target, and no generation
+	//! tracking around truncation is needed.
+	//!
+	//! Maximum number of concurrent fsyncs worth issuing on this WAL's storage, set at initialization from the file
+	//! system's declared sync semantics (FileSystem::SyncParallelism): unbounded where a sync is a per-call round
+	//! trip that overlaps (network file systems), 1 where a sync commits a shared journal and concurrent syncs only
+	//! add cost (local file systems) - there the single stream's late-snapped targets batch every commit that arrived
+	//! during the previous fsync.
+	idx_t sync_lane_cap = 1;
+	//! Number of fsyncs currently in flight (bounded by sync_lane_cap).
+	atomic<idx_t> active_syncs {0};
+	//! Raise-only maximum target of any in-flight (or completed) fsync: a committer whose bytes are already covered
+	//! by an in-flight fsync parks instead of claiming a lane for a redundant fsync.
+	atomic<idx_t> syncing_target {0};
+	//! Parking word for committers waiting on durability: bumped on every durable_offset advance and on failure.
+	atomic<uint64_t> sync_epoch {0};
+	//! Terminal poison flag: after a failed fsync the OS may have dropped the failed dirty pages as clean, so a
+	//! retried fsync could falsely report success for bytes that never reached disk - durability can no longer be
+	//! promised for any pending offset. A checkpoint replaces the WAL (object and file), which resets this.
+	atomic<bool> sync_failed {false};
+	//! Guards only the parking of sync waiters; committers that are covered by a completed fsync, and committers
+	//! issuing their own fsync, never take it.
+	std::mutex sync_wait_mutex;
+	std::condition_variable sync_wait_cv;
+	//! Highest WAL byte offset known durable. Raise-only; stored by an fsyncer strictly AFTER its Sync() returns,
+	//! acquire-loaded as the sole durable-before-ack predicate.
+	atomic<idx_t> durable_offset {0};
+	//! Highest WAL byte offset pushed to the page cache. Release-stored under flush_lock by WriteFlushMarker (callers
+	//! are serialized, so it is monotonic), acquire-loaded by fsyncers as their target.
+	atomic<idx_t> flushed_offset {0};
+	//! Highest marker offset whose commit references optimistically written row group data.
+	//! Updated in WriteFlushMarker BEFORE flushed_offset advances, so that any fsync lane whose target covers
 	//! the marker observes the block sync requirement.
 	atomic<idx_t> block_sync_pending_offset {0};
-	//! Marker offset up to which the referenced row group blocks are known durable in the database file.
-	//! Only updated by sync leaders (serialized via sync_in_progress).
+	//! Marker offset up to which the referenced row group blocks are known durable in the database file (raise-only).
 	atomic<idx_t> block_synced_offset {0};
 };
 
