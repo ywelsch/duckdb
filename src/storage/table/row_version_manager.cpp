@@ -28,6 +28,26 @@ idx_t RowVersionManager::GetCommittedDeletedCount(idx_t count) {
 	return deleted_count;
 }
 
+idx_t RowVersionManager::GetCommittedAppendCount(idx_t count) {
+	lock_guard<mutex> l(version_lock);
+	idx_t committed_count = 0;
+	for (idx_t r = 0, i = 0; r < count; r += STANDARD_VECTOR_SIZE, i++) {
+		idx_t max_count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, count - r);
+		if (i >= vector_info.size() || !vector_info[i]) {
+			// no version info for this vector - all rows are committed
+			committed_count += max_count;
+			continue;
+		}
+		idx_t vector_committed = vector_info[i]->GetCommittedAppendCount(max_count);
+		committed_count += vector_committed;
+		if (vector_committed < max_count) {
+			// found the first uncommitted row - uncommitted appends are always at the tail
+			break;
+		}
+	}
+	return committed_count;
+}
+
 optional_ptr<ChunkInfo> RowVersionManager::GetChunkInfo(idx_t vector_idx) {
 	if (vector_idx >= vector_info.size()) {
 		return nullptr;

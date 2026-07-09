@@ -49,8 +49,9 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_data
       optimistic_writer(new_data_table, parent.optimistic_writer) {
 	// Alter the column type.
 	auto &parent_collection = *parent.row_groups->collection;
-	auto new_collection =
-	    parent_collection.AlterType(context, alter_column_index, target_type, bound_columns, cast_expr);
+	// local collections are transaction-local - they cannot have pending commit appends
+	auto new_collection = parent_collection.AlterType(context, alter_column_index, target_type, bound_columns,
+	                                                  cast_expr, parent_collection.GetTotalRows());
 	parent_collection.CommitDropColumn(alter_column_index);
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
@@ -65,7 +66,8 @@ LocalTableStorage::LocalTableStorage(DataTable &new_data_table, LocalTableStorag
       optimistic_writer(new_data_table, parent.optimistic_writer) {
 	// Remove the column from the previous table storage.
 	auto &parent_collection = *parent.row_groups->collection;
-	auto new_collection = parent_collection.RemoveColumn(drop_column_index);
+	// local collections are transaction-local - they cannot have pending commit appends
+	auto new_collection = parent_collection.RemoveColumn(drop_column_index, parent_collection.GetTotalRows());
 	parent_collection.CommitDropColumn(drop_column_index);
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
@@ -79,7 +81,9 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_dt, 
       optimistic_collections(std::move(parent.optimistic_collections)),
       optimistic_writer(new_dt, parent.optimistic_writer) {
 	auto &parent_collection = *parent.row_groups->collection;
-	auto new_collection = parent_collection.AddColumn(context, new_column, default_executor);
+	// local collections are transaction-local - they cannot have pending commit appends
+	auto new_collection =
+	    parent_collection.AddColumn(context, new_column, default_executor, parent_collection.GetTotalRows());
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
 	append_indexes.Move(parent.append_indexes);
@@ -617,9 +621,6 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 		storage.AppendToTable(transaction, append_state);
 	}
 	transaction.PushAppend(table, NumericCast<idx_t>(append_state.row_start), append_count);
-	// the rows are now physically present in the table, but the commit can still fail - prevent the table from
-	// being altered (which would copy the row groups) until the append is committed or reverted
-	table.MarkCommitAppendPending(append_state);
 
 #ifdef DEBUG
 	// Verify that our index memory is stable.

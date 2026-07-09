@@ -257,13 +257,8 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data) {
 	case UndoFlags::INSERT_TUPLE: {
 		// append:
 		auto info = reinterpret_cast<AppendInfo *>(data);
-		if (!info->table->IsMainTable()) {
-			auto table_name = info->table->GetTableName();
-			auto table_modification = info->table->TableModification();
-			throw TransactionException("Attempting to modify table %s but another transaction has %s this table",
-			                           table_name, table_modification);
-		}
-		// mark the tuples as committed
+		// mark the tuples as committed - throws if the table has been altered by a different transaction
+		// (the check is made under the append lock, atomic with an ALTER snapshotting the row groups)
 		info->table->CommitAppend(commit_id, info->start_row, info->count);
 		break;
 	}
@@ -323,7 +318,7 @@ void CommitState::RevertCommit(UndoFlags type, data_ptr_t data) {
 	case UndoFlags::INSERT_TUPLE: {
 		auto info = reinterpret_cast<AppendInfo *>(data);
 		// revert this append
-		info->table->RevertAppend(transaction, *info);
+		info->table->RevertAppend(transaction, info->start_row, info->count);
 		break;
 	}
 	case UndoFlags::DELETE_TUPLE: {

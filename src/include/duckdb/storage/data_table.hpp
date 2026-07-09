@@ -21,11 +21,8 @@
 #include "duckdb/storage/table/table_statistics.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 
-#include <condition_variable>
-
 namespace duckdb {
 
-struct AppendInfo;
 class BoundForeignKeyConstraint;
 class ClientContext;
 class ColumnDataCollection;
@@ -172,14 +169,14 @@ public:
 	void Append(DataChunk &chunk, TableAppendState &state);
 	//! Finalize an append
 	void FinalizeAppend(DuckTransaction &transaction, TableAppendState &state);
-	//! Commit the append
+	//! Commit the append - throws a TransactionException if the table has been altered by a different transaction
 	void CommitAppend(transaction_t commit_id, idx_t row_start, idx_t count);
 	//! Write a segment of the table to the WAL
 	void WriteToLog(DuckTransaction &transaction, WriteAheadLog &log, idx_t row_start, idx_t count,
 	                optional_ptr<StorageCommitState> commit_state);
 	//! Revert a set of appends made by the given AppendState, used to revert appends in the event of an error during
 	//! commit (e.g. because of an I/O exception)
-	void RevertAppend(DuckTransaction &transaction, AppendInfo &append_info);
+	void RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_t count);
 	void RevertAppendInternal(idx_t start_row);
 
 	void ScanTableSegment(DuckTransaction &transaction, idx_t start_row, idx_t count,
@@ -294,12 +291,6 @@ public:
 	//! Returns a list of the partition stats
 	vector<PartitionStatistics> GetPartitionStats(ClientContext &context);
 
-	//! Mark that a committing transaction has physically appended rows to this table that are not yet committed or
-	//! reverted. Must be called while holding the append lock (through the given append state).
-	void MarkCommitAppendPending(TableAppendState &state);
-	//! Resolve the pending commit append of this append info - called once the commit has become durable
-	void ClearCommitAppendPending(AppendInfo &append_info);
-
 private:
 	//! Verify the new added constraints against current persistent&local data
 	void VerifyNewConstraint(LocalStorage &local_storage, DataTable &parent, const BoundConstraint &constraint);
@@ -317,12 +308,12 @@ private:
 	//! Rebuild all indexes after vacuuming changed rowid's (used with vacuum_rebuild_indexes setting).
 	void RebuildIndexes();
 
-	//! Wait until no committing transaction has pending appended rows in this table.
-	//! Must be called with the append lock held (through the given lock) - the lock is released while waiting.
-	void WaitForPendingCommitAppend(unique_lock<mutex> &lock);
-	//! Resolve the pending commit append of this append info (if not already resolved).
+	//! The number of rows that can be safely snapshotted by an ALTER: all rows except those of pending commit
+	//! appends (derived from the row group version info). Pending appends are guaranteed to fail their commit once
+	//! the table version is flipped to ALTERED (the commit check runs under the append lock), so their subsequent
+	//! revert truncates the shared column data back to exactly this count.
 	//! Must be called while holding the append lock.
-	void ResolveCommitAppendPending(AppendInfo &append_info);
+	idx_t CommittedSnapshotCount() const;
 
 	void VerifyForeignKeyConstraint(optional_ptr<LocalTableStorage> storage,
 	                                const BoundForeignKeyConstraint &bound_foreign_key, ClientContext &context,
@@ -341,12 +332,6 @@ private:
 	vector<ColumnDefinition> column_definitions;
 	//! Lock for appending entries to the table
 	mutex append_lock;
-	//! The number of committing transactions that have physically appended rows to this table that are not yet
-	//! committed or reverted (guarded by append_lock). While this is non-zero, the table cannot be altered - the
-	//! appended rows are shared into the row groups, and reverting them would corrupt any copy made by an ALTER.
-	idx_t pending_commit_append_count = 0;
-	//! Signalled when has_pending_commit_append is cleared
-	std::condition_variable pending_commit_append_cv;
 	//! The row groups of the table
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table

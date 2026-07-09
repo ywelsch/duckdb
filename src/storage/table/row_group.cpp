@@ -384,8 +384,10 @@ bool RowGroup::InitializeScan(CollectionScanState &state, SegmentNode<RowGroup> 
 	return true;
 }
 
-unique_ptr<RowGroup> RowGroup::CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count) {
-	auto row_group = make_uniq<RowGroup>(new_collection, this->count);
+unique_ptr<RowGroup> RowGroup::CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count,
+                                                     idx_t target_count) {
+	D_ASSERT(target_count <= this->count);
+	auto row_group = make_uniq<RowGroup>(new_collection, target_count);
 	row_group->deletes_pointers = deletes_pointers;
 	row_group->deletes_is_loaded = deletes_is_loaded.load();
 	row_group->owned_version_info = owned_version_info;
@@ -405,7 +407,7 @@ unique_ptr<RowGroup> RowGroup::CreateNewRowGroupCopy(RowGroupCollection &new_col
 unique_ptr<RowGroup> RowGroup::AlterType(RowGroupCollection &new_collection, const LogicalType &target_type,
                                          idx_t changed_idx, ExpressionExecutor &executor,
                                          CollectionScanState &scan_state, SegmentNode<RowGroup> &node,
-                                         DataChunk &scan_chunk) {
+                                         DataChunk &scan_chunk, idx_t target_count) {
 	Verify();
 
 	// construct a new column data for this type
@@ -442,7 +444,7 @@ unique_ptr<RowGroup> RowGroup::AlterType(RowGroupCollection &new_collection, con
 		GetColumns();
 	}
 	unique_lock<mutex> lock(row_group_lock);
-	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size());
+	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size(), target_count);
 	// copy existing columns, but swap out the one at changed_idx
 	for (idx_t i = 0; i < columns.size(); i++) {
 		if (i == changed_idx) {
@@ -471,14 +473,14 @@ unique_ptr<RowGroup> RowGroup::AlterType(RowGroupCollection &new_collection, con
 }
 
 unique_ptr<RowGroup> RowGroup::AddColumn(RowGroupCollection &new_collection, ColumnDefinition &new_column,
-                                         ExpressionExecutor &executor, Vector &result) {
+                                         ExpressionExecutor &executor, Vector &result, idx_t target_count) {
 	Verify();
 
 	// construct a new column data for the new column
 	auto added_column =
 	    ColumnData::CreateColumn(GetBlockManager(), GetTableInfo(), GetColumnCount(), new_column.Type());
 
-	idx_t rows_to_write = this->count;
+	idx_t rows_to_write = target_count;
 	if (rows_to_write > 0) {
 		DataChunk dummy_chunk;
 
@@ -499,7 +501,7 @@ unique_ptr<RowGroup> RowGroup::AddColumn(RowGroupCollection &new_collection, Col
 	}
 
 	unique_lock<mutex> lock(row_group_lock);
-	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size() + 1);
+	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size() + 1, target_count);
 	// copy existing columns
 	for (idx_t i = 0; i < columns.size(); i++) {
 		row_group->columns[i] = columns[i];
@@ -523,7 +525,8 @@ unique_ptr<RowGroup> RowGroup::AddColumn(RowGroupCollection &new_collection, Col
 	return row_group;
 }
 
-unique_ptr<RowGroup> RowGroup::RemoveColumn(RowGroupCollection &new_collection, idx_t removed_column) {
+unique_ptr<RowGroup> RowGroup::RemoveColumn(RowGroupCollection &new_collection, idx_t removed_column,
+                                            idx_t target_count) {
 	Verify();
 
 	D_ASSERT(removed_column < columns.size());
@@ -534,7 +537,7 @@ unique_ptr<RowGroup> RowGroup::RemoveColumn(RowGroupCollection &new_collection, 
 		GetColumns();
 	}
 	unique_lock<mutex> lock(row_group_lock);
-	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size() - 1);
+	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size() - 1, target_count);
 	// copy over all columns except for the removed one
 	idx_t target_idx = 0;
 	for (idx_t i = 0; i < columns.size(); i++) {
@@ -974,6 +977,16 @@ void RowGroup::AppendVersionInfo(TransactionData transaction, idx_t count) {
 	auto &vinfo = GetOrCreateVersionInfo();
 	vinfo.AppendVersionInfo(transaction, count, row_group_start, row_group_end);
 	SetCount(row_group_end);
+}
+
+idx_t RowGroup::GetCommittedAppendCount() {
+	auto vinfo = GetVersionInfoIfLoaded();
+	if (!vinfo) {
+		// no (loaded) version info - all rows are committed
+		// rows appended by an in-flight transaction always have in-memory version info
+		return count;
+	}
+	return MinValue<idx_t>(count, vinfo->GetCommittedAppendCount(count));
 }
 
 void RowGroup::CommitAppend(transaction_t commit_id, idx_t row_group_start, idx_t count) {

@@ -30,7 +30,6 @@
 #include "duckdb/storage/table/update_state.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
-#include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 
@@ -93,10 +92,10 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	default_executor.AddExpression(default_value);
 
 	// prevent any new tuples from being added to the parent
-	unique_lock<mutex> parent_lock(parent.append_lock);
-	parent.WaitForPendingCommitAppend(parent_lock);
+	lock_guard<mutex> parent_lock(parent.append_lock);
 
-	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
+	this->row_groups =
+	    parent.row_groups->AddColumn(context, new_column, default_executor, parent.CommittedSnapshotCount());
 
 	// also add this column to client local storage
 	local_storage.AddColumn(parent, *this, new_column, default_executor);
@@ -109,8 +108,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	// prevent any new tuples from being added to the parent
 	auto &local_storage = LocalStorage::Get(context, db);
-	unique_lock<mutex> parent_lock(parent.append_lock);
-	parent.WaitForPendingCommitAppend(parent_lock);
+	lock_guard<mutex> parent_lock(parent.append_lock);
 
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
@@ -145,7 +143,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 	}
 
 	// alter the row_groups and remove the column from each of them
-	this->row_groups = parent.row_groups->RemoveColumn(removed_column);
+	this->row_groups = parent.row_groups->RemoveColumn(removed_column, parent.CommittedSnapshotCount());
 
 	// scan the original table, and fill the new column with the transformed value
 	local_storage.DropColumn(parent, *this, removed_column);
@@ -179,8 +177,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	auto &local_storage = LocalStorage::Get(context, db);
 	// prevent any tuples from being added to the parent
-	unique_lock<mutex> lock(parent.append_lock);
-	parent.WaitForPendingCommitAppend(lock);
+	lock_guard<mutex> lock(parent.append_lock);
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -202,7 +199,8 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 
 	// set up the statistics for the table
 	// the column that had its type changed will have the new statistics computed during conversion
-	row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr);
+	row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
+	                                          parent.CommittedSnapshotCount());
 
 	// scan the original table, and fill the new column with the transformed value
 	local_storage.ChangeType(parent, *this, changed_idx, target_type, bound_columns, cast_expr);
@@ -1305,40 +1303,22 @@ void DataTable::WriteToLog(DuckTransaction &transaction, WriteAheadLog &log, idx
 
 void DataTable::CommitAppend(transaction_t commit_id, idx_t row_start, idx_t count) {
 	lock_guard<mutex> lock(append_lock);
+	// check for a conflicting ALTER under the append lock - this is atomic with an ALTER snapshotting the row
+	// groups and flipping the version, so an ALTER either observes this append as committed (and includes its rows
+	// in the snapshot), or this commit fails and the rows are reverted (and were excluded from the snapshot)
+	if (!IsMainTable()) {
+		throw TransactionException("Attempting to modify table %s but another transaction has %s this table",
+		                           GetTableName(), TableModification());
+	}
 	row_groups->CommitAppend(commit_id, row_start, count);
 }
 
-void DataTable::MarkCommitAppendPending(TableAppendState &state) {
-	D_ASSERT(state.append_lock.owns_lock());
-	pending_commit_append_count++;
-}
-
-void DataTable::ClearCommitAppendPending(AppendInfo &append_info) {
-	lock_guard<mutex> lock(append_lock);
-	ResolveCommitAppendPending(append_info);
-}
-
-void DataTable::ResolveCommitAppendPending(AppendInfo &append_info) {
-	// the append lock must be held here
-	if (append_info.pending_commit_resolved) {
-		// already resolved - a failed commit can revert the same append twice
-		return;
-	}
-	append_info.pending_commit_resolved = true;
-	D_ASSERT(pending_commit_append_count > 0);
-	pending_commit_append_count--;
-	if (pending_commit_append_count == 0) {
-		pending_commit_append_cv.notify_all();
-	}
-}
-
-void DataTable::WaitForPendingCommitAppend(unique_lock<mutex> &lock) {
-	D_ASSERT(lock.owns_lock());
-	// another transaction may be in the process of committing an append to this table
-	// the appended rows are physically present in the (shared) row groups, but the commit can still fail,
-	// in which case the rows are reverted - we cannot take a copy of the row groups until this is resolved
-	// the commit is guaranteed to complete (or revert) independently of us, so we can safely wait for it
-	pending_commit_append_cv.wait(lock, [&] { return pending_commit_append_count == 0; });
+idx_t DataTable::CommittedSnapshotCount() const {
+	// the append lock must be held here: it excludes concurrent flushes, commit stamps and reverts,
+	// so the version info gives a consistent answer
+	// rows of flushed-but-unresolved commit appends are excluded: flipping the version to ALTERED guarantees
+	// that these commits fail and the rows are reverted
+	return row_groups->GetCommittedAppendCount();
 }
 
 void DataTable::RevertAppendInternal(idx_t start_row) {
@@ -1347,13 +1327,9 @@ void DataTable::RevertAppendInternal(idx_t start_row) {
 	row_groups->RevertAppendInternal(start_row);
 }
 
-void DataTable::RevertAppend(DuckTransaction &transaction, AppendInfo &append_info) {
-	auto start_row = append_info.start_row;
-	auto count = append_info.count;
+void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_t count) {
 	lock_guard<mutex> lock(append_lock);
 	auto table_lock = transaction.SharedLockTable(*info);
-	// the pending append is being reverted
-	ResolveCommitAppendPending(append_info);
 
 	// revert any appends to indexes
 	if (!info->indexes.Empty()) {

@@ -125,10 +125,10 @@ public:
 
 	unique_ptr<RowGroup> AlterType(RowGroupCollection &collection, const LogicalType &target_type, idx_t changed_idx,
 	                               ExpressionExecutor &executor, CollectionScanState &scan_state,
-	                               SegmentNode<RowGroup> &node, DataChunk &scan_chunk);
+	                               SegmentNode<RowGroup> &node, DataChunk &scan_chunk, idx_t target_count);
 	unique_ptr<RowGroup> AddColumn(RowGroupCollection &collection, ColumnDefinition &new_column,
-	                               ExpressionExecutor &executor, Vector &intermediate);
-	unique_ptr<RowGroup> RemoveColumn(RowGroupCollection &collection, idx_t removed_column);
+	                               ExpressionExecutor &executor, Vector &intermediate, idx_t target_count);
+	unique_ptr<RowGroup> RemoveColumn(RowGroupCollection &collection, idx_t removed_column, idx_t target_count);
 
 	void CommitDrop();
 	void CommitDropColumn(const idx_t column_index);
@@ -160,6 +160,8 @@ public:
 	void AppendVersionInfo(TransactionData transaction, idx_t count);
 	//! Commit a previous append made by RowGroup::AppendVersionInfo
 	void CommitAppend(transaction_t commit_id, idx_t start, idx_t count);
+	//! Returns the number of leading rows whose insertion has been committed
+	idx_t GetCommittedAppendCount();
 	//! Revert a previous append made by RowGroup::AppendVersionInfo
 	void RevertAppend(idx_t new_count);
 	//! Clean up append states that can either be compressed or deleted
@@ -249,7 +251,8 @@ private:
 	                                               RowGroupWriteData &write_data);
 
 	bool HasUnloadedDeletes() const;
-	unique_ptr<RowGroup> CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count);
+	unique_ptr<RowGroup> CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count,
+	                                           idx_t target_count);
 
 private:
 	mutable mutex row_group_lock;

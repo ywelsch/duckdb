@@ -132,10 +132,13 @@ public:
 	const vector<LogicalType> &GetTypes() const;
 
 	shared_ptr<RowGroupCollection> AddColumn(ClientContext &context, ColumnDefinition &new_column,
-	                                         ExpressionExecutor &default_executor);
-	shared_ptr<RowGroupCollection> RemoveColumn(idx_t col_idx);
+	                                         ExpressionExecutor &default_executor, idx_t snapshot_row_count);
+	shared_ptr<RowGroupCollection> RemoveColumn(idx_t col_idx, idx_t snapshot_row_count);
+	//! Returns the number of leading rows whose insertion has been committed
+	idx_t GetCommittedAppendCount();
 	shared_ptr<RowGroupCollection> AlterType(ClientContext &context, idx_t changed_idx, const LogicalType &target_type,
-	                                         vector<StorageIndex> bound_columns, Expression &cast_expr);
+	                                         vector<StorageIndex> bound_columns, Expression &cast_expr,
+	                                         idx_t snapshot_row_count);
 	void VerifyNewConstraint(const QueryContext &context, DataTable &parent, const BoundConstraint &constraint);
 
 	void SetStats(TableStatistics &new_stats);

@@ -74,6 +74,14 @@ idx_t ChunkInfo::GetCommittedDeletedCount(idx_t max_count) const {
 	return max_count - not_deleted_count;
 }
 
+idx_t ChunkInfo::GetCommittedAppendCount(idx_t max_count) const {
+	// a reader at TRANSACTION_ID_START sees all committed inserts, but no in-flight (transaction-local) inserts
+	ScanOptions options(TransactionData(0, TRANSACTION_ID_START));
+	options.delete_type = DeletedScanType::INCLUDE_ALL_DELETED;
+	// uncommitted appends are always at the tail, so the visible count is the committed prefix
+	return GetSelVector(options, nullptr, max_count);
+}
+
 idx_t ChunkInfo::GetCheckpointRowCount(TransactionData transaction, idx_t max_count) {
 	ScanOptions options(transaction);
 	options.delete_type = DeletedScanType::INCLUDE_ALL_DELETED;

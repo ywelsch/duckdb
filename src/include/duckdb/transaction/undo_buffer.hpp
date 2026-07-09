@@ -60,8 +60,6 @@ public:
 	void Commit(UndoBuffer::IteratorState &iterator_state, CommitInfo &info);
 	//! Revert committed changes made in the UndoBuffer up until the currently committed state
 	void RevertCommit(UndoBuffer::IteratorState &iterator_state, transaction_t transaction_id);
-	//! Called after a commit has become durable - clears the pending commit append markers on the affected tables
-	void FinalizeCommitAppends();
 	//! Rollback the changes made in this UndoBuffer: should be called on
 	//! rollback
 	void Rollback();

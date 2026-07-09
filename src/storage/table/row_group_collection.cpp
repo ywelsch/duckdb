@@ -642,6 +642,23 @@ void RowGroupCollection::CommitAppend(transaction_t commit_id, idx_t row_start, 
 	}
 }
 
+idx_t RowGroupCollection::GetCommittedAppendCount() {
+	auto row_groups = GetRowGroups();
+	auto l = row_groups->Lock();
+	idx_t committed_count = 0;
+	for (auto &node : row_groups->SegmentNodes(l)) {
+		auto &row_group = node.GetNode();
+		idx_t row_start = node.GetRowStart() - row_groups->GetBaseRowId();
+		idx_t row_group_committed = row_group.GetCommittedAppendCount();
+		committed_count = row_start + row_group_committed;
+		if (row_group_committed < row_group.count) {
+			// found the first uncommitted row - uncommitted appends are always at the tail
+			break;
+		}
+	}
+	return committed_count;
+}
+
 void RowGroupCollection::RevertAppendInternal(idx_t new_end_idx) {
 	auto row_groups = GetRowGroups();
 
@@ -1962,13 +1979,14 @@ bool RowGroupCollection::SupportsPerColumnWrites() {
 // Alter
 //===--------------------------------------------------------------------===//
 shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &context, ColumnDefinition &new_column,
-                                                             ExpressionExecutor &default_executor) {
+                                                             ExpressionExecutor &default_executor,
+                                                             idx_t snapshot_row_count) {
 	idx_t new_column_idx = types.size();
 	auto new_types = types;
 	auto row_groups = GetRowGroups();
 	new_types.push_back(new_column.GetType());
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
-	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
+	                                                  row_groups->GetBaseRowId(), snapshot_row_count, row_group_size);
 
 	DataChunk dummy_chunk;
 	Vector default_vector(new_column.GetType());
@@ -1980,8 +1998,16 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 	// fill the column with its DEFAULT value, or NULL if none is specified
 	auto new_stats = make_uniq<SegmentStatistics>(new_column.GetType());
 	auto result_row_groups = result->GetRowGroups();
-	for (auto &current_row_group : row_groups->Segments()) {
-		auto new_row_group = current_row_group.AddColumn(*result, new_column, default_executor, default_vector);
+	for (auto &node : row_groups->SegmentNodes()) {
+		idx_t row_start = node.GetRowStart() - row_groups->GetBaseRowId();
+		if (row_start >= snapshot_row_count && row_start > 0) {
+			// this row group only holds rows beyond the snapshot (i.e. of pending commit appends) - skip it
+			break;
+		}
+		auto &current_row_group = node.GetNode();
+		idx_t target_count = MinValue<idx_t>(current_row_group.count, snapshot_row_count - row_start);
+		auto new_row_group =
+		    current_row_group.AddColumn(*result, new_column, default_executor, default_vector, target_count);
 		// merge in the statistics
 		new_row_group->MergeIntoStatistics(new_column_idx, new_column_stats.Statistics());
 
@@ -1991,22 +2017,29 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 	return result;
 }
 
-shared_ptr<RowGroupCollection> RowGroupCollection::RemoveColumn(idx_t col_idx) {
+shared_ptr<RowGroupCollection> RowGroupCollection::RemoveColumn(idx_t col_idx, idx_t snapshot_row_count) {
 	D_ASSERT(col_idx < types.size());
 	auto new_types = types;
 	auto row_groups = GetRowGroups();
 	new_types.erase_at(col_idx);
 
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
-	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
+	                                                  row_groups->GetBaseRowId(), snapshot_row_count, row_group_size);
 	result->stats.InitializeRemoveColumn(stats, col_idx);
 
 	auto result_lock = result->stats.GetLock();
 	result->stats.DestroyTableSample(*result_lock);
 
 	auto result_row_groups = result->GetRowGroups();
-	for (auto &current_row_group : row_groups->Segments()) {
-		auto new_row_group = current_row_group.RemoveColumn(*result, col_idx);
+	for (auto &node : row_groups->SegmentNodes()) {
+		idx_t row_start = node.GetRowStart() - row_groups->GetBaseRowId();
+		if (row_start >= snapshot_row_count && row_start > 0) {
+			// this row group only holds rows beyond the snapshot (i.e. of pending commit appends) - skip it
+			break;
+		}
+		auto &current_row_group = node.GetNode();
+		idx_t target_count = MinValue<idx_t>(current_row_group.count, snapshot_row_count - row_start);
+		auto new_row_group = current_row_group.RemoveColumn(*result, col_idx, target_count);
 		result_row_groups->AppendSegment(std::move(new_row_group));
 	}
 	return result;
@@ -2014,15 +2047,15 @@ shared_ptr<RowGroupCollection> RowGroupCollection::RemoveColumn(idx_t col_idx) {
 
 shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &context, idx_t changed_idx,
                                                              const LogicalType &target_type,
-                                                             vector<StorageIndex> bound_columns,
-                                                             Expression &cast_expr) {
+                                                             vector<StorageIndex> bound_columns, Expression &cast_expr,
+                                                             idx_t snapshot_row_count) {
 	D_ASSERT(changed_idx < types.size());
 	auto new_types = types;
 	auto row_groups = GetRowGroups();
 	new_types[changed_idx] = target_type;
 
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
-	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
+	                                                  row_groups->GetBaseRowId(), snapshot_row_count, row_group_size);
 	result->stats.InitializeAlterType(stats, changed_idx, target_type);
 
 	vector<LogicalType> scan_types;
@@ -2042,7 +2075,7 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 	TableScanState scan_state;
 	scan_state.Initialize(bound_columns);
 	scan_state.table_state.Initialize(context, GetTypes());
-	scan_state.table_state.max_row = row_groups->GetBaseRowId() + total_rows;
+	scan_state.table_state.max_row = row_groups->GetBaseRowId() + snapshot_row_count;
 
 	// now alter the type of the column within all of the row_groups individually
 	auto lock = result->stats.GetLock();
@@ -2050,9 +2083,15 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 	auto result_row_groups = result->GetRowGroups();
 
 	for (auto &node : row_groups->SegmentNodes()) {
+		idx_t row_start = node.GetRowStart() - row_groups->GetBaseRowId();
+		if (row_start >= snapshot_row_count && row_start > 0) {
+			// this row group only holds rows beyond the snapshot (i.e. of pending commit appends) - skip it
+			break;
+		}
 		auto &current_row_group = node.GetNode();
+		idx_t target_count = MinValue<idx_t>(current_row_group.count, snapshot_row_count - row_start);
 		auto new_row_group = current_row_group.AlterType(*result, target_type, changed_idx, executor,
-		                                                 scan_state.table_state, node, scan_chunk);
+		                                                 scan_state.table_state, node, scan_chunk, target_count);
 		new_row_group->MergeIntoStatistics(changed_idx, changed_stats.Statistics());
 		result_row_groups->AppendSegment(std::move(new_row_group));
 	}

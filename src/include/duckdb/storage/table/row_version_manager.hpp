@@ -24,6 +24,8 @@ public:
 	explicit RowVersionManager(BufferManager &buffer_manager) noexcept;
 
 	idx_t GetCommittedDeletedCount(idx_t count);
+	//! Returns the number of leading rows whose insertion has been committed
+	idx_t GetCommittedAppendCount(idx_t count);
 
 	idx_t GetSelVector(ScanOptions options, idx_t vector_idx, SelectionVector &sel_vector, idx_t max_count);
 	bool Fetch(TransactionData transaction, idx_t row);

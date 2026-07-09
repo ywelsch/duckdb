@@ -45,6 +45,8 @@ public:
 	virtual bool Fetch(TransactionData transaction, row_t row) = 0;
 	virtual void CommitAppend(transaction_t commit_id, idx_t start, idx_t end) = 0;
 	idx_t GetCommittedDeletedCount(idx_t max_count) const;
+	//! Returns the number of rows whose insertion has been committed (uncommitted appends are always at the tail)
+	idx_t GetCommittedAppendCount(idx_t max_count) const;
 	virtual bool Cleanup(transaction_t lowest_transaction) const;
 	virtual string ToString(idx_t max_count) const = 0;
 
