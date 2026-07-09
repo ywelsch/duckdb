@@ -128,6 +128,7 @@ void DuckTransaction::PushAppend(DataTable &table, idx_t start_row, idx_t row_co
 	append_info->table = &table;
 	append_info->start_row = start_row;
 	append_info->count = row_count;
+	append_info->pending_commit_resolved = false;
 }
 
 UndoBufferReference DuckTransaction::CreateUpdateInfo(idx_t type_size, DataTable &data_table, idx_t entries,
@@ -272,6 +273,8 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 			// if we have written to the WAL - flush after the commit has been successful
 			commit_state->FlushCommit();
 		}
+		// the commit is now durable - clear the pending commit append markers on the affected tables
+		undo_buffer.FinalizeCommitAppends();
 		return ErrorData();
 	} catch (std::exception &ex) {
 		undo_buffer.RevertCommit(iterator_state, this->transaction_id);

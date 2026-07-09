@@ -30,6 +30,7 @@
 #include "duckdb/storage/table/update_state.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 
@@ -92,7 +93,8 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	default_executor.AddExpression(default_value);
 
 	// prevent any new tuples from being added to the parent
-	lock_guard<mutex> parent_lock(parent.append_lock);
+	unique_lock<mutex> parent_lock(parent.append_lock);
+	parent.WaitForPendingCommitAppend(parent_lock);
 
 	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
 
@@ -107,7 +109,8 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	// prevent any new tuples from being added to the parent
 	auto &local_storage = LocalStorage::Get(context, db);
-	lock_guard<mutex> parent_lock(parent.append_lock);
+	unique_lock<mutex> parent_lock(parent.append_lock);
+	parent.WaitForPendingCommitAppend(parent_lock);
 
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
@@ -176,7 +179,8 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	auto &local_storage = LocalStorage::Get(context, db);
 	// prevent any tuples from being added to the parent
-	lock_guard<mutex> lock(append_lock);
+	unique_lock<mutex> lock(parent.append_lock);
+	parent.WaitForPendingCommitAppend(lock);
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -1304,15 +1308,52 @@ void DataTable::CommitAppend(transaction_t commit_id, idx_t row_start, idx_t cou
 	row_groups->CommitAppend(commit_id, row_start, count);
 }
 
+void DataTable::MarkCommitAppendPending(TableAppendState &state) {
+	D_ASSERT(state.append_lock.owns_lock());
+	pending_commit_append_count++;
+}
+
+void DataTable::ClearCommitAppendPending(AppendInfo &append_info) {
+	lock_guard<mutex> lock(append_lock);
+	ResolveCommitAppendPending(append_info);
+}
+
+void DataTable::ResolveCommitAppendPending(AppendInfo &append_info) {
+	// the append lock must be held here
+	if (append_info.pending_commit_resolved) {
+		// already resolved - a failed commit can revert the same append twice
+		return;
+	}
+	append_info.pending_commit_resolved = true;
+	D_ASSERT(pending_commit_append_count > 0);
+	pending_commit_append_count--;
+	if (pending_commit_append_count == 0) {
+		pending_commit_append_cv.notify_all();
+	}
+}
+
+void DataTable::WaitForPendingCommitAppend(unique_lock<mutex> &lock) {
+	D_ASSERT(lock.owns_lock());
+	// another transaction may be in the process of committing an append to this table
+	// the appended rows are physically present in the (shared) row groups, but the commit can still fail,
+	// in which case the rows are reverted - we cannot take a copy of the row groups until this is resolved
+	// the commit is guaranteed to complete (or revert) independently of us, so we can safely wait for it
+	pending_commit_append_cv.wait(lock, [&] { return pending_commit_append_count == 0; });
+}
+
 void DataTable::RevertAppendInternal(idx_t start_row) {
 	D_ASSERT(IsMainTable());
 	// revert appends made to row_groups
 	row_groups->RevertAppendInternal(start_row);
 }
 
-void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_t count) {
+void DataTable::RevertAppend(DuckTransaction &transaction, AppendInfo &append_info) {
+	auto start_row = append_info.start_row;
+	auto count = append_info.count;
 	lock_guard<mutex> lock(append_lock);
 	auto table_lock = transaction.SharedLockTable(*info);
+	// the pending append is being reverted
+	ResolveCommitAppendPending(append_info);
 
 	// revert any appends to indexes
 	if (!info->indexes.Empty()) {

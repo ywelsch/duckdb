@@ -323,7 +323,7 @@ void CommitState::RevertCommit(UndoFlags type, data_ptr_t data) {
 	case UndoFlags::INSERT_TUPLE: {
 		auto info = reinterpret_cast<AppendInfo *>(data);
 		// revert this append
-		info->table->RevertAppend(transaction, info->start_row, info->count);
+		info->table->RevertAppend(transaction, *info);
 		break;
 	}
 	case UndoFlags::DELETE_TUPLE: {

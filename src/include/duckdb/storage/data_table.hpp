@@ -21,8 +21,11 @@
 #include "duckdb/storage/table/table_statistics.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 
+#include <condition_variable>
+
 namespace duckdb {
 
+struct AppendInfo;
 class BoundForeignKeyConstraint;
 class ClientContext;
 class ColumnDataCollection;
@@ -176,7 +179,7 @@ public:
 	                optional_ptr<StorageCommitState> commit_state);
 	//! Revert a set of appends made by the given AppendState, used to revert appends in the event of an error during
 	//! commit (e.g. because of an I/O exception)
-	void RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_t count);
+	void RevertAppend(DuckTransaction &transaction, AppendInfo &append_info);
 	void RevertAppendInternal(idx_t start_row);
 
 	void ScanTableSegment(DuckTransaction &transaction, idx_t start_row, idx_t count,
@@ -291,6 +294,12 @@ public:
 	//! Returns a list of the partition stats
 	vector<PartitionStatistics> GetPartitionStats(ClientContext &context);
 
+	//! Mark that a committing transaction has physically appended rows to this table that are not yet committed or
+	//! reverted. Must be called while holding the append lock (through the given append state).
+	void MarkCommitAppendPending(TableAppendState &state);
+	//! Resolve the pending commit append of this append info - called once the commit has become durable
+	void ClearCommitAppendPending(AppendInfo &append_info);
+
 private:
 	//! Verify the new added constraints against current persistent&local data
 	void VerifyNewConstraint(LocalStorage &local_storage, DataTable &parent, const BoundConstraint &constraint);
@@ -307,6 +316,13 @@ private:
 
 	//! Rebuild all indexes after vacuuming changed rowid's (used with vacuum_rebuild_indexes setting).
 	void RebuildIndexes();
+
+	//! Wait until no committing transaction has pending appended rows in this table.
+	//! Must be called with the append lock held (through the given lock) - the lock is released while waiting.
+	void WaitForPendingCommitAppend(unique_lock<mutex> &lock);
+	//! Resolve the pending commit append of this append info (if not already resolved).
+	//! Must be called while holding the append lock.
+	void ResolveCommitAppendPending(AppendInfo &append_info);
 
 	void VerifyForeignKeyConstraint(optional_ptr<LocalTableStorage> storage,
 	                                const BoundForeignKeyConstraint &bound_foreign_key, ClientContext &context,
@@ -325,6 +341,12 @@ private:
 	vector<ColumnDefinition> column_definitions;
 	//! Lock for appending entries to the table
 	mutex append_lock;
+	//! The number of committing transactions that have physically appended rows to this table that are not yet
+	//! committed or reverted (guarded by append_lock). While this is non-zero, the table cannot be altered - the
+	//! appended rows are shared into the row groups, and reverting them would corrupt any copy made by an ALTER.
+	idx_t pending_commit_append_count = 0;
+	//! Signalled when has_pending_commit_append is cleared
+	std::condition_variable pending_commit_append_cv;
 	//! The row groups of the table
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table

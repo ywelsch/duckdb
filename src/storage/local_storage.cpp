@@ -617,6 +617,9 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 		storage.AppendToTable(transaction, append_state);
 	}
 	transaction.PushAppend(table, NumericCast<idx_t>(append_state.row_start), append_count);
+	// the rows are now physically present in the table, but the commit can still fail - prevent the table from
+	// being altered (which would copy the row groups) until the append is committed or reverted
+	table.MarkCommitAppendPending(append_state);
 
 #ifdef DEBUG
 	// Verify that our index memory is stable.

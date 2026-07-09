@@ -10,6 +10,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
+#include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/cleanup_state.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/delete_info.hpp"
@@ -207,6 +208,16 @@ void UndoBuffer::RevertCommit(UndoBuffer::IteratorState &end_state, transaction_
 	IterateEntries(start_state, end_state, [&](UndoFlags type, data_ptr_t data) { state.RevertCommit(type, data); });
 
 	state.Verify();
+}
+
+void UndoBuffer::FinalizeCommitAppends() {
+	UndoBuffer::IteratorState iterator_state;
+	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) {
+		if (type == UndoFlags::INSERT_TUPLE) {
+			auto info = reinterpret_cast<AppendInfo *>(data);
+			info->table->ClearCommitAppendPending(*info);
+		}
+	});
 }
 
 void UndoBuffer::Rollback() {
