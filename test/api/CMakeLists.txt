@@ -10,6 +10,7 @@ add_subdirectory(capi)
 add_subdirectory(udf_function)
 
 set(TEST_API_OBJECTS
+    test_alter_inflight_commit_race.cpp
     test_api.cpp
     test_config.cpp
     test_custom_allocator.cpp
