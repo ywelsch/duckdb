@@ -249,13 +249,14 @@ bool StorageManager::HasWAL() const {
 
 bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointOptions &options,
                                         ActiveCheckpointWrapper &active_checkpoint) {
-	unique_ptr<StorageLockKey> guard;
+	unique_lock<mutex> guard;
 	// Lock ordering: WAL lock -> transaction lock (in GetCheckpointTransaction)
 	if (!options.wal_lock) {
-		// not holding the WAL lock yet - grab it exclusively. The exclusive acquisition waits for all in-flight
-		// (shared) group-commit writers to finish publishing, so any commit that wrote its flush marker to this WAL
-		// is already durable and visible by the time we proceed.
-		guard = GetWALLockExclusive();
+		// not holding the WAL lock yet - grab it, then wait for all pending deferred (group) commits to finish
+		// publishing, so any commit that wrote its flush marker to this WAL is durable and visible by the time we
+		// proceed (and swap the WAL). New deferred commits cannot register while we hold the WAL lock.
+		guard = GetWALLock();
+		DuckTransactionManager::Get(db).DrainPendingCommits();
 	}
 	if (active_checkpoint.HasCheckpointContext()) {
 		// While holding the WAL lock, if we have a context then start a checkpoint transaction.
@@ -299,11 +300,12 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 	// as such override the checkpoint iteration number to the next one
 	auto &single_file_block_manager = GetBlockManager().Cast<SingleFileBlockManager>();
 	auto next_checkpoint_iteration = single_file_block_manager.GetCheckpointIteration() + 1;
-	wal = make_uniq<WriteAheadLog>(*this, checkpoint_wal_path, 0ULL, WALInitState::NO_WAL, next_checkpoint_iteration);
+	wal = make_shared_ptr<WriteAheadLog>(*this, checkpoint_wal_path, 0ULL, WALInitState::NO_WAL,
+	                                     next_checkpoint_iteration);
 	return true;
 }
 
-void StorageManager::WALFinishCheckpoint(StorageLockKey &) {
+void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &) {
 	D_ASSERT(wal.get());
 
 	// "wal" points to the checkpoint WAL
@@ -315,7 +317,7 @@ void StorageManager::WALFinishCheckpoint(StorageLockKey &) {
 		// in this case we can just remove the main WAL and re-instantiate it to empty
 		fs.TryRemoveFile(wal_path);
 		ResetWALEntriesCount();
-		wal = make_uniq<WriteAheadLog>(*this, wal_path);
+		wal = make_shared_ptr<WriteAheadLog>(*this, wal_path);
 		return;
 	}
 
@@ -328,22 +330,18 @@ void StorageManager::WALFinishCheckpoint(StorageLockKey &) {
 	fs.MoveFile(checkpoint_wal_path, wal_path);
 
 	// open what is now the main WAL again
-	wal = make_uniq<WriteAheadLog>(*this, wal_path);
+	wal = make_shared_ptr<WriteAheadLog>(*this, wal_path);
 	wal->Initialize();
 
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Finish Checkpoint");
 }
 
-unique_ptr<StorageLockKey> StorageManager::GetWALLockShared() {
-	return wal_lock.GetSharedLock();
+unique_lock<mutex> StorageManager::GetWALLock() {
+	return unique_lock<mutex>(wal_lock);
 }
 
-unique_ptr<StorageLockKey> StorageManager::GetWALLockExclusive() {
-	return wal_lock.GetExclusiveLock();
-}
-
-unique_lock<mutex> StorageManager::GetWALAppendLock() {
-	return unique_lock<mutex>(wal_append_lock);
+shared_ptr<WriteAheadLog> StorageManager::GetWALShared() {
+	return wal;
 }
 
 string StorageManager::GetWALPath(const string &suffix) {
@@ -512,7 +510,7 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 		sf_block_manager->CreateNewDatabase(context);
 		block_manager = std::move(sf_block_manager);
 		table_io_manager = make_uniq<SingleFileTableIOManager>(*block_manager, row_group_size);
-		wal = make_uniq<WriteAheadLog>(*this, wal_path);
+		wal = make_shared_ptr<WriteAheadLog>(*this, wal_path);
 
 	} else {
 		// Either the file exists, or we are in read-only mode, so we

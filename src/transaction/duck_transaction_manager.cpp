@@ -352,6 +352,11 @@ void DuckTransactionManager::FinishPendingCommit(idx_t publish_seq) {
 	publish_cv.notify_all();
 }
 
+void DuckTransactionManager::DrainPendingCommits() {
+	std::unique_lock<mutex> guard(publish_lock);
+	publish_cv.wait(guard, [&]() { return pending_commit_publishes.empty(); });
+}
+
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
 	unique_lock<mutex> t_lock(transaction_lock);
@@ -369,14 +374,16 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	auto undo_properties = transaction.GetUndoProperties();
 	auto checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties);
 	ErrorData error;
-	// The WAL lock is a read-write lock: data-only group commits take it SHARED (held through publish, so concurrent
-	// committers batch and a checkpoint/catalog change taking it EXCLUSIVE waits for them); checkpointing and
-	// catalog-changing commits take it EXCLUSIVE.
-	unique_ptr<StorageLockKey> held_wal_lock;
-	// Held by shared (data) committers across their WAL entry+marker append so their entries stay contiguous; the
-	// shared WAL lock alone would let concurrent committers interleave their entries and corrupt the WAL. Released
-	// before the fsync so batching is preserved. Exclusive committers do not need it (the WAL lock serializes them).
-	unique_lock<mutex> append_guard;
+	// The WAL lock (a plain mutex) serializes WAL appends (entries + flush marker) across committers. Data-only
+	// group commits release it right after their append, BEFORE the fsync, so fsyncs batch and overlap across
+	// committers; checkpointing and catalog-changing commits drain pending deferred publishes after acquiring it
+	// (DrainPendingCommits) and hold it through their synchronous publish.
+	unique_lock<mutex> held_wal_lock;
+	// Pin on the WAL object for the deferred path: the fsync (GroupSync) runs after the WAL lock is released, so a
+	// concurrent checkpoint swapping the WAL must not free the object out from under it. The checkpoint itself
+	// cannot run until this commit publishes (it drains pending publishes under the WAL lock), so the WAL FILE
+	// also outlives the fsync - only the object pointer needs pinning.
+	shared_ptr<WriteAheadLog> wal_ref;
 	// Each modified table's publish gate, held SHARED from before validation (in WriteToWAL) through publish so a DDL
 	// on that table cannot interleave; address-ordered (see GetModifiedTableInfos) for deadlock-freedom.
 	vector<shared_ptr<DataTableInfo>> modified_table_infos;
@@ -413,15 +420,16 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		// note: we can only drop the transaction lock if we are NOT checkpointing
 		// if we are checkpointing, we have already made certain decisions (e.g. the CheckpointType)
 		t_lock.unlock();
-		// grab the WAL lock and hold it until the entire commit is finished. Checkpointing or catalog-changing
-		// commits take it EXCLUSIVE (so they serialize against all data writers); pure data commits take it SHARED
-		// (so they run concurrently and batch their fsyncs).
-		bool need_exclusive_wal = has_catalog_changes || checkpoint_decision.can_checkpoint;
-		held_wal_lock = need_exclusive_wal ? storage_manager.GetWALLockExclusive() : storage_manager.GetWALLockShared();
-		if (!need_exclusive_wal) {
-			// shared WAL holders can run concurrently, so serialize their entry+marker appends to keep each
-			// transaction's WAL entries contiguous (released after the marker, before the fsync)
-			append_guard = storage_manager.GetWALAppendLock();
+		// grab the WAL lock: it serializes the WAL appends. Data-only commits release it right after their
+		// append+marker (before the fsync); checkpointing or catalog-changing commits keep it through publish.
+		held_wal_lock = storage_manager.GetWALLock();
+		wal_ref = storage_manager.GetWALShared();
+		if (has_catalog_changes || checkpoint_decision.can_checkpoint) {
+			// this commit publishes synchronously under the WAL lock (a catalog attach or WAL swap must not
+			// interleave with deferred publishes): wait for all pending deferred commits to publish first. New
+			// deferred commits cannot register - they need the WAL lock we hold - and pending ones need neither
+			// the WAL lock nor the transaction lock to finish, so the drain is deadlock-free and bounded.
+			DrainPendingCommits();
 		}
 		// take each modified table's publish gate SHARED before validating/writing, held through publish
 		modified_table_infos = transaction.GetModifiedTableInfos();
@@ -433,8 +441,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		if (!skip_wal_write_due_to_checkpoint) {
 			error = transaction.WriteToWAL(context, db, commit_state);
 			wal_written = true;
-			// no drain needed: catalog-changing commits hold the WAL lock EXCLUSIVELY, so no deferred data commit
-			// can be between its flush marker and its publish
+			// catalog-changing commits drained pending publishes above, so no deferred data commit can be
+			// between its flush marker and its publish
 		}
 
 		// after we finish writing to the WAL we grab the transaction lock again
@@ -447,12 +455,12 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		if (should_write_to_wal && skip_wal_write_due_to_checkpoint && !checkpoint_decision.can_checkpoint) {
 			// we have not written to the WAL but we have now realized we can't checkpoint after all
 			// in order to commit we need backpeddle and write to the WAL after all
-			D_ASSERT(held_wal_lock);
+			D_ASSERT(held_wal_lock.owns_lock());
 			// unlock the transaction lock while we are writing to the WAL
 			t_lock.unlock();
 			error = transaction.WriteToWAL(context, db, commit_state);
 			wal_written = true;
-			// held_wal_lock is EXCLUSIVE here (we took it for the checkpoint), so no drain is needed
+			// pending publishes were already drained when the WAL lock was taken (checkpoint path)
 			t_lock.lock();
 			skip_wal_write_due_to_checkpoint = false;
 		}
@@ -477,9 +485,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	// Catalog-changing commits take the non-deferred path: they publish under the transaction lock and fsync inline
 	// before releasing it - no new transaction can start in the meantime, so those commits are also never visible
 	// before they are durable.
-	// Only data-only, non-checkpointing commits defer: they hold the WAL lock SHARED, so the deferred publish
-	// turnstile (which needs concurrent committers to make progress) cannot deadlock. Checkpointing and
-	// catalog-changing commits hold the WAL lock EXCLUSIVELY and publish synchronously.
+	// Only data-only, non-checkpointing commits defer: they release the WAL lock before waiting on the deferred
+	// publish turnstile (which needs concurrent committers to make progress), so it cannot deadlock. Checkpointing
+	// and catalog-changing commits drain pending publishes and publish synchronously under the WAL lock.
 	bool defer_publish =
 	    !error.HasError() && commit_state && !has_catalog_changes && !checkpoint_decision.can_checkpoint;
 	// the publish sequence orders deferred publishes in WAL order; it is independent of the commit timestamp
@@ -514,10 +522,12 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			error = transaction.Commit(db, info, std::move(commit_state));
 		}
 	}
-	// the WAL entries and flush marker (if any) have been appended - other shared committers may now append theirs.
-	// We keep the (shared) WAL lock until publish; only the append serialization is released here, before the fsync.
-	if (append_guard.owns_lock()) {
-		append_guard.unlock();
+	// deferred commit: the WAL entries and flush marker have been appended - release the WAL lock BEFORE the fsync,
+	// so other committers can append theirs and share or overlap the fsyncs. A checkpoint or catalog-changing
+	// commit acquiring the lock now still cannot interleave with this commit's publish: it drains pending publishes
+	// (this commit is registered) before proceeding, and wal_ref keeps the WAL object alive for the fsync.
+	if (defer_publish && !error.HasError() && held_wal_lock.owns_lock()) {
+		held_wal_lock.unlock();
 	}
 
 	if (error.HasError()) {
@@ -553,21 +563,21 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	if (defer_publish) {
-		// deferred (group) commit: capture the WAL; the offset we must sync to is the one our flush marker returned
-		// from CommitToWAL (flush_marker_offset), threaded through explicitly rather than re-read from the WAL - so
-		// the durability target is exactly our marker and does not depend on no other commit having appended since.
-		// We hold the WAL lock SHARED here, which prevents a concurrent checkpoint (EXCLUSIVE) from swapping the WAL
-		// out from under us, so a plain pointer to the current WAL is safe across the fsync below.
-		D_ASSERT(held_wal_lock);
-		auto sync_wal = db.GetStorageManager().GetWAL();
+		// deferred (group) commit: the WAL lock is already released, so concurrent committers can append while we
+		// fsync and their flush markers share or overlap our fsync. The offset we must sync to is the one our flush
+		// marker returned from CommitToWAL (flush_marker_offset), threaded through explicitly rather than re-read
+		// from the WAL - so the durability target is exactly our marker and does not depend on no other commit
+		// having appended since. wal_ref keeps the WAL object alive; a checkpoint or catalog-changing commit cannot
+		// swap the WAL or attach a catalog version while our commit is still being made durable and visible, since
+		// it drains pending publishes (we are registered) under the WAL lock before proceeding.
+		D_ASSERT(!held_wal_lock.owns_lock());
+		D_ASSERT(wal_ref);
+		auto sync_wal = wal_ref.get();
 		idx_t sync_target = flush_marker_offset;
 
 		// release the transaction lock so other transactions can start/commit while we wait for the fsync, and their
-		// flush markers are covered by the same fsync (or a later one). We KEEP the WAL lock held (in SHARED mode) all
-		// the way through publish: it does not block other (shared) committers, but it does make a checkpoint/catalog
-		// change (EXCLUSIVE) wait for us, so it cannot swap the WAL or attach a catalog version while our commit is
-		// still being made durable and visible. Transactions that start in this window do not see our commit yet: it
-		// is published below, after the fsync.
+		// flush markers are covered by the same fsync (or a later one). Transactions that start in this window do not
+		// see our commit yet: it is published below, after the fsync.
 		t_lock.unlock();
 
 		try {
@@ -633,8 +643,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	t_lock.unlock();
 	// if we have skipped the WAL write due to checkpoint, we keep the WAL lock while checkpointing
 	// this prevents any concurrent transactions from happening during this time
-	if (!skip_wal_write_due_to_checkpoint && held_wal_lock) {
-		held_wal_lock.reset();
+	if (!skip_wal_write_due_to_checkpoint && held_wal_lock.owns_lock()) {
+		held_wal_lock.unlock();
 	}
 	// publish is complete: release the per-table gates so DDL on those tables can proceed
 	table_gates.clear();
@@ -655,7 +665,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		CheckpointOptions options;
 		options.action = CheckpointAction::ALWAYS_CHECKPOINT;
 		options.type = checkpoint_decision.type;
-		options.wal_lock = held_wal_lock.get();
+		options.wal_lock = held_wal_lock.owns_lock() ? &held_wal_lock : nullptr;
 		auto &storage_manager = db.GetStorageManager();
 		try {
 			storage_manager.CreateCheckpoint(context, options);

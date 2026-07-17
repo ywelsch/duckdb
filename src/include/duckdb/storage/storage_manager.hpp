@@ -100,10 +100,12 @@ public:
 	bool WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointOptions &options,
 	                        ActiveCheckpointWrapper &active_checkpoint);
 	//! Finishes a checkpoint
-	void WALFinishCheckpoint(StorageLockKey &wal_lock);
-	unique_ptr<StorageLockKey> GetWALLockShared();
-	unique_ptr<StorageLockKey> GetWALLockExclusive();
-	unique_lock<mutex> GetWALAppendLock();
+	void WALFinishCheckpoint(unique_lock<mutex> &wal_lock);
+	// Get the WAL lock
+	unique_lock<mutex> GetWALLock();
+	//! The WAL object as a shared_ptr: a deferred (group) commit pins it across its fsync, which runs after the
+	//! WAL lock is released, so a concurrent checkpoint swapping the WAL cannot free it out from under the fsync
+	shared_ptr<WriteAheadLog> GetWALShared();
 
 	//! Returns the database file path
 	string GetDBPath() const {
@@ -184,15 +186,12 @@ protected:
 	//! The WAL path
 	string wal_path;
 	//! The WriteAheadLog of the storage manager
-	unique_ptr<WriteAheadLog> wal;
-	//! Read-write lock controlling access to the WAL. Group-commit data writes take it SHARED (they can run
-	//! concurrently and only need the WAL structure to be stable); checkpoints and catalog-changing commits take it
-	//! EXCLUSIVE. The exclusive acquisition waits for all shared holders, which replaces the explicit
-	//! pending-commit drain that previously guarded WAL swaps / catalog version attachment.
-	StorageLock wal_lock;
-	//! Serializes a single committer's WAL entry+marker writes against other (shared) committers, so each
-	//! transaction's WAL entries are contiguous (the shared WAL lock alone allows them to interleave).
-	mutex wal_append_lock;
+	shared_ptr<WriteAheadLog> wal;
+	//! Mutex used to control writes to the WAL: it serializes WAL appends (entries + flush marker) across
+	//! committers. Group-commit data writes release it before their fsync (so fsyncs batch/overlap across
+	//! committers); checkpoints and catalog-changing commits drain pending deferred publishes after acquiring it
+	//! (DuckTransactionManager::DrainPendingCommits) and hold it through their synchronous publish / the WAL swap.
+	mutex wal_lock;
 	//! Whether or not the database is opened in read-only mode
 	bool read_only;
 	//! When loading a database, we do not yet set the wal-field. Therefore, GetWriteAheadLog must

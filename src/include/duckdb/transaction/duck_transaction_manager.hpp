@@ -84,6 +84,12 @@ public:
 	//! otherwise dereference freed memory.
 	void RetireObject(shared_ptr<void> retired_object);
 
+	//! Wait until all pending deferred (group) commits have published. Called while holding the WAL lock (so no new
+	//! deferred commit can register) by operations that must not interleave with deferred publishes: catalog-changing
+	//! commits, checkpoints, and WAL swaps. Pending committers need neither the WAL lock nor the transaction lock to
+	//! finish, so the wait is deadlock-free and bounded. Must be called WITHOUT holding the transaction lock.
+	void DrainPendingCommits();
+
 	//! Returns the current version of the catalog (incremented whenever anything changes, not stored between restarts)
 	DUCKDB_API idx_t GetCatalogVersion(Transaction &transaction);
 
@@ -121,7 +127,7 @@ private:
 
 	//! Register a commit that is about to write its WAL flush marker and defer its publish. Assigns and returns a
 	//! monotonic publish sequence (used by WaitForPublishTurn to publish in order). Must be called while holding the
-	//! WAL append lock so sequences are handed out in WAL-append order.
+	//! WAL lock so sequences are handed out in WAL-append order.
 	idx_t RegisterPendingCommit();
 	//! Wait until all earlier pending commits have been published. Publishing in WAL (publish-sequence) order
 	//! keeps recently_committed_transactions ordered on commit_id and matches WAL replay order.
@@ -196,7 +202,7 @@ private:
 	//! the transaction lock nor the WAL lock.
 	set<idx_t> pending_commit_publishes;
 	//! Monotonic sequence assigned to deferred commits in RegisterPendingCommit (under publish_lock; callers hold the
-	//! WAL append lock so sequences follow WAL order), used to order their publishes. Decoupled from the commit
+	//! WAL lock so sequences follow WAL order), used to order their publishes. Decoupled from the commit
 	//! timestamp, which is only assigned at publish time so a starting transaction can never observe a commit id
 	//! that is not yet published.
 	idx_t next_publish_sequence = 1;
