@@ -3,9 +3,12 @@
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/parser/column_definition.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 
@@ -251,6 +254,28 @@ ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &
 	}
 
 	return error_data;
+}
+
+vector<shared_ptr<DataTableInfo>> DuckTransaction::GetModifiedTableInfos() {
+	// tables modified in place (deletes/updates)
+	auto result = undo_buffer.GetModifiedTableInfos();
+	unordered_set<DataTableInfo *> seen;
+	for (auto &info : result) {
+		seen.insert(info.get());
+	}
+	// tables with pending local-storage appends: their undo entries are only created once the commit flushes them
+	if (storage) {
+		for (auto &table : storage->GetTables()) {
+			auto &info = table.get().GetDataTableInfo();
+			if (seen.insert(info.get()).second) {
+				result.push_back(info);
+			}
+		}
+	}
+	// address order, so commits acquiring multiple gates cannot deadlock
+	std::sort(result.begin(), result.end(),
+	          [](const shared_ptr<DataTableInfo> &a, const shared_ptr<DataTableInfo> &b) { return a.get() < b.get(); });
+	return result;
 }
 
 ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,

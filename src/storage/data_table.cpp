@@ -178,7 +178,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	auto &local_storage = LocalStorage::Get(context, db);
 	// prevent any tuples from being added to the parent
-	lock_guard<mutex> lock(append_lock);
+	lock_guard<mutex> lock(parent.append_lock);
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}

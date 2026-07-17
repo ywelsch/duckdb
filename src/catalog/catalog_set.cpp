@@ -1,5 +1,6 @@
 #include "duckdb/catalog/catalog_set.hpp"
 
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
@@ -17,6 +18,8 @@
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/data_table_info.hpp"
 
 namespace duckdb {
 
@@ -303,6 +306,18 @@ bool CatalogSet::RenameEntryInternal(CatalogTransaction transaction, CatalogEntr
 	return CreateEntryInternal(transaction, new_name, std::move(renamed_node), read_lock);
 }
 
+// Exclude concurrently committing changes to the table while we alter it (see DataTableInfo::publish_gate)
+static unique_ptr<StorageLockKey> LockTablePublishGate(optional_ptr<CatalogEntry> entry) {
+	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
+		return nullptr;
+	}
+	auto &table_entry = entry->Cast<TableCatalogEntry>();
+	if (!table_entry.IsDuckTable()) {
+		return nullptr;
+	}
+	return table_entry.Cast<DuckTableEntry>().GetStorage().GetDataTableInfo()->GetPublishGateExclusive();
+}
+
 bool CatalogSet::AlterEntry(CatalogTransaction transaction, const string &name, AlterInfo &alter_info) {
 	// If the entry does not exist, we error
 	auto entry = GetEntry(transaction, name);
@@ -312,6 +327,10 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const string &name, 
 	if (!alter_info.allow_internal && entry->internal) {
 		throw CatalogException("Cannot alter entry \"%s\" because it is an internal system entry", entry->name);
 	}
+
+	// take the gate BEFORE constructing the altered entry: the construction clones the table's row groups
+	// (sharing the column data), which must not include rows of an in-flight commit
+	auto publish_gate = LockTablePublishGate(entry);
 
 	unique_ptr<CatalogEntry> value;
 	if (alter_info.type == AlterType::SET_COMMENT) {
@@ -374,6 +393,7 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const string &name, 
 
 	read_lock.unlock();
 	write_lock.unlock();
+	publish_gate.reset();
 
 	// Check the dependency manager to verify that there are no conflicting dependencies with this alter
 	catalog.GetDependencyManager()->AlterObject(transaction, *entry, *new_entry, alter_info);

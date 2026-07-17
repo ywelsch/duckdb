@@ -323,6 +323,16 @@ bool LocalTableManager::IsEmpty() const {
 	return table_storage.empty();
 }
 
+vector<reference<DataTable>> LocalTableManager::GetTables() const {
+	lock_guard<mutex> l(table_storage_lock);
+	vector<reference<DataTable>> result;
+	result.reserve(table_storage.size());
+	for (auto &entry : table_storage) {
+		result.push_back(entry.first);
+	}
+	return result;
+}
+
 shared_ptr<LocalTableStorage> LocalTableManager::MoveEntry(DataTable &table) {
 	lock_guard<mutex> l(table_storage_lock);
 	auto entry = table_storage.find(table);

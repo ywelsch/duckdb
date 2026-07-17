@@ -99,6 +99,8 @@ class LocalTableManager {
 public:
 	shared_ptr<LocalTableStorage> MoveEntry(DataTable &table);
 	reference_map_t<DataTable, shared_ptr<LocalTableStorage>> MoveEntries();
+	//! The tables with local (not yet committed) storage
+	vector<reference<DataTable>> GetTables() const;
 	optional_ptr<LocalTableStorage> GetStorage(DataTable &table) const;
 	LocalTableStorage &GetOrCreateStorage(ClientContext &context, DataTable &table);
 	idx_t EstimatedSize() const;
@@ -168,6 +170,10 @@ public:
 
 	bool ChangesMade() noexcept;
 	idx_t EstimatedSize();
+	//! The tables with local (not yet committed) storage
+	vector<reference<DataTable>> GetTables() const {
+		return table_manager.GetTables();
+	}
 
 	void DropTable(DataTable &table);
 	bool Find(DataTable &table);

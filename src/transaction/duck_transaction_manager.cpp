@@ -10,6 +10,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection_manager.hpp"
@@ -332,6 +333,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	auto checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties);
 	ErrorData error;
 	unique_ptr<lock_guard<mutex>> held_wal_lock;
+	// The modified tables' publish gates (see DataTableInfo::publish_gate), held SHARED until the commit's outcome
+	// is fully applied. The keys pin the lock internals, so the DataTableInfos need not be held alongside.
+	vector<unique_ptr<StorageLockKey>> table_gates;
 	unique_ptr<StorageCommitState> commit_state;
 	bool skip_wal_write_due_to_checkpoint = false;
 	bool wal_written = false;
@@ -361,6 +365,12 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		t_lock.unlock();
 		// grab the WAL lock and hold it until the entire commit is finished
 		held_wal_lock = storage_manager.GetWALLock();
+
+		// take the publish gates SHARED before the flush in WriteToWAL appends this transaction's rows
+		// (after releasing the transaction lock: waiting on a gate must not block the transaction lock)
+		for (auto &table_info : transaction.GetModifiedTableInfos()) {
+			table_gates.push_back(table_info->GetPublishGateShared());
+		}
 
 		// Commit the changes to the WAL.
 		if (!skip_wal_write_due_to_checkpoint) {
@@ -399,6 +409,13 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	info.commit_id = GetCommitTimestamp();
 
 	// commit the UndoBuffer of the transaction
+	if (!should_write_to_wal && transaction.ChangesMade()) {
+		// no WAL write (e.g. in-memory database): the flush happens inside transaction.Commit below. Taking the
+		// gates under the transaction lock is safe here: commits in this path hold it for their entire duration.
+		for (auto &table_info : transaction.GetModifiedTableInfos()) {
+			table_gates.push_back(table_info->GetPublishGateShared());
+		}
+	}
 	if (!error.HasError()) {
 		if (HasOtherTransactions(transaction)) {
 			info.active_transactions = ActiveTransactionState::OTHER_TRANSACTIONS;
@@ -430,6 +447,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			transaction.catalog_version = ++last_committed_version;
 		}
 	}
+	// the commit's outcome has been fully applied - release the publish gates so DDL on the tables can proceed
+	table_gates.clear();
 	OnCommitCheckpointDecision(checkpoint_decision, transaction);
 
 	if (!checkpoint_decision.can_checkpoint && lock) {

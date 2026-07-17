@@ -21,6 +21,7 @@ class StorageCommitState;
 class WriteAheadLog;
 struct UndoBufferPointer;
 struct CommitInfo;
+struct DataTableInfo;
 
 struct UndoBufferProperties {
 	idx_t estimated_size = 0;
@@ -57,6 +58,8 @@ public:
 	void Cleanup(transaction_t lowest_active_transaction);
 	//! Commit the changes made in the UndoBuffer: should be called on commit
 	void WriteToWAL(WriteAheadLog &wal, optional_ptr<StorageCommitState> commit_state);
+	//! DataTableInfos of tables modified by data changes (INSERT/DELETE/UPDATE) in this buffer, deduplicated
+	vector<shared_ptr<DataTableInfo>> GetModifiedTableInfos();
 	//! Iterate the undo buffer and commit each entry. Deferred drop side effects accumulate in
 	//! info.drop_state so they can be applied after the commit chain succeeds.
 	void Commit(UndoBuffer::IteratorState &iterator_state, CommitInfo &info);

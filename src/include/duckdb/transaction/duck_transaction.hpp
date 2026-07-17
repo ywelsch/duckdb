@@ -70,6 +70,9 @@ public:
 	//! commit failed, or an empty string if the commit was sucessful
 	ErrorData Commit(AttachedDatabase &db, CommitInfo &commit_info,
 	                 unique_ptr<StorageCommitState> commit_state) noexcept;
+	//! DataTableInfos of tables this transaction modified (deduplicated, address-ordered): tables changed in
+	//! place (undo buffer) plus tables with pending local-storage appends.
+	vector<shared_ptr<DataTableInfo>> GetModifiedTableInfos();
 	//! Returns whether or not a commit of this transaction should trigger an automatic checkpoint
 	bool AutomaticCheckpoint(AttachedDatabase &db, const UndoBufferProperties &properties);
 
