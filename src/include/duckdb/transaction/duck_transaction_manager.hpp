@@ -12,6 +12,9 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
+#include "duckdb/common/deque.hpp"
+
+#include <condition_variable>
 
 namespace duckdb {
 class DuckTransactionManager;
@@ -57,6 +60,8 @@ public:
 	transaction_t GetLastCommit() const {
 		return last_commit;
 	}
+	//! Wait until every published commit is durable (i.e. its WAL flush marker is synced)
+	void WaitForDurability();
 	transaction_t GetActiveCheckpoint() const {
 		return active_checkpoint;
 	}
@@ -135,6 +140,58 @@ private:
 	StorageLock vacuum_lock;
 	//! Lock necessary to start transactions only - used by FORCE CHECKPOINT to prevent new transactions from starting
 	mutex start_transaction_lock;
+
+	//! Commits are published before their WAL flush marker is synced to disk. Until the sync
+	//! completes they are tracked here, and new transactions bound their snapshot below them,
+	//! so that no transaction can observe a commit that a crash could still lose.
+	//! The durable bound advances as soon as a sync covers an entry's flush marker (so a
+	//! committer's ack implies its commit is observable, even if threads wake out of order),
+	//! but an entry is only *removed* by its own committing thread, after that thread has
+	//! fully left WriteAheadLog::SyncUpTo - this makes WaitForDurability a quiescence barrier
+	//! for the WAL object, so a checkpoint can destroy it without shared ownership.
+	struct UnsyncedCommit {
+		//! The commit id of the published commit
+		transaction_t commit_id;
+		//! The WAL offset covering the commit's flush marker
+		idx_t wal_offset;
+		//! Whether the committing thread has left WriteAheadLog::SyncUpTo
+		bool thread_done;
+	};
+	//! Protects unsynced_commits and durability_failed
+	mutex durability_lock;
+	//! Published commits whose flush marker is not yet durable (in commit order)
+	deque<UnsyncedCommit> unsynced_commits;
+	//! Signalled when unsynced_commits becomes empty, or when a sync fails
+	std::condition_variable durability_cv;
+	//! The durable bound: the highest commit id for which it and all lower commits are durable
+	atomic<transaction_t> durable_commit_bound = {0};
+	//! Number of entries in unsynced_commits
+	atomic<idx_t> unsynced_commit_count = {0};
+	//! Set when a WAL sync has failed (the database is poisoned)
+	bool durability_failed = false;
+
+	//! Register a published commit whose flush marker is not yet synced.
+	//! Called while holding the transaction lock and the WAL lock.
+	void RegisterUnsyncedCommit(transaction_t commit_id, idx_t wal_offset);
+	//! Advance the durable bound over every commit covered by a completed sync, mark this
+	//! thread's own commit as finished, and remove the finished prefix. Must only be called
+	//! after the thread has fully left WriteAheadLog::SyncUpTo.
+	void FinishCommitDurability(transaction_t commit_id, idx_t synced_offset);
+	//! Mark that a WAL sync has failed, waking up durability waiters
+	void MarkDurabilityFailed();
+	//! Sweep transactions that were pinned only by not-yet-durable commits. Committed
+	//! transactions keep their version information (and their shared checkpoint lock) alive
+	//! while bounded snapshots may still need it; once the durable bound advances past them,
+	//! nothing else re-triggers the garbage collection sweep - this does.
+	void GarbageCollectDurableTransactions();
+	bool HasUnsyncedCommits() const {
+		return unsynced_commit_count.load() > 0;
+	}
+	//! The snapshot bound while unsynced commits exist: a transaction starting at this
+	//! timestamp sees every durable commit and no unsynced commit
+	transaction_t BoundedSnapshotStart() const {
+		return durable_commit_bound.load() + 1;
+	}
 
 	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START};
 	idx_t last_committed_version = 0;

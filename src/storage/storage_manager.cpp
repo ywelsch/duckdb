@@ -256,6 +256,16 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 		// not holding the WAL lock yet - grab it
 		guard = GetWALLock();
 	}
+	// Wait until every published commit in this WAL is durable, while holding the WAL lock (so
+	// no new commit can register). This must happen BEFORE the checkpoint transaction is
+	// started below: its snapshot would otherwise be bounded below published-but-unsynced
+	// commits, and the checkpoint would write a table state that excludes them - while
+	// deleting the WAL that contains them. It also doubles as a quiescence barrier for
+	// destroying the WAL object below: a commit's unsynced entry is only removed by its own
+	// thread after it has fully left SyncUpTo, so an empty list guarantees no thread is still
+	// inside the WAL.
+	db.GetTransactionManager().Cast<DuckTransactionManager>().WaitForDurability();
+
 	if (active_checkpoint.HasCheckpointContext()) {
 		// While holding the WAL lock, if we have a context then start a checkpoint transaction.
 		// The start time of this transaction defines the visibility for checkpointing, any new commits are written
@@ -319,6 +329,9 @@ void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &) {
 	}
 
 	// we have had writes to the checkpoint WAL - we need to override our WAL with the checkpoint WAL
+	// commits to the checkpoint WAL (made while the checkpoint was running) may still be syncing:
+	// drain them before destroying the WAL object (see WALStartCheckpoint)
+	db.GetTransactionManager().Cast<DuckTransactionManager>().WaitForDurability();
 	// first close the WAL writer
 	auto checkpoint_wal_path = wal->GetPath();
 	wal.reset();
@@ -675,7 +688,9 @@ void SingleFileStorageCommitState::FlushCommit() {
 		return;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	wal.Flush();
+	// Only the flush marker is written here: the sync to disk happens after the commit has
+	// been published and the locks have been released (see DuckTransactionManager::CommitTransaction).
+	wal.FlushMarker();
 	state = WALCommitState::FLUSHED;
 }
 

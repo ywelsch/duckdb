@@ -19,6 +19,7 @@
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/checkpoint/checkpoint_options.hpp"
+#include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
@@ -88,6 +89,12 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	// obtain the start time and transaction ID of this transaction
 	transaction_t start_time = current_start_timestamp++;
 	transaction_t transaction_id = current_transaction_id++;
+	if (HasUnsyncedCommits()) {
+		// bound the snapshot at the durable bound: the new transaction must not observe
+		// published commits whose WAL flush marker has not been synced yet, as a crash could
+		// still lose those commits
+		start_time = MinValue<transaction_t>(start_time, BoundedSnapshotStart());
+	}
 	if (active_transactions.empty()) {
 		lowest_active_start = start_time;
 		lowest_active_id = transaction_id;
@@ -121,6 +128,12 @@ DuckTransactionManager::CheckpointDecision::~CheckpointDecision() {
 }
 
 bool DuckTransactionManager::HasOtherTransactions(DuckTransaction &transaction) {
+	if (HasUnsyncedCommits()) {
+		// published-but-not-yet-durable commits behave like active transactions: new snapshots
+		// are bounded below them and may still need the pre-commit state (e.g. rows deleted by
+		// them must remain tracked in deleted_rows_in_use)
+		return true;
+	}
 	for (auto &active_transaction : active_transactions) {
 		if (!RefersToSameObject(*active_transaction, transaction)) {
 			return true;
@@ -276,6 +289,109 @@ transaction_t DuckTransactionManager::GetCommitTimestamp() {
 	return current_start_timestamp++;
 }
 
+void DuckTransactionManager::RegisterUnsyncedCommit(transaction_t commit_id, idx_t wal_offset) {
+	lock_guard<mutex> guard(durability_lock);
+	if (unsynced_commits.empty()) {
+		// no unsynced commits: everything below this commit is durable
+		auto previous_commit = commit_id - 1;
+		if (durable_commit_bound.load() < previous_commit) {
+			durable_commit_bound = previous_commit;
+		}
+	}
+	unsynced_commits.push_back(UnsyncedCommit {commit_id, wal_offset, false});
+	unsynced_commit_count = unsynced_commits.size();
+}
+
+void DuckTransactionManager::FinishCommitDurability(transaction_t commit_id, idx_t synced_offset) {
+	lock_guard<mutex> guard(durability_lock);
+	// advance the durable bound over every commit whose flush marker the sync covered -
+	// including commits whose threads have not woken up yet, so that a committer's ack
+	// implies its commit is observable by new snapshots (entries are in commit order, which
+	// is also WAL order). The bound is read lock-free by StartTransaction, so it must be
+	// written monotonically: walking lingering front entries (already covered by a later
+	// sync's bound advance) must never transiently lower it, or a concurrent snapshot gets
+	// capped below commits that were already acknowledged.
+	auto new_bound = durable_commit_bound.load();
+	for (auto &entry : unsynced_commits) {
+		if (entry.wal_offset > synced_offset) {
+			break;
+		}
+		new_bound = MaxValue<transaction_t>(new_bound, entry.commit_id);
+		if (entry.commit_id == commit_id) {
+			entry.thread_done = true;
+		}
+	}
+	durable_commit_bound = new_bound;
+	// remove the finished prefix: an entry only leaves the list once its own thread is out of
+	// the WAL, keeping WaitForDurability a quiescence barrier
+	while (!unsynced_commits.empty() && unsynced_commits.front().thread_done) {
+		D_ASSERT(unsynced_commits.front().commit_id <= durable_commit_bound.load());
+		unsynced_commits.pop_front();
+	}
+	unsynced_commit_count = unsynced_commits.size();
+	if (unsynced_commits.empty()) {
+		durability_cv.notify_all();
+	}
+}
+
+void DuckTransactionManager::GarbageCollectDurableTransactions() {
+	auto cleanup_info = make_uniq<DuckCleanupInfo>();
+	{
+		// the cleanup info must also be *queued* while holding the transaction lock: catalog
+		// cleanups must run in commit order across transactions (see recently_committed_
+		// transactions), and another thread's RemoveTransaction could otherwise compose and
+		// queue between our composition and our queueing, inverting the cleanup order
+		lock_guard<mutex> t_lock(transaction_lock);
+		// recompute the cleanup horizon: the durable bound advance may have unpinned
+		// transactions that were kept alive for bounded snapshots
+		auto lowest_start_time = TRANSACTION_ID_START;
+		auto lowest_transaction_id = MAX_TRANSACTION_ID;
+		for (auto &active_transaction : active_transactions) {
+			lowest_start_time = MinValue(lowest_start_time, active_transaction->start_time);
+			lowest_transaction_id = MinValue(lowest_transaction_id, active_transaction->transaction_id);
+		}
+		if (HasUnsyncedCommits()) {
+			lowest_start_time = MinValue<transaction_t>(lowest_start_time, BoundedSnapshotStart());
+		}
+		lowest_active_start = lowest_start_time;
+		lowest_active_id = lowest_transaction_id;
+		cleanup_info->lowest_start_time = lowest_start_time;
+
+		idx_t i = 0;
+		for (; i < recently_committed_transactions.size(); i++) {
+			D_ASSERT(recently_committed_transactions[i]);
+			if (recently_committed_transactions[i]->commit_id >= lowest_start_time) {
+				// recently_committed_transactions is ordered on commit_id
+				break;
+			}
+			recently_committed_transactions[i]->awaiting_cleanup = true;
+			cleanup_info->transactions.push_back(std::move(recently_committed_transactions[i]));
+		}
+		if (i > 0) {
+			recently_committed_transactions.erase(recently_committed_transactions.begin(),
+			                                      recently_committed_transactions.begin() + static_cast<int64_t>(i));
+		}
+		if (cleanup_info->ScheduleCleanup()) {
+			lock_guard<mutex> q_lock(cleanup_queue_lock);
+			cleanup_queue.emplace(std::move(cleanup_info));
+		}
+	}
+}
+
+void DuckTransactionManager::MarkDurabilityFailed() {
+	lock_guard<mutex> guard(durability_lock);
+	durability_failed = true;
+	durability_cv.notify_all();
+}
+
+void DuckTransactionManager::WaitForDurability() {
+	unique_lock<mutex> guard(durability_lock);
+	durability_cv.wait(guard, [&]() { return unsynced_commits.empty() || durability_failed; });
+	if (durability_failed && !unsynced_commits.empty()) {
+		throw IOException("Cannot wait for WAL durability: a WAL sync has failed");
+	}
+}
+
 void DuckTransactionManager::CleanupTransactions() {
 	lock_guard<mutex> c_lock(cleanup_lock);
 	while (true) {
@@ -314,6 +430,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	ErrorData error;
 	unique_lock<mutex> held_wal_lock;
 	unique_ptr<StorageCommitState> commit_state;
+	optional_ptr<WriteAheadLog> commit_wal;
+	idx_t wal_sync_offset = 0;
 	bool skip_wal_write_due_to_checkpoint = false;
 	bool wal_written = false;
 	if (checkpoint_decision.can_checkpoint) {
@@ -405,6 +523,16 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	} else {
 		DUCKDB_LOG(context, TransactionLogType, db, "Commit", info.commit_id);
 		last_commit = info.commit_id;
+		if (wal_written) {
+			// the commit is published, but its flush marker has not been synced yet: track it,
+			// so that new snapshots are bounded below it until the sync (below, after the locks
+			// are released) completes
+			commit_wal = db.GetStorageManager().GetWAL();
+			if (commit_wal) {
+				wal_sync_offset = commit_wal->GetLastFlushOffset();
+				RegisterUnsyncedCommit(info.commit_id, wal_sync_offset);
+			}
+		}
 
 		// check if catalog changes were made
 		if (transaction.catalog_version >= TRANSACTION_ID_START) {
@@ -438,6 +566,29 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	// this prevents any concurrent transactions from happening during this time
 	if (!skip_wal_write_due_to_checkpoint && held_wal_lock.owns_lock()) {
 		held_wal_lock.unlock();
+	}
+
+	if (commit_wal) {
+		// make the commit durable before acknowledging it: sync the WAL up to this commit's
+		// flush marker (one thread syncs on behalf of all commits that appended before it, so
+		// a single fsync can cover many commits).
+		// The WAL pointer remains valid without holding the WAL lock: a checkpoint only
+		// destroys the WAL object after draining the unsynced commits (WaitForDurability), and
+		// our entry is only removed below - by this thread - after SyncUpTo has returned.
+		D_ASSERT(!error.HasError());
+		try {
+			commit_wal->SyncUpTo(wal_sync_offset);
+			FinishCommitDurability(info.commit_id, wal_sync_offset);
+			// the durable bound advanced: sweep transactions that were pinned only by
+			// not-yet-durable commits (they hold e.g. the shared checkpoint lock)
+			GarbageCollectDurableTransactions();
+		} catch (std::exception &ex) {
+			// the commit is already published and can no longer be rolled back, but it is not
+			// durable: poison the database
+			error = ErrorData(ex);
+			MarkDurabilityFailed();
+			ValidChecker::Invalidate(db.GetDatabase(), "Failed to sync the WAL after committing: " + error.Message());
+		}
 	}
 
 	CleanupTransactions();
@@ -515,6 +666,11 @@ unique_ptr<DuckCleanupInfo> DuckTransactionManager::RemoveTransaction(DuckTransa
 		}
 		lowest_start_time = MinValue(lowest_start_time, active_transactions[i]->start_time);
 		lowest_transaction_id = MinValue(lowest_transaction_id, active_transactions[i]->transaction_id);
+	}
+	if (HasUnsyncedCommits()) {
+		// published-but-not-yet-durable commits pin the cleanup horizon: new (bounded)
+		// snapshots may still need the pre-commit version information
+		lowest_start_time = MinValue<transaction_t>(lowest_start_time, BoundedSnapshotStart());
 	}
 	lowest_active_start = lowest_start_time;
 	lowest_active_id = lowest_transaction_id;
