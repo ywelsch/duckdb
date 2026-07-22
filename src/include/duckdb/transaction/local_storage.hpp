@@ -84,7 +84,12 @@ public:
 	void InitializeScan(CollectionScanState &state, optional_ptr<TableFilterSet> table_filters = nullptr);
 	//! Write a new row group to disk (if possible)
 	void WriteNewRowGroup(idx_t flushed_row_group_idx);
-	void FlushBlocks();
+	//! Flush any outstanding blocks to disk - returns true if blocks may have been written.
+	//! Safe to call more than once: a repeated call writes nothing.
+	bool FlushBlocks();
+	//! Whether Flush() takes the bulk-append path for this storage regardless of the target table's
+	//! state: at least one full row group and no deletes. Decidable before taking any locks.
+	bool IsUnconditionalBulkAppend() const;
 	void Rollback();
 	idx_t EstimatedSize();
 
@@ -115,6 +120,7 @@ class LocalTableManager {
 public:
 	shared_ptr<LocalTableStorage> MoveEntry(DataTable &table);
 	reference_map_t<DataTable, shared_ptr<LocalTableStorage>> MoveEntries();
+	vector<shared_ptr<LocalTableStorage>> GetEntries() const;
 	optional_ptr<LocalTableStorage> GetStorage(DataTable &table) const;
 	LocalTableStorage &GetOrCreateStorage(ClientContext &context, DataTable &table);
 	idx_t EstimatedSize() const;
@@ -213,10 +219,30 @@ public:
 		return context;
 	}
 
+	struct PreFlushResult {
+		//! Whether any blocks may have been written (and therefore need a FileSync to be persisted)
+		bool wrote_blocks = false;
+		//! Whether tables whose bulk decision needs the append lock may still write blocks under the commit locks
+		bool may_write_more_blocks = false;
+	};
+
+	//! Flush the blocks of all unconditional bulk appends (see IsUnconditionalBulkAppend)
+	PreFlushResult PreFlushBlocks();
+	//! Marks that all blocks written so far have been fsynced
+	void SetBlocksSynced() {
+		blocks_synced = true;
+	}
+	//! Whether the commit still needs to FileSync optimistically written blocks it references from the WAL
+	bool RequiresFileSyncAtCommit() const {
+		return !blocks_synced;
+	}
+
 private:
 	ClientContext &context;
 	DuckTransaction &transaction;
 	LocalTableManager table_manager;
+	//! Whether all blocks written so far have been fsynced (set by the pre-commit sync, cleared by Flush())
+	bool blocks_synced = false;
 
 private:
 	void Flush(DataTable &table, LocalTableStorage &storage, optional_ptr<StorageCommitState> commit_state);

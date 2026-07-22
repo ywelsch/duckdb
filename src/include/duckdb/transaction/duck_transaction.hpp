@@ -64,6 +64,9 @@ public:
 	void SetModifications(DatabaseModificationType type) override;
 
 	bool ShouldWriteToWAL(AttachedDatabase &db);
+	//! Flush (+ fsync) the transaction-local blocks of bulk appends before the commit takes the transaction/WAL
+	//! locks, so that concurrent commits overlap this I/O. A returned error must fail the commit.
+	ErrorData PreFlushOptimisticBlocks(ClientContext &context, AttachedDatabase &db) noexcept;
 	ErrorData WriteToWAL(ClientContext &context, AttachedDatabase &db,
 	                     unique_ptr<StorageCommitState> &commit_state) noexcept;
 	//! Commit the current transaction with the given commit identifier. Returns an error message if the transaction

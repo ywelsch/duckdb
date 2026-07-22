@@ -206,6 +206,38 @@ bool DuckTransaction::ShouldWriteToWAL(AttachedDatabase &db) {
 	return true;
 }
 
+ErrorData DuckTransaction::PreFlushOptimisticBlocks(ClientContext &context, AttachedDatabase &db) noexcept {
+	ErrorData error;
+	if (!ShouldWriteToWAL(db)) {
+		return error;
+	}
+	try {
+		auto result = storage->PreFlushBlocks();
+		if (!result.wrote_blocks) {
+			return error;
+		}
+		// the flushed blocks are referenced from the WAL and need a FileSync - but only sync here
+		// if this is provably the commit's final sync (so we never sync more often than before):
+		// otherwise defer to the under-lock FileSync (more blocks may be written under the commit
+		// locks) or to the checkpoint (the commit is predicted to skip the WAL write; a wrong
+		// prediction falls back to the under-lock FileSync as before)
+		auto undo_properties = GetUndoProperties();
+		bool likely_skip_wal =
+		    AutomaticCheckpoint(db, undo_properties) &&
+		    undo_properties.estimated_size >= Settings::Get<AutoCheckpointSkipWalThresholdSetting>(context);
+		if (result.may_write_more_blocks || likely_skip_wal) {
+			return error;
+		}
+		db.GetStorageManager().GetBlockManager().FileSync();
+		storage->SetBlocksSynced();
+	} catch (std::exception &ex) {
+		// fail the commit: the flush machinery cannot safely be re-run after an error, and a failed
+		// fsync must not be retried (the retry can succeed without the data being durable)
+		error = ErrorData(ex);
+	}
+	return error;
+}
+
 ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &db,
                                       unique_ptr<StorageCommitState> &commit_state) noexcept {
 	ErrorData error_data;
@@ -222,10 +254,11 @@ ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &
 
 		auto wal_timer = profiler.StartTimer<MetricStorageWriteToWALLatency>();
 		undo_buffer.WriteToWAL(*wal, commit_state.get());
-		if (commit_state->HasRowGroupData()) {
+		if (commit_state->HasRowGroupData() && storage->RequiresFileSyncAtCommit()) {
 			// if we have optimistically written any data AND we are writing to the WAL, we have written references to
 			// optimistically written blocks
 			// hence we need to ensure those optimistically written blocks are persisted
+			// (skipped when PreFlushOptimisticBlocks already synced them before the WAL lock was taken)
 			storage_manager.GetBlockManager().FileSync();
 		}
 		wal_timer.EndTimer();

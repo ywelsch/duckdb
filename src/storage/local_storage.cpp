@@ -147,14 +147,22 @@ void LocalTableStorage::WriteNewRowGroup(idx_t flushed_row_group_idx) {
 	optimistic_writer.WriteNewRowGroup(*row_groups, flushed_row_group_idx);
 }
 
-void LocalTableStorage::FlushBlocks() {
+bool LocalTableStorage::FlushBlocks() {
 	auto &collection = *row_groups->collection;
-	const idx_t row_group_size = collection.GetRowGroupSize();
-	if (collection.GetTotalRows() >= row_group_size) {
+	if (collection.GetTotalRows() >= collection.GetRowGroupSize()) {
 		// write any unflushed row groups
 		optimistic_writer.WriteUnflushedRowGroups(*row_groups);
 	}
-	optimistic_writer.FinalFlush();
+	// FinalFlush reports whether a partial block manager existed, i.e. whether blocks may have been written
+	return optimistic_writer.FinalFlush();
+}
+
+bool LocalTableStorage::IsUnconditionalBulkAppend() const {
+	if (is_dropped || deleted_rows != 0) {
+		return false;
+	}
+	auto &collection = *row_groups->collection;
+	return collection.GetTotalRows() >= collection.GetRowGroupSize();
 }
 
 ErrorData LocalTableStorage::AppendToIndexes(DuckTransaction &transaction, RowGroupCollection &source,
@@ -325,6 +333,16 @@ shared_ptr<LocalTableStorage> LocalTableManager::MoveEntry(DataTable &table) {
 reference_map_t<DataTable, shared_ptr<LocalTableStorage>> LocalTableManager::MoveEntries() {
 	lock_guard<mutex> l(table_storage_lock);
 	return std::move(table_storage);
+}
+
+vector<shared_ptr<LocalTableStorage>> LocalTableManager::GetEntries() const {
+	lock_guard<mutex> l(table_storage_lock);
+	vector<shared_ptr<LocalTableStorage>> result;
+	result.reserve(table_storage.size());
+	for (auto &entry : table_storage) {
+		result.push_back(entry.second);
+	}
+	return result;
 }
 
 idx_t LocalTableManager::EstimatedSize() const {
@@ -577,15 +595,15 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 	}
 
 	auto append_count = storage.GetCollection().GetTotalRows() - storage.deleted_rows;
-	const auto row_group_size = storage.GetCollection().GetRowGroupSize();
 
 	TableAppendState append_state;
 	table.AppendLock(transaction, append_state);
-	if ((append_state.row_start == 0 || storage.GetCollection().GetTotalRows() >= row_group_size) &&
-	    storage.deleted_rows == 0) {
-		// table is currently empty OR we are bulk appending: move over the storage directly
-		// first flush any outstanding blocks
-		storage.FlushBlocks();
+	if (storage.IsUnconditionalBulkAppend() || (append_state.row_start == 0 && storage.deleted_rows == 0)) {
+		// bulk append (at least one full row group, no deletes) OR the table is currently empty:
+		// move over the storage directly - first flush any outstanding blocks
+		if (storage.FlushBlocks()) {
+			blocks_synced = false;
+		}
 		// Append to the indexes.
 		storage.AppendToIndexes(transaction, append_state);
 		// finally move over the row groups
@@ -608,6 +626,20 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 	// Verify that our index memory is stable.
 	table.VerifyIndexBuffers();
 #endif
+}
+
+LocalStorage::PreFlushResult LocalStorage::PreFlushBlocks() {
+	PreFlushResult result;
+	for (auto &storage : table_manager.GetEntries()) {
+		if (storage->IsUnconditionalBulkAppend()) {
+			// Flush() is guaranteed to take the bulk path - the blocks will be used as written
+			result.wrote_blocks |= storage->FlushBlocks();
+		} else if (!storage->is_dropped && storage->deleted_rows == 0 && storage->GetCollection().GetTotalRows() > 0) {
+			// may still take the empty-table bulk path - and write blocks - under the append lock
+			result.may_write_more_blocks = true;
+		}
+	}
+	return result;
 }
 
 void LocalStorage::Commit(optional_ptr<StorageCommitState> commit_state) {

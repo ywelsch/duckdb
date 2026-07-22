@@ -118,12 +118,16 @@ void OptimisticWriteCollection::FinalizeFlush() {
 }
 
 void OptimisticDataWriter::WriteUnflushedRowGroups(OptimisticWriteCollection &row_groups) {
+	auto total_row_groups = row_groups.collection->GetRowGroupCount();
+	if (row_groups.flushed_row_groups.size() == total_row_groups && row_groups.partial_block_managers.empty()) {
+		// everything is flushed already and there is nothing to merge - a repeated call ends up here
+		return;
+	}
 	// we finished writing a complete row group
 	if (!PrepareWrite()) {
 		return;
 	}
 	// add any incomplete row groups to the set of unflushed row groups
-	auto total_row_groups = row_groups.collection->GetRowGroupCount();
 	for (idx_t i = 0; i < total_row_groups; i++) {
 		// check if this row group was flushed
 		auto entry = row_groups.flushed_row_groups.find(i);
@@ -206,11 +210,13 @@ void OptimisticDataWriter::Merge(OptimisticDataWriter &other) {
 	Merge(other.partial_manager);
 }
 
-void OptimisticDataWriter::FinalFlush() {
-	if (partial_manager) {
-		partial_manager->FlushPartialBlocks();
-		partial_manager.reset();
+bool OptimisticDataWriter::FinalFlush() {
+	if (!partial_manager) {
+		return false;
 	}
+	partial_manager->FlushPartialBlocks();
+	partial_manager.reset();
+	return true;
 }
 
 void OptimisticDataWriter::Rollback() {
