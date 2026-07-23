@@ -1345,7 +1345,7 @@ jobs:
 
     - name: Test
       if: ${{ !fromJson(needs.prepare.outputs.skip_tests) }}
-      run: make unittest_threadsan
+      run: bash scripts/tsan_debug_loop.sh
 
     - name: Test Extra
       if: ${{ github.ref_name == 'main' && !fromJson(needs.prepare.outputs.skip_tests) }}

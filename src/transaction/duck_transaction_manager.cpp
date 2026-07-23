@@ -579,9 +579,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		try {
 			commit_wal->SyncUpTo(wal_sync_offset);
 			FinishCommitDurability(info.commit_id, wal_sync_offset);
-			// the durable bound advanced: sweep transactions that were pinned only by
-			// not-yet-durable commits (they hold e.g. the shared checkpoint lock)
-			GarbageCollectDurableTransactions();
+			// TSAN-BISECT variant 2: GC sweep disabled, cap enabled
+			// GarbageCollectDurableTransactions();
 		} catch (std::exception &ex) {
 			// the commit is already published and can no longer be rolled back, but it is not
 			// durable: poison the database
