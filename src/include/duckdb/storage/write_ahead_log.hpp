@@ -124,8 +124,11 @@ public:
 	void Flush();
 	//! Write a WAL_FLUSH marker and push the WAL buffer to the OS, without syncing it to disk.
 	//! Returns the WAL offset covering the marker (to be passed to SyncUpTo).
+	//! If requires_block_sync is set, the WAL entries covered by this marker reference
+	//! optimistically written blocks: the sync that covers this marker will fsync the main
+	//! database file first (blocks must be durable before the record referencing them).
 	//! Caller must hold the WAL lock.
-	idx_t FlushMarker();
+	idx_t FlushMarker(bool requires_block_sync = false);
 	//! Block until the WAL is durable up to at least the given offset. One caller syncs on
 	//! behalf of all offsets pushed so far, concurrent callers wait - so a single fsync can
 	//! cover many commits. Called without holding the WAL lock.
@@ -158,6 +161,9 @@ protected:
 	idx_t syncing_offset = 0;
 	//! The highest offset for which a sync has been requested
 	idx_t requested_sync_offset = 0;
+	//! Whether a marker at or below requested_sync_offset requires the main database file to
+	//! be synced first (it covers references to optimistically written blocks)
+	bool block_sync_pending = false;
 	//! Bumped whenever the WAL is truncated, to invalidate in-flight syncs
 	idx_t truncate_generation = 0;
 	//! Set when a sync has failed: the WAL must not be synced again (the OS may have dropped

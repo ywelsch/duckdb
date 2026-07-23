@@ -595,7 +595,7 @@ void WriteAheadLog::Flush() {
 	SyncUpTo(FlushMarker());
 }
 
-idx_t WriteAheadLog::FlushMarker() {
+idx_t WriteAheadLog::FlushMarker(bool requires_block_sync) {
 	if (!writer) {
 		return 0;
 	}
@@ -610,8 +610,13 @@ idx_t WriteAheadLog::FlushMarker() {
 	storage_manager.SetWALSize(writer->GetFileSize());
 	last_flush_offset = writer->GetFileSize();
 	{
+		// the block-sync requirement must be registered atomically with the offset: any sync
+		// whose target covers this marker must see the flag
 		lock_guard<mutex> guard(sync_lock);
 		requested_sync_offset = MaxValue<idx_t>(requested_sync_offset, last_flush_offset);
+		if (requires_block_sync) {
+			block_sync_pending = true;
+		}
 	}
 	return last_flush_offset;
 }
@@ -636,10 +641,17 @@ void WriteAheadLog::SyncUpTo(idx_t offset) {
 		// no in-flight sync covers this offset - sync on behalf of everything requested so far
 		auto target = requested_sync_offset;
 		auto generation = truncate_generation;
+		auto sync_blocks = block_sync_pending;
+		block_sync_pending = false;
 		syncing_offset = target;
 		guard.unlock();
 		ErrorData error;
 		try {
+			if (sync_blocks) {
+				// a marker covered by this sync references optimistically written blocks in the
+				// main database file: those must be durable before the WAL record is
+				storage_manager.GetBlockManager().FileSync();
+			}
 			writer->handle->Sync();
 		} catch (std::exception &ex) {
 			error = ErrorData(ex);
