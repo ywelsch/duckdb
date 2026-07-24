@@ -663,6 +663,7 @@ void WriteAheadLog::SyncAsLeader(unique_lock<mutex> &guard) {
 	if (error.HasError()) {
 		// the OS may have dropped the dirty pages: this WAL must never be synced again
 		sync_failed = true;
+		guard.unlock();
 		sync_cv.notify_all();
 		error.Throw();
 	}
@@ -673,7 +674,10 @@ void WriteAheadLog::SyncAsLeader(unique_lock<mutex> &guard) {
 	// target would otherwise make every waiter believe a sync covers its offset). Clobbering a
 	// concurrent leader's value only costs a spurious extra fsync, never a missed one.
 	syncing_offset = durable_offset;
+	// notify without holding the lock, so waiters do not wake up into a held mutex
+	guard.unlock();
 	sync_cv.notify_all();
+	guard.lock();
 }
 
 void WriteAheadLog::IncrementWALEntriesCount() {

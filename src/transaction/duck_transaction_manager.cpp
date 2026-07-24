@@ -312,7 +312,7 @@ void DuckTransactionManager::RegisterUnsyncedCommit(transaction_t commit_id, idx
 }
 
 bool DuckTransactionManager::FinishCommitDurability(transaction_t commit_id, idx_t synced_offset) {
-	lock_guard<mutex> guard(durability_lock);
+	unique_lock<mutex> guard(durability_lock);
 	// advance the bound over every commit the sync covered - including commits whose threads
 	// have not woken up yet, so that a committer's ack implies its commit is observable -
 	// and remove this thread's own entry (see UnsyncedCommit)
@@ -336,6 +336,8 @@ bool DuckTransactionManager::FinishCommitDurability(transaction_t commit_id, idx
 	}
 #endif
 	if (unsynced_commits.empty()) {
+		// notify without holding the lock, so waiters do not wake up into a held mutex
+		guard.unlock();
 		durability_cv.notify_all();
 	}
 	return advanced;
@@ -401,8 +403,10 @@ void DuckTransactionManager::QueueCleanup(unique_ptr<DuckCleanupInfo> cleanup_in
 }
 
 void DuckTransactionManager::MarkDurabilityFailed() {
-	lock_guard<mutex> guard(durability_lock);
-	durability_failed = true;
+	{
+		lock_guard<mutex> guard(durability_lock);
+		durability_failed = true;
+	}
 	durability_cv.notify_all();
 }
 
