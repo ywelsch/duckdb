@@ -305,10 +305,12 @@ void DuckTransactionManager::RegisterUnsyncedCommit(transaction_t commit_id, idx
 		// nothing pending: everything below this commit is durable
 		durable_commit_bound = commit_id - 1;
 	}
+	// the front entry may sit at or below the bound (covered by a later sync, not yet removed
+	// by its own thread), but a new commit always registers above it
 	D_ASSERT(wal_offset > 0);
+	D_ASSERT(commit_id > durable_commit_bound);
 	D_ASSERT(unsynced_commits.empty() || unsynced_commits.back().wal_offset <= wal_offset);
 	unsynced_commits.push_back(UnsyncedCommit {commit_id, wal_offset, catalog_version});
-	D_ASSERT(unsynced_commits.size() == 1 || unsynced_commits.front().commit_id > durable_commit_bound);
 }
 
 bool DuckTransactionManager::FinishCommitDurability(transaction_t commit_id, idx_t synced_offset) {
@@ -553,8 +555,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		last_commit = info.commit_id;
 		if (wal_written && info.wal_sync_offset > 0) {
 			// published but not yet durable: track it until the sync below (see UnsyncedCommit).
-			// A commit without a flush marker (offset 0) wrote and published nothing: its only
-			// "change" was an aborted statement's empty local-storage entry
+			// A commit without a flush marker (offset 0) put nothing in the WAL: an aborted
+			// statement's empty local-storage residue, or changes that serialize no WAL entries
 			commit_wal = db.GetStorageManager().GetWAL();
 			if (commit_wal) {
 				// registration precedes this commit's own catalog-version bump below
