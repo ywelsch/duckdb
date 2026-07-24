@@ -222,12 +222,6 @@ ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &
 
 		auto wal_timer = profiler.StartTimer<MetricStorageWriteToWALLatency>();
 		undo_buffer.WriteToWAL(*wal, commit_state.get());
-		if (commit_state->HasRowGroupData()) {
-			// if we have optimistically written any data AND we are writing to the WAL, we have written references to
-			// optimistically written blocks
-			// hence we need to ensure those optimistically written blocks are persisted
-			storage_manager.GetBlockManager().FileSync();
-		}
 		wal_timer.EndTimer();
 
 	} catch (std::exception &ex) {

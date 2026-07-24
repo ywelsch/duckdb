@@ -99,6 +99,7 @@ void WriteAheadLog::Truncate(idx_t size) {
 	durable_offset = MinValue<idx_t>(durable_offset, truncated_offset);
 	syncing_offset = MinValue<idx_t>(syncing_offset, truncated_offset);
 	requested_sync_offset = MinValue<idx_t>(requested_sync_offset, truncated_offset);
+	block_sync_requested_offset = MinValue<idx_t>(block_sync_requested_offset, truncated_offset);
 	truncate_generation++;
 }
 
@@ -595,7 +596,7 @@ void WriteAheadLog::Flush() {
 	SyncUpTo(FlushMarker());
 }
 
-idx_t WriteAheadLog::FlushMarker() {
+idx_t WriteAheadLog::FlushMarker(bool requires_block_sync) {
 	D_ASSERT(writer);
 
 	// write an empty entry
@@ -608,8 +609,13 @@ idx_t WriteAheadLog::FlushMarker() {
 	storage_manager.SetWALSize(writer->GetFileSize());
 	auto marker_offset = writer->GetFileSize();
 	{
+		// the block-sync requirement must be registered atomically with the offset: any sync
+		// whose target covers this marker must observe the request
 		lock_guard<mutex> guard(sync_lock);
 		requested_sync_offset = MaxValue<idx_t>(requested_sync_offset, marker_offset);
+		if (requires_block_sync) {
+			block_sync_requested_offset = MaxValue<idx_t>(block_sync_requested_offset, marker_offset);
+		}
 	}
 	return marker_offset;
 }
@@ -637,10 +643,18 @@ void WriteAheadLog::SyncUpTo(idx_t offset) {
 void WriteAheadLog::SyncAsLeader(unique_lock<mutex> &guard) {
 	auto target = requested_sync_offset;
 	auto generation = truncate_generation;
+	// whether the sync covers a marker referencing optimistically written blocks that no
+	// completed main-file sync covers yet: those must be durable before the WAL is. Derived
+	// from offsets (not a consumable flag) so that every leader that advances durable_offset
+	// over such a marker has itself ensured block durability first.
+	auto sync_blocks = block_sync_requested_offset > durable_offset;
 	syncing_offset = target;
 	guard.unlock();
 	ErrorData error;
 	try {
+		if (sync_blocks) {
+			storage_manager.GetBlockManager().FileSync();
+		}
 		writer->SyncHandle();
 	} catch (std::exception &ex) {
 		error = ErrorData(ex);

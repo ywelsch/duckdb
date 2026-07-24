@@ -695,7 +695,7 @@ void SingleFileStorageCommitState::FlushCommit() {
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
 	// Only the flush marker is written here: the sync happens after the commit is published
 	// and the locks are released (see DuckTransactionManager::CommitTransaction)
-	wal_sync_offset = wal.FlushMarker();
+	wal_sync_offset = wal.FlushMarker(HasRowGroupData());
 	state = WALCommitState::FLUSHED;
 }
 
