@@ -91,7 +91,7 @@ public:
 	bool WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointOptions &options,
 	                        ActiveCheckpointWrapper &active_checkpoint);
 	//! Finishes a checkpoint
-	void WALFinishCheckpoint(unique_lock<mutex> &wal_lock);
+	void WALFinishCheckpoint(unique_lock<mutex> &wal_lock, optional_idx pending_commit_id = optional_idx());
 	// Get the WAL lock
 	unique_lock<mutex> GetWALLock();
 

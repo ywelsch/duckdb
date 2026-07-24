@@ -261,7 +261,12 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 	// WAL this checkpoint deletes) and before the WAL object is destroyed (the drain is a
 	// quiescence barrier - see DuckTransactionManager::UnsyncedCommit)
 	auto &transaction_manager = DuckTransactionManager::Get(db);
-	transaction_manager.WaitForDurability();
+	if (options.pending_commit_id.IsValid()) {
+		// this checkpoint carries a gated commit: its own gate stays registered
+		transaction_manager.WaitForCheckpointDrain(options.pending_commit_id.GetIndex(), false);
+	} else {
+		transaction_manager.WaitForDurability();
+	}
 	if (options.type == CheckpointType::FULL_CHECKPOINT &&
 	    transaction_manager.GetLastCommit() >= transaction_manager.LowestActiveStart()) {
 		// an active bounded snapshot still needs state a full checkpoint would vacuum away
@@ -311,10 +316,15 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 	auto &single_file_block_manager = GetBlockManager().Cast<SingleFileBlockManager>();
 	auto next_checkpoint_iteration = single_file_block_manager.GetCheckpointIteration() + 1;
 	wal = make_uniq<WriteAheadLog>(*this, checkpoint_wal_path, 0ULL, WALInitState::NO_WAL, next_checkpoint_iteration);
+	if (options.pending_commit_id.IsValid() && options.wal_lock && options.wal_lock->owns_lock()) {
+		// the gated commit's durability no longer needs WAL exclusion: commits may proceed
+		// into the checkpoint WAL, gated behind the pending commit until it becomes durable
+		options.wal_lock->unlock();
+	}
 	return true;
 }
 
-void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &) {
+void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &, optional_idx pending_commit_id) {
 	D_ASSERT(wal.get());
 
 	// "wal" points to the checkpoint WAL
@@ -332,7 +342,12 @@ void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &) {
 
 	// we have had writes to the checkpoint WAL - we need to override our WAL with the checkpoint WAL
 	// commits to the checkpoint WAL may still be syncing: drain before destroying the WAL object
-	DuckTransactionManager::Get(db).WaitForDurability();
+	// (gated commits cannot finish before this checkpoint does - synced is quiescent enough)
+	if (pending_commit_id.IsValid()) {
+		DuckTransactionManager::Get(db).WaitForCheckpointDrain(pending_commit_id.GetIndex(), true);
+	} else {
+		DuckTransactionManager::Get(db).WaitForDurability();
+	}
 	// first close the WAL writer
 	auto checkpoint_wal_path = wal->GetPath();
 	wal.reset();

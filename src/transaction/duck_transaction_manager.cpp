@@ -309,8 +309,20 @@ void DuckTransactionManager::RegisterUnsyncedCommit(transaction_t commit_id, idx
 	// by its own thread), but a new commit always registers above it
 	D_ASSERT(wal_offset > 0);
 	D_ASSERT(commit_id > durable_commit_bound);
-	D_ASSERT(unsynced_commits.empty() || unsynced_commits.back().wal_offset <= wal_offset);
+	// offsets are monotone within one WAL; entries behind a checkpoint gate belong to the
+	// next (checkpoint) WAL and restart the offset space
+	D_ASSERT(unsynced_commits.empty() || unsynced_commits.back().wal_offset <= wal_offset ||
+	         unsynced_commits.back().wal_offset == CHECKPOINT_GATE_OFFSET);
 	unsynced_commits.push_back(UnsyncedCommit {commit_id, wal_offset, catalog_version});
+}
+
+void DuckTransactionManager::RegisterCheckpointGate(transaction_t commit_id, idx_t catalog_version) {
+	lock_guard<mutex> guard(durability_lock);
+	if (unsynced_commits.empty()) {
+		durable_commit_bound = commit_id - 1;
+	}
+	D_ASSERT(commit_id > durable_commit_bound);
+	unsynced_commits.push_back(UnsyncedCommit {commit_id, CHECKPOINT_GATE_OFFSET, catalog_version});
 }
 
 bool DuckTransactionManager::FinishCommitDurability(transaction_t commit_id, idx_t synced_offset) {
@@ -318,31 +330,128 @@ bool DuckTransactionManager::FinishCommitDurability(transaction_t commit_id, idx
 	// advance the bound over every commit the sync covered - including commits whose threads
 	// have not woken up yet, so that a committer's ack implies its commit is observable -
 	// and remove this thread's own entry (see UnsyncedCommit)
-	auto new_bound = durable_commit_bound;
-	for (auto it = unsynced_commits.begin(); it != unsynced_commits.end(); it++) {
-		if (it->wal_offset > synced_offset) {
-			break;
+	bool marked_synced = false;
+	while (true) {
+		auto new_bound = durable_commit_bound;
+		bool erased = false;
+		bool gated = false;
+		for (auto it = unsynced_commits.begin(); it != unsynced_commits.end(); it++) {
+			if (it->wal_offset == CHECKPOINT_GATE_OFFSET) {
+				// a checkpoint-instead-of-WAL commit ahead of us is not durable yet: we cannot
+				// be acknowledged before it, or a crash could lose it but not us
+				gated = true;
+				break;
+			}
+			if (it->wal_offset > synced_offset) {
+				break;
+			}
+			new_bound = MaxValue<transaction_t>(new_bound, it->commit_id);
+			if (it->commit_id == commit_id) {
+				unsynced_commits.erase(it);
+				erased = true;
+				break;
+			}
 		}
-		new_bound = MaxValue<transaction_t>(new_bound, it->commit_id);
-		if (it->commit_id == commit_id) {
-			unsynced_commits.erase(it);
-			break;
-		}
-	}
-	bool advanced = new_bound > durable_commit_bound;
-	durable_commit_bound = new_bound;
+		bool advanced = new_bound > durable_commit_bound;
+		durable_commit_bound = new_bound;
+		if (erased || !gated) {
+			// erased our entry, or the gate owner already erased it when lifting the gate
 #ifdef DEBUG
-	// offsets are registered in flush order, so the walk always reaches this thread's entry
-	for (auto &entry : unsynced_commits) {
-		D_ASSERT(entry.commit_id != commit_id);
-	}
+			// offsets are registered in flush order, so the walk always reaches this entry
+			for (auto &entry : unsynced_commits) {
+				D_ASSERT(entry.commit_id != commit_id);
+			}
 #endif
-	if (unsynced_commits.empty()) {
-		// notify without holding the lock, so waiters do not wake up into a held mutex
-		guard.unlock();
-		durability_cv.notify_all();
+			// notify unconditionally (without holding the lock): with a checkpoint gate
+			// registered the queue never empties, but our removal may complete a drain
+			guard.unlock();
+			durability_cv.notify_all();
+			return advanced || !erased;
+		}
+		// gated: mark our entry synced - the gate owner acknowledges synced commits when the
+		// gate lifts, and the checkpoint drain waits for the flag - then wait and re-evaluate
+		if (!marked_synced) {
+			for (auto &entry : unsynced_commits) {
+				if (entry.commit_id == commit_id) {
+					entry.synced = true;
+					marked_synced = true;
+					break;
+				}
+			}
+			D_ASSERT(marked_synced);
+			durability_cv.notify_all();
+		}
+		durability_cv.wait(guard);
+		if (durability_failed) {
+			// remove our entry before failing: our thread is done with it
+			for (auto it = unsynced_commits.begin(); it != unsynced_commits.end(); it++) {
+				if (it->commit_id == commit_id) {
+					unsynced_commits.erase(it);
+					break;
+				}
+			}
+			guard.unlock();
+			durability_cv.notify_all();
+			throw IOException("Cannot acknowledge the commit: the checkpoint carrying it failed");
+		}
 	}
-	return advanced;
+}
+
+void DuckTransactionManager::FinishCheckpointGate(transaction_t commit_id, bool success) {
+	{
+		lock_guard<mutex> guard(durability_lock);
+		for (auto it = unsynced_commits.begin(); it != unsynced_commits.end(); it++) {
+			if (it->commit_id == commit_id) {
+				D_ASSERT(it->wal_offset == CHECKPOINT_GATE_OFFSET);
+				unsynced_commits.erase(it);
+				break;
+			}
+		}
+		if (!success) {
+			// the commit is published but can never become durable: poison durability
+			durability_failed = true;
+		} else {
+			// the checkpoint - and everything it baked, including this commit - is durable:
+			// acknowledge the synced commits that were gated behind it
+			auto new_bound = MaxValue<transaction_t>(durable_commit_bound, commit_id);
+			while (!unsynced_commits.empty() && unsynced_commits.front().wal_offset != CHECKPOINT_GATE_OFFSET &&
+			       unsynced_commits.front().synced) {
+				new_bound = MaxValue<transaction_t>(new_bound, unsynced_commits.front().commit_id);
+				unsynced_commits.pop_front();
+			}
+			durable_commit_bound = new_bound;
+		}
+	}
+	durability_cv.notify_all();
+}
+
+void DuckTransactionManager::WaitForCheckpointDrain(transaction_t gate_commit_id, bool allow_synced) {
+	unique_lock<mutex> guard(durability_lock);
+	durability_cv.wait(guard, [&]() {
+		if (durability_failed) {
+			return true;
+		}
+		for (auto &entry : unsynced_commits) {
+			if (entry.commit_id == gate_commit_id) {
+				continue;
+			}
+			if (!allow_synced || !entry.synced) {
+				return false;
+			}
+		}
+		return true;
+	});
+	if (durability_failed) {
+		throw IOException("Cannot wait for WAL durability: a WAL sync has failed");
+	}
+}
+
+void DuckTransactionManager::RaiseCheckpointSnapshot(DuckTransaction &transaction, transaction_t min_start_time) {
+	// the checkpoint transaction started with a snapshot bounded below the gated commit it
+	// must persist: raise it just above (only the gated commit itself sits in between, and
+	// raising a start time only relaxes what the transaction pins)
+	lock_guard<mutex> lock(transaction_lock);
+	transaction.start_time = MaxValue<transaction_t>(transaction.start_time, min_start_time);
 }
 
 DuckTransactionManager::TransactionHorizon
@@ -460,6 +569,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	unique_ptr<StorageCommitState> commit_state;
 	optional_ptr<WriteAheadLog> commit_wal;
 	bool commit_registered = false;
+	bool checkpoint_gate_registered = false;
 	bool skip_wal_write_due_to_checkpoint = false;
 	bool wal_written = false;
 	if (checkpoint_decision.can_checkpoint) {
@@ -563,6 +673,18 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 				RegisterUnsyncedCommit(info.commit_id, info.wal_sync_offset, last_committed_version);
 				commit_registered = true;
 			}
+		} else if (skip_wal_write_due_to_checkpoint && checkpoint_decision.can_checkpoint &&
+		           checkpoint_decision.type == CheckpointType::CONCURRENT_CHECKPOINT && !undo_properties.has_updates &&
+		           !undo_properties.has_dropped_entries) {
+			// checkpoint-instead-of-WAL commit: the checkpoint below is its durability. Gate
+			// the durable bound so that no snapshot observes it and no later commit is
+			// acknowledged before it - the WAL lock can then be released during the checkpoint
+			// body. Only concurrent checkpoints are gated: snapshots bounded below the gate can
+			// start at any point during the checkpoint, and a full checkpoint would vacuum this
+			// commit's deletes from under them - full checkpoints keep the legacy exclusion
+			// (and their vacuum semantics)
+			RegisterCheckpointGate(info.commit_id, last_committed_version);
+			checkpoint_gate_registered = true;
 		}
 
 		// check if catalog changes were made
@@ -587,7 +709,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		// Remove the transaction from the list of active transactions and gather cleanup information.
 		QueueCleanup(RemoveTransaction(transaction, store_transaction));
 	} catch (...) {
-		if (commit_registered) {
+		if (commit_registered || checkpoint_gate_registered) {
 			// the registered commit can no longer be finished: poison durability so that
 			// checkpoint and shutdown waiters fail instead of hanging forever
 			MarkDurabilityFailed();
@@ -650,16 +772,37 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		options.action = CheckpointAction::ALWAYS_CHECKPOINT;
 		options.type = checkpoint_decision.type;
 		options.wal_lock = held_wal_lock.owns_lock() ? &held_wal_lock : nullptr;
+		if (checkpoint_gate_registered) {
+			options.pending_commit_id = info.commit_id;
+		}
 		auto &storage_manager = db.GetStorageManager();
 		try {
 			storage_manager.CreateCheckpoint(context, options);
+			if (checkpoint_gate_registered) {
+				// the checkpoint is durable: acknowledge this commit and the synced commits
+				// gated behind it, and clean up the transactions the gate was pinning
+				FinishCheckpointGate(info.commit_id, true);
+				GarbageCollectDurableTransactions();
+				CleanupTransactions();
+			}
 		} catch (std::exception &ex) {
+			if (checkpoint_gate_registered) {
+				// the commit is published but its durability failed: poison, do not acknowledge
+				FinishCheckpointGate(info.commit_id, false);
+				ValidChecker::Invalidate(db.GetDatabase(), "Failed to checkpoint a commit that skipped the WAL: " +
+				                                               ErrorData(ex).Message());
+			}
 			if (wal_written) {
 				context.transaction.SetAutocheckpointError(BuildAutocheckpointError(db, ex));
 			} else {
 				error.Merge(ErrorData(ex));
 			}
 		}
+	}
+	if (checkpoint_gate_registered && !checkpoint_decision.can_checkpoint) {
+		// defensive: the checkpoint was abandoned after the gate was registered
+		FinishCheckpointGate(info.commit_id, false);
+		error.Merge(ErrorData(ExceptionType::INTERNAL, "checkpoint gate registered but checkpoint abandoned"));
 	}
 
 	return error;

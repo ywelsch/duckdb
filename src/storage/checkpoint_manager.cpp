@@ -66,6 +66,10 @@ void ActiveCheckpointWrapper::GetCheckpointTransaction(CheckpointOptions &option
 	auto &transaction = DuckTransaction::Get(*checkpoint_context, db);
 	transaction.SetIsCheckpointTransaction();
 	checkpoint_transaction = &transaction;
+	if (options.pending_commit_id.IsValid()) {
+		// this checkpoint IS the pending commit's durability: it must observe it
+		transaction_manager.RaiseCheckpointSnapshot(transaction, options.pending_commit_id.GetIndex() + 1);
+	}
 	options.transaction_id = transaction.start_time;
 	transaction_manager.SetActiveCheckpoint(transaction.start_time);
 }
@@ -343,9 +347,13 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 			wal_lock = owned_wal_lock;
 		} else {
 			// we already have the WAL lock - just refer to it
+			if (!options.wal_lock->owns_lock()) {
+				// released during the checkpoint body for a gated commit - re-acquire
+				options.wal_lock->lock();
+			}
 			wal_lock = options.wal_lock;
 		}
-		storage_manager.WALFinishCheckpoint(*wal_lock);
+		storage_manager.WALFinishCheckpoint(*wal_lock, options.pending_commit_id);
 	}
 
 	// for any indexes that were appended to while checkpointing, merge the delta back into the main index

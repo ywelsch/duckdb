@@ -10,6 +10,7 @@
 
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 
 namespace duckdb {
@@ -27,6 +28,10 @@ struct CheckpointOptions {
 	//! The WAL lock - in case we are holding it during the entire checkpoint.
 	//! This is only required if we are doing a checkpoint instead of writing to the WAL
 	optional_ptr<unique_lock<mutex>> wal_lock;
+	//! The commit id of a checkpoint-instead-of-WAL commit gated on this checkpoint: the
+	//! checkpoint is its durability, and the WAL lock can be released during the checkpoint
+	//! body (see DuckTransactionManager::CHECKPOINT_GATE_OFFSET)
+	optional_idx pending_commit_id;
 };
 
 } // namespace duckdb

@@ -62,6 +62,11 @@ public:
 	}
 	//! Wait until every published commit is durable (i.e. its WAL flush marker is synced)
 	void WaitForDurability();
+	//! Drain for a gated checkpoint: waits until every entry other than the gate is gone
+	//! (allow_synced = false) or synced (allow_synced = true, quiescent for WAL destruction)
+	void WaitForCheckpointDrain(transaction_t gate_commit_id, bool allow_synced);
+	//! Raise a checkpoint transaction's snapshot above the gated commit it must persist
+	void RaiseCheckpointSnapshot(DuckTransaction &transaction, transaction_t min_start_time);
 	transaction_t GetActiveCheckpoint() const {
 		return active_checkpoint;
 	}
@@ -133,6 +138,10 @@ private:
 	//! Register a published commit whose flush marker is not yet synced.
 	//! Called while holding the transaction lock and the WAL lock.
 	void RegisterUnsyncedCommit(transaction_t commit_id, idx_t wal_offset, idx_t catalog_version);
+	//! Gate the durable bound below a checkpoint-instead-of-WAL commit until its checkpoint completes
+	void RegisterCheckpointGate(transaction_t commit_id, idx_t catalog_version);
+	//! Lift (or poison, on failure) the gate: acknowledges the commit and every synced commit behind it
+	void FinishCheckpointGate(transaction_t commit_id, bool success);
 	//! Advance the durable bound over every commit covered by the completed sync and remove
 	//! this thread's own entry. Only called after the thread has left WriteAheadLog::SyncUpTo.
 	//! Returns whether the bound advanced.
@@ -161,11 +170,19 @@ private:
 	//! quiescence barrier for the WAL object.
 	struct UnsyncedCommit {
 		transaction_t commit_id;
-		//! The WAL offset covering the commit's flush marker
+		//! The WAL offset covering the commit's flush marker, or CHECKPOINT_GATE_OFFSET for a
+		//! commit whose durability is a pending checkpoint instead of the WAL
 		idx_t wal_offset;
 		//! The committed catalog version just before this commit published
 		idx_t catalog_version;
+		//! Whether the commit's WAL sync has completed (only meaningful while the commit is
+		//! gated behind a pending checkpoint - see CHECKPOINT_GATE_OFFSET)
+		bool synced = false;
 	};
+	//! A checkpoint-instead-of-WAL commit is durable only once its checkpoint completes: its
+	//! entry gates the durable bound, so commits behind it stay published-but-unacknowledged
+	//! and lose together with it on a crash
+	static constexpr idx_t CHECKPOINT_GATE_OFFSET = DConstants::INVALID_INDEX;
 
 private:
 	//! The current start timestamp used by transactions
