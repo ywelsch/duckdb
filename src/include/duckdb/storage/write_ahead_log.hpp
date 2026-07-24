@@ -16,6 +16,8 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/storage/block.hpp"
 
+#include <condition_variable>
+
 namespace duckdb {
 
 struct AlterInfo;
@@ -120,6 +122,19 @@ public:
 	//! Used during RevertCommit.
 	void Truncate(idx_t size);
 	void Flush();
+	//! Write a WAL_FLUSH marker and push the WAL buffer to the OS, without syncing it to disk.
+	//! Returns the WAL offset covering the marker (to be passed to SyncUpTo).
+	//! Caller must hold the WAL lock.
+	idx_t FlushMarker();
+	//! Block until the WAL is durable up to at least the given offset. One caller syncs on
+	//! behalf of all offsets pushed so far, concurrent callers wait - so a single fsync can
+	//! cover many commits. Called without holding the WAL lock.
+	void SyncUpTo(idx_t offset);
+
+private:
+	void SyncAsLeader(unique_lock<mutex> &guard);
+
+public:
 	//! Increment the WAL entry count, which is used for the auto-checkpoint threshold.
 	void IncrementWALEntriesCount();
 	void WriteCheckpoint(MetaBlockPointer meta_block);
@@ -131,6 +146,21 @@ protected:
 	string wal_path;
 	atomic<WALInitState> init_state;
 	optional_idx checkpoint_iteration;
+
+	//! Group-sync state (guarded by sync_lock, which is independent of the WAL lock)
+	mutex sync_lock;
+	std::condition_variable sync_cv;
+	//! The WAL is durable up to this offset
+	idx_t durable_offset = 0;
+	//! An in-flight sync will make the WAL durable up to this offset
+	idx_t syncing_offset = 0;
+	//! The highest offset for which a sync has been requested
+	idx_t requested_sync_offset = 0;
+	//! Bumped whenever the WAL is truncated, to invalidate in-flight syncs
+	idx_t truncate_generation = 0;
+	//! Set when a sync has failed: the WAL must not be synced again (the OS may have dropped
+	//! the dirty pages), so all current and future syncs fail
+	bool sync_failed = false;
 };
 
 } // namespace duckdb

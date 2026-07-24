@@ -1,4 +1,5 @@
 #include "duckdb/catalog/catalog_set.hpp"
+#include "duckdb/transaction/transaction_data.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -513,12 +514,16 @@ bool CatalogSet::CreatedByOtherActiveTransaction(CatalogTransaction transaction,
 }
 
 bool CatalogSet::CommittedAfterStarting(CatalogTransaction transaction, transaction_t timestamp) {
-	// The entry has been committed after this transaction started, this is not our source of truth.
-	return (timestamp < TRANSACTION_ID_START && timestamp > transaction.start_time);
+	// The entry is committed but not part of this transaction's snapshot, so it is not our source of truth.
+	// Bootstrap entries are stamped with the system transaction's timestamp and precede everything.
+	return IsCommitted(timestamp) && !VisibleToSnapshot(timestamp, transaction.start_time) &&
+	       timestamp > SYSTEM_TRANSACTION_TIMESTAMP;
 }
 
 bool CatalogSet::HasConflict(CatalogTransaction transaction, transaction_t timestamp) {
-	return CreatedByOtherActiveTransaction(transaction, timestamp) || CommittedAfterStarting(transaction, timestamp);
+	// a version conflicts exactly when it is not visible to the transaction: it is either another
+	// active transaction's uncommitted version, or committed outside this transaction's snapshot
+	return !UseTimestamp(transaction, timestamp);
 }
 
 bool CatalogSet::IsCommitted(transaction_t timestamp) {
@@ -531,8 +536,8 @@ bool CatalogSet::UseTimestamp(CatalogTransaction transaction, transaction_t time
 		// we created this version
 		return true;
 	}
-	if (timestamp < transaction.start_time) {
-		// this version was committed before we started the transaction
+	if (VisibleToSnapshot(timestamp, transaction.start_time)) {
+		// this version is part of the transaction's snapshot
 		return true;
 	}
 	return false;
@@ -559,7 +564,7 @@ CatalogEntry &CatalogSet::GetEntryForTransaction(CatalogTransaction transaction,
 CatalogEntry &CatalogSet::GetCommittedEntry(CatalogEntry &current) {
 	reference<CatalogEntry> entry(current);
 	while (entry.get().HasChild()) {
-		if (entry.get().timestamp < TRANSACTION_ID_START) {
+		if (IsCommitted(entry.get().timestamp)) {
 			// this entry is committed: use it
 			break;
 		}

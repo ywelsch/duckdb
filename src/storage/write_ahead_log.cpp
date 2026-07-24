@@ -90,6 +90,16 @@ void WriteAheadLog::Truncate(idx_t size) {
 	}
 	writer->Truncate(size);
 	storage_manager.SetWALSize(writer->GetFileSize());
+
+	// a truncation can only remove entries that were never registered for syncing (the tail of
+	// a reverting commit) - clamp the sync offsets so that markers written later at the reused
+	// offsets are not incorrectly considered durable
+	lock_guard<mutex> guard(sync_lock);
+	auto truncated_offset = writer->GetFileSize();
+	durable_offset = MinValue<idx_t>(durable_offset, truncated_offset);
+	syncing_offset = MinValue<idx_t>(syncing_offset, truncated_offset);
+	requested_sync_offset = MinValue<idx_t>(requested_sync_offset, truncated_offset);
+	truncate_generation++;
 }
 
 bool WriteAheadLog::Initialized() const {
@@ -582,14 +592,74 @@ void WriteAheadLog::Flush() {
 	if (!writer) {
 		return;
 	}
+	SyncUpTo(FlushMarker());
+}
+
+idx_t WriteAheadLog::FlushMarker() {
+	D_ASSERT(writer);
 
 	// write an empty entry
 	WriteAheadLogSerializer serializer(*this, WALType::WAL_FLUSH);
 	serializer.End();
 
-	// flushes all changes made to the WAL to disk
-	writer->Sync();
+	// push all changes made to the WAL to the OS, without syncing them to disk: the sync
+	// happens through SyncUpTo, potentially batched with other commits
+	writer->Flush();
 	storage_manager.SetWALSize(writer->GetFileSize());
+	auto marker_offset = writer->GetFileSize();
+	{
+		lock_guard<mutex> guard(sync_lock);
+		requested_sync_offset = MaxValue<idx_t>(requested_sync_offset, marker_offset);
+	}
+	return marker_offset;
+}
+
+void WriteAheadLog::SyncUpTo(idx_t offset) {
+	D_ASSERT(writer && offset > 0);
+	unique_lock<mutex> guard(sync_lock);
+	// durable_offset only advances on successful syncs: an offset it covers is durable even if
+	// a later, unrelated sync has since failed
+	while (durable_offset < offset) {
+		if (sync_failed) {
+			throw IOException("Cannot sync WAL \"%s\": a previous sync of this WAL has failed", wal_path);
+		}
+		if (syncing_offset >= offset) {
+			// an in-flight sync already covers this offset - wait for it to complete
+			sync_cv.wait(guard);
+		} else {
+			SyncAsLeader(guard);
+		}
+	}
+}
+
+//! Sync on behalf of everything requested so far. Enters with the sync lock held, releases it
+//! around the file syncs.
+void WriteAheadLog::SyncAsLeader(unique_lock<mutex> &guard) {
+	auto target = requested_sync_offset;
+	auto generation = truncate_generation;
+	syncing_offset = target;
+	guard.unlock();
+	ErrorData error;
+	try {
+		writer->SyncHandle();
+	} catch (std::exception &ex) {
+		error = ErrorData(ex);
+	}
+	guard.lock();
+	if (error.HasError()) {
+		// the OS may have dropped the dirty pages: this WAL must never be synced again
+		sync_failed = true;
+		sync_cv.notify_all();
+		error.Throw();
+	}
+	if (generation == truncate_generation) {
+		durable_offset = MaxValue<idx_t>(durable_offset, target);
+	}
+	// reset so waiters elect a new leader (after a truncation invalidated this sync, the stale
+	// target would otherwise make every waiter believe a sync covers its offset). Clobbering a
+	// concurrent leader's value only costs a spurious extra fsync, never a missed one.
+	syncing_offset = durable_offset;
+	sync_cv.notify_all();
 }
 
 void WriteAheadLog::IncrementWALEntriesCount() {

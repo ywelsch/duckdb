@@ -38,6 +38,10 @@ public:
 	virtual void RevertCommit() = 0;
 	// Make the commit persistent
 	virtual void FlushCommit() = 0;
+	//! WAL offset covering the flush marker written by FlushCommit (0 if none)
+	virtual idx_t GetWALSyncOffset() {
+		return 0;
+	}
 
 	virtual void AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
 	                             unique_ptr<PersistentCollectionData> row_group_data) = 0;

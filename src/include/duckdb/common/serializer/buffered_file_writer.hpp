@@ -40,6 +40,10 @@ public:
 	DUCKDB_API void Close();
 	//! Flush all changes and fsync the file to disk
 	DUCKDB_API void Sync();
+	//! Fsync the file without flushing the buffer. Unlike the other methods this is safe to
+	//! call concurrently with Write/Flush/Truncate from another thread (the handle is stable
+	//! and the sync covers whatever was flushed before the call).
+	DUCKDB_API void SyncHandle();
 	//! Flush the buffer to the file (without sync)
 	DUCKDB_API void Flush();
 	//! Returns the current size of the file
