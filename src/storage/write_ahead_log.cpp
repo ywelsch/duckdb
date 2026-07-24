@@ -597,7 +597,10 @@ void WriteAheadLog::Flush() {
 }
 
 idx_t WriteAheadLog::FlushMarker(bool requires_block_sync) {
-	D_ASSERT(writer);
+	if (!writer) {
+		// nothing was ever written to this WAL: there is nothing to make durable
+		return 0;
+	}
 
 	// write an empty entry
 	WriteAheadLogSerializer serializer(*this, WALType::WAL_FLUSH);
