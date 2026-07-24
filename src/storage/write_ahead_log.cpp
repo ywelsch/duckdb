@@ -10,6 +10,9 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/catalog/duck_catalog.hpp"
 #include "duckdb/common/checksum.hpp"
+#include "duckdb/common/thread.hpp"
+#include "duckdb/main/settings.hpp"
+#include <random>
 #include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/common/encryption_key_manager.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
@@ -655,6 +658,18 @@ void WriteAheadLog::SyncAsLeader(unique_lock<mutex> &guard) {
 	guard.unlock();
 	ErrorData error;
 	try {
+		auto &db_instance = GetDatabase().GetDatabase();
+		auto fsync_sleep_ms = Settings::Get<DebugWalFsyncSleepMsSetting>(db_instance);
+		if (fsync_sleep_ms > 0) {
+			ThreadUtil::SleepMs(fsync_sleep_ms);
+		}
+		auto fsync_failure_rate = Settings::Get<DebugWalFsyncFailureRateSetting>(db_instance);
+		if (fsync_failure_rate > 0.0) {
+			thread_local std::mt19937 debug_rng {std::random_device {}()};
+			if (std::uniform_real_distribution<double>(0.0, 1.0)(debug_rng) < fsync_failure_rate) {
+				throw IOException("debug_wal_fsync_failure_rate: injected WAL fsync failure");
+			}
+		}
 		if (sync_blocks) {
 			storage_manager.GetBlockManager().FileSync();
 		}
