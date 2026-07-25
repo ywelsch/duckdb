@@ -10,9 +10,9 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/catalog/duck_catalog.hpp"
 #include "duckdb/common/checksum.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/main/settings.hpp"
-#include <random>
 #include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/common/encryption_key_manager.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
@@ -665,8 +665,10 @@ void WriteAheadLog::SyncAsLeader(unique_lock<mutex> &guard) {
 		}
 		auto fsync_failure_rate = Settings::Get<DebugWalFsyncFailureRateSetting>(db_instance);
 		if (fsync_failure_rate > 0.0) {
-			thread_local std::mt19937 debug_rng {std::random_device {}()};
-			if (std::uniform_real_distribution<double>(0.0, 1.0)(debug_rng) < fsync_failure_rate) {
+			// RandomEngine (not std::random_device) to avoid leaking a versioned libstdc++
+			// symbol through the exported-symbols check
+			thread_local RandomEngine debug_rng;
+			if (debug_rng.NextRandom() < fsync_failure_rate) {
 				throw IOException("debug_wal_fsync_failure_rate: injected WAL fsync failure");
 			}
 		}
