@@ -157,6 +157,14 @@ bool LocalTableStorage::FlushBlocks() {
 	return optimistic_writer.FinalFlush();
 }
 
+bool LocalTableStorage::WritesToDisk() const {
+	return optimistic_writer.CanWriteToDisk();
+}
+
+bool LocalTableStorage::HasFlushedRowGroups() const {
+	return !row_groups->flushed_row_groups.empty();
+}
+
 bool LocalTableStorage::IsUnconditionalBulkAppend() const {
 	if (is_dropped || deleted_rows != 0) {
 		return false;
@@ -598,9 +606,14 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 
 	TableAppendState append_state;
 	table.AppendLock(transaction, append_state);
-	if (storage.IsUnconditionalBulkAppend() || (append_state.row_start == 0 && storage.deleted_rows == 0)) {
-		// bulk append (at least one full row group, no deletes) OR the table is currently empty:
-		// move over the storage directly - first flush any outstanding blocks
+	if (storage.IsUnconditionalBulkAppend() ||
+	    (append_state.row_start == 0 && storage.deleted_rows == 0 && !storage.WritesToDisk())) {
+		// bulk append (at least one full row group, no deletes): move over the storage directly.
+		// Appends to an empty table are also merged directly if the table cannot be written to
+		// disk (temporary / in-memory / read-only, e.g. WAL replay of a read-only attach) -
+		// there are no optimistically written blocks to manage, and merging avoids re-appending
+		// row by row.
+		// first flush any outstanding blocks
 		if (storage.FlushBlocks()) {
 			blocks_synced = false;
 		}
@@ -628,18 +641,18 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 #endif
 }
 
-LocalStorage::PreFlushResult LocalStorage::PreFlushBlocks() {
-	PreFlushResult result;
+bool LocalStorage::PreFlushBlocks() {
+	bool requires_sync = false;
 	for (auto &storage : table_manager.GetEntries()) {
 		if (storage->IsUnconditionalBulkAppend()) {
 			// Flush() is guaranteed to take the bulk path - the blocks will be used as written
-			result.wrote_blocks |= storage->FlushBlocks();
-		} else if (!storage->is_dropped && storage->deleted_rows == 0 && storage->GetCollection().GetTotalRows() > 0) {
-			// may still take the empty-table bulk path - and write blocks - under the append lock
-			result.may_write_more_blocks = true;
+			storage->FlushBlocks();
+			// the commit references this table's flushed row groups - whether flushed just now or
+			// already during the statement (e.g. by batch inserts) - and needs them persisted
+			requires_sync |= storage->HasFlushedRowGroups();
 		}
 	}
-	return result;
+	return requires_sync;
 }
 
 void LocalStorage::Commit(optional_ptr<StorageCommitState> commit_state) {

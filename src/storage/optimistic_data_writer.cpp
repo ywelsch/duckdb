@@ -25,15 +25,19 @@ OptimisticDataWriter::OptimisticDataWriter(DataTable &table, OptimisticDataWrite
 OptimisticDataWriter::~OptimisticDataWriter() {
 }
 
+bool OptimisticDataWriter::CanWriteToDisk() const {
+	auto &attached = table.GetAttached();
+	auto &storage_manager = StorageManager::Get(attached);
+	return !table.IsTemporary() && !storage_manager.InMemory() && !attached.IsReadOnly();
+}
+
 bool OptimisticDataWriter::PrepareWrite() {
 	// check if optimistic writing is enabled
 	if (!Settings::Get<EnableOptimisticWriteSetting>(context)) {
 		return false;
 	}
 	// check if we should pre-emptively write the table to disk
-	auto &attached = table.GetAttached();
-	auto &storage_manager = StorageManager::Get(attached);
-	if (table.IsTemporary() || storage_manager.InMemory() || attached.IsReadOnly()) {
+	if (!CanWriteToDisk()) {
 		return false;
 	}
 	// we should! write the second-to-last row group to disk

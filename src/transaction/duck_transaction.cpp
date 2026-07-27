@@ -206,30 +206,18 @@ bool DuckTransaction::ShouldWriteToWAL(AttachedDatabase &db) {
 	return true;
 }
 
-ErrorData DuckTransaction::PreFlushOptimisticBlocks(ClientContext &context, AttachedDatabase &db) noexcept {
+ErrorData DuckTransaction::PreFlushOptimisticBlocks(AttachedDatabase &db) noexcept {
 	ErrorData error;
 	if (!ShouldWriteToWAL(db)) {
 		return error;
 	}
 	try {
-		auto result = storage->PreFlushBlocks();
-		if (!result.wrote_blocks) {
-			return error;
+		if (storage->PreFlushBlocks()) {
+			// the flushed blocks are referenced from the WAL - persist them now so that the commit
+			// does not have to FileSync while holding the WAL lock
+			db.GetStorageManager().GetBlockManager().FileSync();
+			storage->SetBlocksSynced();
 		}
-		// the flushed blocks are referenced from the WAL and need a FileSync - but only sync here
-		// if this is provably the commit's final sync (so we never sync more often than before):
-		// otherwise defer to the under-lock FileSync (more blocks may be written under the commit
-		// locks) or to the checkpoint (the commit is predicted to skip the WAL write; a wrong
-		// prediction falls back to the under-lock FileSync as before)
-		auto undo_properties = GetUndoProperties();
-		bool likely_skip_wal =
-		    AutomaticCheckpoint(db, undo_properties) &&
-		    undo_properties.estimated_size >= Settings::Get<AutoCheckpointSkipWalThresholdSetting>(context);
-		if (result.may_write_more_blocks || likely_skip_wal) {
-			return error;
-		}
-		db.GetStorageManager().GetBlockManager().FileSync();
-		storage->SetBlocksSynced();
 	} catch (std::exception &ex) {
 		// fail the commit: the flush machinery cannot safely be re-run after an error, and a failed
 		// fsync must not be retried (the retry can succeed without the data being durable)

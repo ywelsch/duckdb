@@ -90,6 +90,10 @@ public:
 	//! Whether Flush() takes the bulk-append path for this storage regardless of the target table's
 	//! state: at least one full row group and no deletes. Decidable before taking any locks.
 	bool IsUnconditionalBulkAppend() const;
+	//! Whether the optimistic writer of this storage writes to disk (not temporary / in-memory / read-only)
+	bool WritesToDisk() const;
+	//! Whether this storage holds optimistically written (flushed) row groups
+	bool HasFlushedRowGroups() const;
 	void Rollback();
 	idx_t EstimatedSize();
 
@@ -219,15 +223,10 @@ public:
 		return context;
 	}
 
-	struct PreFlushResult {
-		//! Whether any blocks may have been written (and therefore need a FileSync to be persisted)
-		bool wrote_blocks = false;
-		//! Whether tables whose bulk decision needs the append lock may still write blocks under the commit locks
-		bool may_write_more_blocks = false;
-	};
-
-	//! Flush the blocks of all unconditional bulk appends (see IsUnconditionalBulkAppend)
-	PreFlushResult PreFlushBlocks();
+	//! Flush the blocks of all unconditional bulk appends (see IsUnconditionalBulkAppend) - returns
+	//! true if the commit references optimistically written blocks, flushed either just now or
+	//! during the statement (e.g. by batch inserts), which require a FileSync to be persisted
+	bool PreFlushBlocks();
 	//! Marks that all blocks written so far have been fsynced
 	void SetBlocksSynced() {
 		blocks_synced = true;
