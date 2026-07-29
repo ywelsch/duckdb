@@ -222,8 +222,6 @@ public:
 		return context;
 	}
 
-	//! Flush the blocks of all bulk appends (see IsBulkAppend) and FileSync if any will be
-	//! referenced from the WAL
 	void FlushBulkAppendBlocksAndSync(AttachedDatabase &db);
 
 private:
