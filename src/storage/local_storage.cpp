@@ -5,6 +5,7 @@
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/partial_block_manager.hpp"
+#include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/table/row_group.hpp"
@@ -642,18 +643,21 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 #endif
 }
 
-bool LocalStorage::PreFlushBlocks() {
+void LocalStorage::PreFlushBlocks(AttachedDatabase &db) {
 	bool requires_sync = false;
 	for (auto &storage : table_manager.GetEntries()) {
 		if (storage->IsBulkAppend()) {
 			// Flush() is guaranteed to take the bulk path - the blocks will be used as written
 			storage->FlushBlocks();
-			// the WAL will reference this table's flushed row groups (flushed just now or already
-			// during the statement, e.g. by batch inserts) - they must be persisted first
 			requires_sync |= storage->HasFlushedRowGroups();
 		}
 	}
-	return requires_sync;
+	if (requires_sync) {
+		// the WAL will reference the flushed row groups (flushed just now or already during the
+		// statement, e.g. by batch inserts) - persist them now so that the commit does not have
+		// to FileSync while holding the WAL lock
+		db.GetStorageManager().GetBlockManager().FileSync();
+	}
 }
 
 void LocalStorage::Commit(optional_ptr<StorageCommitState> commit_state) {

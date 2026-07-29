@@ -212,11 +212,7 @@ ErrorData DuckTransaction::PreFlushOptimisticBlocks(AttachedDatabase &db) noexce
 		return error;
 	}
 	try {
-		if (storage->PreFlushBlocks()) {
-			// the flushed blocks will be referenced from the WAL - persist them now so that the
-			// commit does not have to FileSync while holding the WAL lock
-			db.GetStorageManager().GetBlockManager().FileSync();
-		}
+		storage->PreFlushBlocks(db);
 	} catch (std::exception &ex) {
 		// fail the commit: the flush machinery cannot safely be re-run after an error, and a failed
 		// fsync must not be retried (the retry can succeed without the data being durable)
