@@ -223,8 +223,6 @@ public:
 	}
 
 	void FlushBulkAppendBlocksAndSync(AttachedDatabase &db);
-	//! Whether FlushBulkAppendBlocksAndSync FileSynced flushed blocks - only used to verify that
-	//! WAL block references never require a FileSync at WAL-write time
 	bool SyncedFlushedBlocks() const {
 		return synced_flushed_blocks;
 	}
