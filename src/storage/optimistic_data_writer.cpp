@@ -214,13 +214,11 @@ void OptimisticDataWriter::Merge(OptimisticDataWriter &other) {
 	Merge(other.partial_manager);
 }
 
-bool OptimisticDataWriter::FinalFlush() {
-	if (!partial_manager) {
-		return false;
+void OptimisticDataWriter::FinalFlush() {
+	if (partial_manager) {
+		partial_manager->FlushPartialBlocks();
+		partial_manager.reset();
 	}
-	partial_manager->FlushPartialBlocks();
-	partial_manager.reset();
-	return true;
 }
 
 void OptimisticDataWriter::Rollback() {

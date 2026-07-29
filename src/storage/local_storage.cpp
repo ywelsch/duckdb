@@ -147,14 +147,13 @@ void LocalTableStorage::WriteNewRowGroup(idx_t flushed_row_group_idx) {
 	optimistic_writer.WriteNewRowGroup(*row_groups, flushed_row_group_idx);
 }
 
-bool LocalTableStorage::FlushBlocks() {
+void LocalTableStorage::FlushBlocks() {
 	auto &collection = *row_groups->collection;
 	if (collection.GetTotalRows() >= collection.GetRowGroupSize()) {
 		// write any unflushed row groups
 		optimistic_writer.WriteUnflushedRowGroups(*row_groups);
 	}
-	// FinalFlush reports whether a partial block manager existed, i.e. whether blocks may have been written
-	return optimistic_writer.FinalFlush();
+	optimistic_writer.FinalFlush();
 }
 
 bool LocalTableStorage::WritesToDisk() const {
@@ -614,9 +613,7 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 		// there are no optimistically written blocks to manage, and merging avoids re-appending
 		// row by row.
 		// first flush any outstanding blocks
-		if (storage.FlushBlocks()) {
-			blocks_synced = false;
-		}
+		storage.FlushBlocks();
 		// Append to the indexes.
 		storage.AppendToIndexes(transaction, append_state);
 		// finally move over the row groups
@@ -647,8 +644,9 @@ bool LocalStorage::PreFlushBlocks() {
 		if (storage->IsUnconditionalBulkAppend()) {
 			// Flush() is guaranteed to take the bulk path - the blocks will be used as written
 			storage->FlushBlocks();
-			// the commit references this table's flushed row groups - whether flushed just now or
-			// already during the statement (e.g. by batch inserts) - and needs them persisted
+			// the commit will reference this table's flushed row groups from the WAL - whether
+			// flushed just now or already during the statement (e.g. by batch inserts) - and
+			// needs them persisted before the WAL entry can become durable
 			requires_sync |= storage->HasFlushedRowGroups();
 		}
 	}

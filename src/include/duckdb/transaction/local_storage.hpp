@@ -84,9 +84,9 @@ public:
 	void InitializeScan(CollectionScanState &state, optional_ptr<TableFilterSet> table_filters = nullptr);
 	//! Write a new row group to disk (if possible)
 	void WriteNewRowGroup(idx_t flushed_row_group_idx);
-	//! Flush any outstanding blocks to disk - returns true if blocks may have been written.
+	//! Flush any outstanding blocks to disk
 	//! Safe to call more than once: a repeated call writes nothing.
-	bool FlushBlocks();
+	void FlushBlocks();
 	//! Whether Flush() takes the bulk-append path for this storage regardless of the target table's
 	//! state: at least one full row group and no deletes. Decidable before taking any locks.
 	bool IsUnconditionalBulkAppend() const;
@@ -227,21 +227,11 @@ public:
 	//! true if the commit references optimistically written blocks, flushed either just now or
 	//! during the statement (e.g. by batch inserts), which require a FileSync to be persisted
 	bool PreFlushBlocks();
-	//! Marks that all blocks written so far have been fsynced
-	void SetBlocksSynced() {
-		blocks_synced = true;
-	}
-	//! Whether the commit still needs to FileSync optimistically written blocks it references from the WAL
-	bool RequiresFileSyncAtCommit() const {
-		return !blocks_synced;
-	}
 
 private:
 	ClientContext &context;
 	DuckTransaction &transaction;
 	LocalTableManager table_manager;
-	//! Whether all blocks written so far have been fsynced (set by the pre-commit sync, cleared by Flush())
-	bool blocks_synced = false;
 
 private:
 	void Flush(DataTable &table, LocalTableStorage &storage, optional_ptr<StorageCommitState> commit_state);
