@@ -84,7 +84,6 @@ public:
 	void InitializeScan(CollectionScanState &state, optional_ptr<TableFilterSet> table_filters = nullptr);
 	//! Write a new row group to disk (if possible)
 	void WriteNewRowGroup(idx_t flushed_row_group_idx);
-	//! Flush any outstanding blocks to disk
 	void FlushBlocks();
 	//! Whether Flush() takes the bulk-append path for this storage regardless of the target table's
 	//! state: at least one full row group and no deletes. Decidable before taking any locks.
