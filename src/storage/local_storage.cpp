@@ -149,7 +149,8 @@ void LocalTableStorage::WriteNewRowGroup(idx_t flushed_row_group_idx) {
 
 void LocalTableStorage::FlushBlocks() {
 	auto &collection = *row_groups->collection;
-	if (collection.GetTotalRows() >= collection.GetRowGroupSize()) {
+	const idx_t row_group_size = collection.GetRowGroupSize();
+	if (collection.GetTotalRows() >= row_group_size) {
 		// write any unflushed row groups
 		optimistic_writer.WriteUnflushedRowGroups(*row_groups);
 	}
