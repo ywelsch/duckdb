@@ -222,9 +222,8 @@ public:
 		return context;
 	}
 
-	//! Flush the blocks of all unconditional bulk appends (see IsBulkAppend) - returns
-	//! true if the commit references optimistically written blocks, flushed either just now or
-	//! during the statement (e.g. by batch inserts), which require a FileSync to be persisted
+	//! Flush the blocks of all bulk appends (see IsBulkAppend) - returns true if the commit
+	//! references optimistically written blocks, which require a FileSync to be persisted
 	bool PreFlushBlocks();
 
 private:

@@ -645,9 +645,8 @@ bool LocalStorage::PreFlushBlocks() {
 		if (storage->IsBulkAppend()) {
 			// Flush() is guaranteed to take the bulk path - the blocks will be used as written
 			storage->FlushBlocks();
-			// the commit will reference this table's flushed row groups from the WAL - whether
-			// flushed just now or already during the statement (e.g. by batch inserts) - and
-			// needs them persisted before the WAL entry can become durable
+			// the WAL will reference this table's flushed row groups (flushed just now or already
+			// during the statement, e.g. by batch inserts) - they must be persisted first
 			requires_sync |= storage->HasFlushedRowGroups();
 		}
 	}
