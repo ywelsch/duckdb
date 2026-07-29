@@ -165,7 +165,7 @@ bool LocalTableStorage::HasFlushedRowGroups() const {
 	return !row_groups->flushed_row_groups.empty();
 }
 
-bool LocalTableStorage::IsUnconditionalBulkAppend() const {
+bool LocalTableStorage::IsBulkAppend() const {
 	if (is_dropped || deleted_rows != 0) {
 		return false;
 	}
@@ -606,7 +606,7 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 
 	TableAppendState append_state;
 	table.AppendLock(transaction, append_state);
-	if (storage.IsUnconditionalBulkAppend() ||
+	if (storage.IsBulkAppend() ||
 	    (append_state.row_start == 0 && storage.deleted_rows == 0 && !storage.WritesToDisk())) {
 		// bulk append (at least one full row group, no deletes): move over the storage directly.
 		// Appends to an empty table are also merged directly if the table cannot be written to
@@ -642,7 +642,7 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 bool LocalStorage::PreFlushBlocks() {
 	bool requires_sync = false;
 	for (auto &storage : table_manager.GetEntries()) {
-		if (storage->IsUnconditionalBulkAppend()) {
+		if (storage->IsBulkAppend()) {
 			// Flush() is guaranteed to take the bulk path - the blocks will be used as written
 			storage->FlushBlocks();
 			// the commit will reference this table's flushed row groups from the WAL - whether

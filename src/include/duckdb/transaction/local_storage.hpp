@@ -85,9 +85,10 @@ public:
 	//! Write a new row group to disk (if possible)
 	void WriteNewRowGroup(idx_t flushed_row_group_idx);
 	void FlushBlocks();
-	//! Whether Flush() takes the bulk-append path for this storage regardless of the target table's
-	//! state: at least one full row group and no deletes. Decidable before taking any locks.
-	bool IsUnconditionalBulkAppend() const;
+	//! Whether Flush() takes the bulk-append path for this storage: the append covers at least one
+	//! full row group and there are no deletes. Only depends on transaction-local state, i.e. this
+	//! can be decided before taking any locks.
+	bool IsBulkAppend() const;
 	//! Whether the optimistic writer of this storage writes to disk (not temporary / in-memory / read-only)
 	bool WritesToDisk() const;
 	//! Whether this storage holds optimistically written (flushed) row groups
@@ -221,7 +222,7 @@ public:
 		return context;
 	}
 
-	//! Flush the blocks of all unconditional bulk appends (see IsUnconditionalBulkAppend) - returns
+	//! Flush the blocks of all unconditional bulk appends (see IsBulkAppend) - returns
 	//! true if the commit references optimistically written blocks, flushed either just now or
 	//! during the statement (e.g. by batch inserts), which require a FileSync to be persisted
 	bool PreFlushBlocks();
