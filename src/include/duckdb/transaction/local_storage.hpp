@@ -222,9 +222,9 @@ public:
 		return context;
 	}
 
-	//! Flush the blocks of all bulk appends (see IsBulkAppend) and FileSync if the commit
-	//! references optimistically written blocks
-	void PreFlushBlocks(AttachedDatabase &db);
+	//! Flush the blocks of all bulk appends (see IsBulkAppend) and FileSync if any will be
+	//! referenced from the WAL
+	void FlushBulkAppendBlocksAndSync(AttachedDatabase &db);
 
 private:
 	ClientContext &context;

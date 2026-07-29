@@ -643,7 +643,7 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 #endif
 }
 
-void LocalStorage::PreFlushBlocks(AttachedDatabase &db) {
+void LocalStorage::FlushBulkAppendBlocksAndSync(AttachedDatabase &db) {
 	bool requires_sync = false;
 	for (auto &storage : table_manager.GetEntries()) {
 		if (storage->IsBulkAppend()) {

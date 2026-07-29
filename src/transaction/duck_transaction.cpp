@@ -212,7 +212,7 @@ ErrorData DuckTransaction::PreFlushOptimisticBlocks(AttachedDatabase &db) noexce
 		return error;
 	}
 	try {
-		storage->PreFlushBlocks(db);
+		storage->FlushBulkAppendBlocksAndSync(db);
 	} catch (std::exception &ex) {
 		// fail the commit: the flush machinery cannot safely be re-run after an error, and a failed
 		// fsync must not be retried (the retry can succeed without the data being durable)
