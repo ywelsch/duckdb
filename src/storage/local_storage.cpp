@@ -657,6 +657,7 @@ void LocalStorage::FlushBulkAppendBlocksAndSync(AttachedDatabase &db) {
 		// statement, e.g. by batch inserts) - persist them now so that the commit does not have
 		// to FileSync while holding the WAL lock
 		db.GetStorageManager().GetBlockManager().FileSync();
+		synced_flushed_blocks = true;
 	}
 }
 

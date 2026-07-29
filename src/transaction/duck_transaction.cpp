@@ -239,6 +239,10 @@ ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &
 		undo_buffer.WriteToWAL(*wal, commit_state.get());
 		wal_timer.EndTimer();
 
+		// no FileSync is required here: any optimistically written blocks that the WAL references
+		// have already been synced by FlushBulkAppendBlocksAndSync, before the commit locks were taken
+		D_ASSERT(!commit_state->HasRowGroupData() || storage->SyncedFlushedBlocks());
+
 	} catch (std::exception &ex) {
 		// Call RevertCommit() outside this try-catch as it itself may throw
 		error_data = ErrorData(ex);

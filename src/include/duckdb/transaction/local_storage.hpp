@@ -223,11 +223,17 @@ public:
 	}
 
 	void FlushBulkAppendBlocksAndSync(AttachedDatabase &db);
+	//! Whether FlushBulkAppendBlocksAndSync FileSynced flushed blocks - only used to verify that
+	//! WAL block references never require a FileSync at WAL-write time
+	bool SyncedFlushedBlocks() const {
+		return synced_flushed_blocks;
+	}
 
 private:
 	ClientContext &context;
 	DuckTransaction &transaction;
 	LocalTableManager table_manager;
+	bool synced_flushed_blocks = false;
 
 private:
 	void Flush(DataTable &table, LocalTableStorage &storage, optional_ptr<StorageCommitState> commit_state);
