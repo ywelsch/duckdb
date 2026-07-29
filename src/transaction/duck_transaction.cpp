@@ -241,9 +241,6 @@ ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &
 
 		auto wal_timer = profiler.StartTimer<MetricStorageWriteToWALLatency>();
 		undo_buffer.WriteToWAL(*wal, commit_state.get());
-		// any optimistically written blocks that the WAL references were FileSynced by
-		// PreFlushOptimisticBlocks before the commit locks were taken (it shares this method's
-		// ShouldWriteToWAL gate and its failure fails the commit) - no FileSync is needed here
 		wal_timer.EndTimer();
 
 	} catch (std::exception &ex) {
