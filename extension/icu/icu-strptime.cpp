@@ -111,6 +111,7 @@ struct ICUStrptime : public ICUDateFunc {
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 		auto &info = func_expr.bind_info->Cast<ICUStrptimeBindData>();
+		auto &cache = ExecuteFunctionState::GetFunctionState(state)->Cast<CalendarCacheState>();
 		CalendarPtr calendar_ptr(info.calendar->clone());
 		auto calendar = calendar_ptr.get();
 
@@ -128,11 +129,12 @@ struct ICUStrptime : public ICUDateFunc {
 							return parsed.ToTimestamp();
 						} else {
 							// Set TZ first. The calendar is shared by all the rows,
-							// so a row without a zone has to restore the bound one.
+							// so a row without a zone has to restore the bound one
+							// or it will inherit the time zone set by an earlier row.
 							if (parsed.tz.empty()) {
 								calendar->setTimeZone(info.calendar->getTimeZone());
 							} else {
-								SetTimeZone(calendar, parsed.tz);
+								cache.SetTimeZone(calendar, parsed.tz);
 							}
 
 							return GetTime(calendar, ToMicros(calendar, parsed, format));
@@ -152,6 +154,7 @@ struct ICUStrptime : public ICUDateFunc {
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 		auto &info = func_expr.bind_info->Cast<ICUStrptimeBindData>();
+		auto &cache = ExecuteFunctionState::GetFunctionState(state)->Cast<CalendarCacheState>();
 		CalendarPtr calendar_ptr(info.calendar->clone());
 		auto calendar = calendar_ptr.get();
 
@@ -168,7 +171,7 @@ struct ICUStrptime : public ICUDateFunc {
 					    if (format.Parse(input, parsed)) {
 						    if (parsed.is_special) {
 							    return parsed.ToTimestamp();
-						    } else if (TrySetTimeZone(calendar, parsed.tz.empty() ? info.tz_setting : parsed.tz)) {
+						    } else if (cache.TrySetTimeZone(calendar, parsed.tz.empty() ? info.tz_setting : parsed.tz)) {
 							    timestamp_t result;
 							    if (TryGetTime(calendar, ToMicros(calendar, parsed, format), result)) {
 								    return result;
@@ -210,6 +213,7 @@ struct ICUStrptime : public ICUDateFunc {
 			// If we have a time zone, we should use ICU for parsing and return a TSTZ instead.
 			if (format.HasFormatSpecifier(StrTimeSpecifier::TZ_NAME)) {
 				bound_function.SetFunctionCallback(function);
+				bound_function.SetInitStateCallback(InitCalendarCache);
 				bound_function.SetReturnType(LogicalType::TIMESTAMP_TZ);
 				return make_uniq<ICUStrptimeBindData>(context, format);
 			}
@@ -234,6 +238,7 @@ struct ICUStrptime : public ICUDateFunc {
 			}
 			if (has_tz) {
 				bound_function.SetFunctionCallback(function);
+				bound_function.SetInitStateCallback(InitCalendarCache);
 				bound_function.SetReturnType(LogicalType::TIMESTAMP_TZ);
 				return make_uniq<ICUStrptimeBindData>(context, formats);
 			}
@@ -275,6 +280,7 @@ struct ICUStrptime : public ICUDateFunc {
 	static bool VarcharToTimestampTZ(Vector &source, Vector &result, idx_t count, CastParameters &parameters) {
 		auto &cast_data = parameters.cast_data->Cast<CastData>();
 		auto &info = cast_data.info->Cast<BindData>();
+		auto &cache = parameters.local_state->Cast<CalendarCacheState>();
 		CalendarPtr cal(info.calendar->clone());
 
 		UnaryExecutor::ExecuteWithNulls<string_t, timestamp_tz_t>(
@@ -301,7 +307,7 @@ struct ICUStrptime : public ICUDateFunc {
 				    // Change TZ if one was provided.
 				    if (tz.GetSize()) {
 					    string error_msg;
-					    SetTimeZone(calendar, tz, &error_msg);
+					    cache.SetTimeZone(calendar, tz, &error_msg);
 					    if (!error_msg.empty()) {
 						    HandleCastError::AssignError(error_msg, parameters);
 						    mask.SetInvalid(idx);
@@ -361,7 +367,7 @@ struct ICUStrptime : public ICUDateFunc {
 
 		switch (target.id()) {
 		case LogicalTypeId::TIMESTAMP_TZ:
-			return BoundCastInfo(VarcharToTimestampTZ, std::move(cast_data));
+			return BoundCastInfo(VarcharToTimestampTZ, std::move(cast_data), InitCastCalendarCache);
 		case LogicalTypeId::TIME_TZ:
 			return BoundCastInfo(VarcharToTimeTZ, std::move(cast_data));
 		default:

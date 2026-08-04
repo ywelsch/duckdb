@@ -71,22 +71,68 @@ unique_ptr<FunctionData> ICUDateFunc::Bind(ClientContext &context, ScalarFunctio
 	return make_uniq<BindData>(context);
 }
 
-bool ICUDateFunc::TrySetTimeZone(icu::Calendar *calendar, const string_t &tz_id) {
-	string tz_str = tz_id.GetString();
-	auto tz = ICUHelpers::TryGetTimeZone(tz_str);
-	if (!tz) {
+const ICUDateFunc::CalendarCacheState::CacheEntry &ICUDateFunc::CalendarCacheState::GetEntry(const string_t &tz_id) {
+	if (last && last->first.size() == tz_id.GetSize() &&
+	    memcmp(last->first.data(), tz_id.GetData(), tz_id.GetSize()) == 0) {
+		return last->second;
+	}
+	auto tz_str = tz_id.GetString();
+	auto entry = cache.find(tz_str);
+	if (entry == cache.end()) {
+		CacheEntry new_entry;
+		//	GetTimeZone may normalize the name - keep the original as the cache key
+		auto resolved = tz_str;
+		new_entry.tz = ICUHelpers::GetTimeZone(resolved, &new_entry.error);
+		if (new_entry.tz) {
+			new_entry.calendar = CalendarPtr(base_calendar->clone());
+			new_entry.calendar->adoptTimeZone(new_entry.tz->clone());
+		}
+		entry = cache.emplace(std::move(tz_str), std::move(new_entry)).first;
+	}
+	last = &*entry;
+	return entry->second;
+}
+
+icu::Calendar *ICUDateFunc::CalendarCacheState::GetCalendar(const string_t &tz_id) {
+	auto &entry = GetEntry(tz_id);
+	if (!entry.calendar) {
+		throw NotImplementedException(entry.error);
+	}
+	return entry.calendar.get();
+}
+
+void ICUDateFunc::CalendarCacheState::SetTimeZone(icu::Calendar *calendar, const string_t &tz_id,
+                                                  string *error_message) {
+	auto &entry = GetEntry(tz_id);
+	if (!entry.tz) {
+		if (error_message) {
+			*error_message = entry.error;
+			return;
+		}
+		throw NotImplementedException(entry.error);
+	}
+	calendar->adoptTimeZone(entry.tz->clone());
+}
+
+bool ICUDateFunc::CalendarCacheState::TrySetTimeZone(icu::Calendar *calendar, const string_t &tz_id) {
+	auto &entry = GetEntry(tz_id);
+	if (!entry.tz) {
 		return false;
 	}
-	calendar->adoptTimeZone(tz.release());
+	calendar->adoptTimeZone(entry.tz->clone());
 	return true;
 }
 
-void ICUDateFunc::SetTimeZone(icu::Calendar *calendar, const string_t &tz_id, string *error_message) {
-	string tz_str = tz_id.GetString();
-	auto tz = ICUHelpers::GetTimeZone(tz_str, error_message);
-	if (tz) {
-		calendar->adoptTimeZone(tz.release());
-	}
+unique_ptr<FunctionLocalState>
+ICUDateFunc::InitCalendarCache(ExpressionState &state, const BoundFunctionExpression &expr, FunctionData *bind_data) {
+	auto &info = bind_data->Cast<BindData>();
+	return make_uniq<CalendarCacheState>(*info.calendar);
+}
+
+unique_ptr<FunctionLocalState> ICUDateFunc::InitCastCalendarCache(CastLocalStateParameters &parameters) {
+	auto &cast_data = parameters.cast_data->Cast<CastData>();
+	auto &info = cast_data.info->Cast<BindData>();
+	return make_uniq<CalendarCacheState>(*info.calendar);
 }
 
 timestamp_t ICUDateFunc::GetTimeUnsafe(icu::Calendar *calendar, uint64_t micros) {

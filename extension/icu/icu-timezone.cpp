@@ -446,10 +446,7 @@ void ICUToTimeTZ::AddCasts(ExtensionLoader &loader) {
 struct ICUTimeZoneFunc : public ICUDateFunc {
 	template <typename OP, typename T>
 	static void Execute(DataChunk &input, ExpressionState &state, Vector &result) {
-		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-		auto &info = func_expr.bind_info->Cast<BindData>();
-		CalendarPtr calendar_ptr(info.calendar->clone());
-		auto calendar = calendar_ptr.get();
+		auto &cache = ExecuteFunctionState::GetFunctionState(state)->Cast<CalendarCacheState>();
 
 		// Two cases: constant TZ, variable TZ
 		D_ASSERT(input.ColumnCount() == 2);
@@ -460,15 +457,14 @@ struct ICUTimeZoneFunc : public ICUDateFunc {
 				result.SetVectorType(VectorType::CONSTANT_VECTOR);
 				ConstantVector::SetNull(result, true);
 			} else {
-				SetTimeZone(calendar, *ConstantVector::GetData<string_t>(tz_vec));
+				auto calendar = cache.GetCalendar(*ConstantVector::GetData<string_t>(tz_vec));
 				UnaryExecutor::Execute<T, T>(ts_vec, result, input.size(),
 				                             [&](T ts) { return OP::Operation(calendar, ts); });
 			}
 		} else {
 			BinaryExecutor::Execute<string_t, T, T>(tz_vec, ts_vec, result, input.size(), [&](string_t tz_id, T ts) {
 				if (ICUIsFinite(ts)) {
-					SetTimeZone(calendar, tz_id);
-					return OP::Operation(calendar, ts);
+					return OP::Operation(cache.GetCalendar(tz_id), ts);
 				} else {
 					return ts;
 				}
@@ -486,6 +482,7 @@ struct ICUTimeZoneFunc : public ICUDateFunc {
 		                               Execute<ICUToTimeTZ, dtime_tz_t>, Bind));
 		for (auto &func : set.functions) {
 			func.SetFallible();
+			func.SetInitStateCallback(InitCalendarCache);
 		}
 		loader.RegisterFunction(set);
 	}

@@ -341,9 +341,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 
 	struct TimeZoneTernaryOperator {
 		static inline timestamp_t Operation(interval_t bucket_width, timestamp_t ts, string_t tz,
-		                                    TZCalendar &calendar_p) {
+		                                    TZCalendar &calendar_p, CalendarCacheState &cache) {
 			auto calendar = calendar_p.GetICUCalendar();
-			SetTimeZone(calendar, tz);
+			cache.SetTimeZone(calendar, tz);
 
 			timestamp_t origin;
 			BucketWidthType bucket_width_type = ClassifyBucketWidthErrorThrow(bucket_width);
@@ -368,8 +368,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 		auto &info = func_expr.bind_info->Cast<BindData>();
+		auto &cache = ExecuteFunctionState::GetFunctionState(state)->Cast<CalendarCacheState>();
 		TZCalendar calendar(*info.calendar, info.cal_setting);
-		SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
+		cache.SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
 
 		auto &bucket_width_arg = args.data[0];
 		auto &ts_arg = args.data[1];
@@ -423,8 +424,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 		auto &info = func_expr.bind_info->Cast<BindData>();
+		auto &cache = ExecuteFunctionState::GetFunctionState(state)->Cast<CalendarCacheState>();
 		TZCalendar calendar(*info.calendar, info.cal_setting);
-		SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
+		cache.SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
 
 		auto &bucket_width_arg = args.data[0];
 		auto &ts_arg = args.data[1];
@@ -487,8 +489,9 @@ struct ICUTimeBucket : public ICUDateFunc {
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 		auto &info = func_expr.bind_info->Cast<BindData>();
+		auto &cache = ExecuteFunctionState::GetFunctionState(state)->Cast<CalendarCacheState>();
 		TZCalendar calendar(*info.calendar, info.cal_setting);
-		SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
+		cache.SetTimeZone(calendar.GetICUCalendar(), string_t("UTC"));
 
 		auto &bucket_width_arg = args.data[0];
 		auto &ts_arg = args.data[1];
@@ -554,6 +557,7 @@ struct ICUTimeBucket : public ICUDateFunc {
 
 		auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 		auto &info = func_expr.bind_info->Cast<BindData>();
+		auto &cache = ExecuteFunctionState::GetFunctionState(state)->Cast<CalendarCacheState>();
 		TZCalendar calendar(*info.calendar, info.cal_setting);
 
 		auto &bucket_width_arg = args.data[0];
@@ -567,7 +571,7 @@ struct ICUTimeBucket : public ICUDateFunc {
 				ConstantVector::SetNull(result, true);
 			} else {
 				interval_t bucket_width = *ConstantVector::GetData<interval_t>(bucket_width_arg);
-				SetTimeZone(calendar.GetICUCalendar(), *ConstantVector::GetData<string_t>(tz_arg));
+				cache.SetTimeZone(calendar.GetICUCalendar(), *ConstantVector::GetData<string_t>(tz_arg));
 				timestamp_t origin;
 				BucketWidthType bucket_width_type = ClassifyBucketWidth(bucket_width);
 				switch (bucket_width_type) {
@@ -602,7 +606,7 @@ struct ICUTimeBucket : public ICUDateFunc {
 					TernaryExecutor::Execute<interval_t, timestamp_t, string_t, timestamp_t>(
 					    bucket_width_arg, ts_arg, tz_arg, result, args.size(),
 					    [&](interval_t bucket_width, timestamp_t ts, string_t tz) {
-						    return TimeZoneTernaryOperator::Operation(bucket_width, ts, tz, calendar);
+						    return TimeZoneTernaryOperator::Operation(bucket_width, ts, tz, calendar, cache);
 					    });
 					break;
 				default:
@@ -613,7 +617,7 @@ struct ICUTimeBucket : public ICUDateFunc {
 			TernaryExecutor::Execute<interval_t, timestamp_t, string_t, timestamp_t>(
 			    bucket_width_arg, ts_arg, tz_arg, result, args.size(),
 			    [&](interval_t bucket_width, timestamp_t ts, string_t tz) {
-				    return TimeZoneTernaryOperator::Operation(bucket_width, ts, tz, calendar);
+				    return TimeZoneTernaryOperator::Operation(bucket_width, ts, tz, calendar, cache);
 			    });
 		}
 	}
@@ -630,6 +634,7 @@ struct ICUTimeBucket : public ICUDateFunc {
 		                               LogicalType::TIMESTAMP_TZ, ICUTimeBucketTimeZoneFunction, Bind));
 		for (auto &func : set.functions) {
 			func.SetFallible();
+			func.SetInitStateCallback(InitCalendarCache);
 		}
 		loader.RegisterFunction(set);
 	}
