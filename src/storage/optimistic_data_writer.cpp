@@ -21,15 +21,19 @@ OptimisticDataWriter::OptimisticDataWriter(DataTable &table, OptimisticDataWrite
 OptimisticDataWriter::~OptimisticDataWriter() {
 }
 
+bool OptimisticDataWriter::CanWriteToDisk() const {
+	auto &attached = table.GetAttached();
+	auto &storage_manager = StorageManager::Get(attached);
+	return !table.IsTemporary() && !storage_manager.InMemory() && !attached.IsReadOnly();
+}
+
 bool OptimisticDataWriter::PrepareWrite() {
 	// check if optimistic writing is enabled
 	if (!Settings::Get<EnableOptimisticWriteSetting>(context)) {
 		return false;
 	}
 	// check if we should pre-emptively write the table to disk
-	auto &attached = table.GetAttached();
-	auto &storage_manager = StorageManager::Get(attached);
-	if (table.IsTemporary() || storage_manager.InMemory() || attached.IsReadOnly()) {
+	if (!CanWriteToDisk()) {
 		return false;
 	}
 	// we should! write the second-to-last row group to disk
@@ -110,12 +114,17 @@ void OptimisticDataWriter::WriteNewRowGroup(OptimisticWriteCollection &row_group
 }
 
 void OptimisticDataWriter::WriteUnflushedRowGroups(OptimisticWriteCollection &row_groups) {
+	auto total_row_groups = row_groups.collection->GetRowGroupCount();
+	if (row_groups.complete_row_groups == total_row_groups && row_groups.unflushed_row_groups.empty() &&
+	    row_groups.partial_block_managers.empty()) {
+		// everything is flushed already and there is nothing to merge - a repeated call ends up here
+		return;
+	}
 	// we finished writing a complete row group
 	if (!PrepareWrite()) {
 		return;
 	}
 	// add any incomplete row groups to the set of unflushed row groups
-	auto total_row_groups = row_groups.collection->GetRowGroupCount();
 	if (row_groups.complete_row_groups > total_row_groups) {
 		throw InternalException("WriteUnflushedRowGroups - complete row groups > total_row_groups");
 	}
