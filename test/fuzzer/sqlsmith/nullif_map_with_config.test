@@ -16,9 +16,6 @@ statement ok
 SET storage_compatibility_version = 'latest';
 
 statement ok
-SET max_memory = '1234kb';
-
-statement ok
 ATTACH '__TEST_DIR__/issue5232.db' AS issue5232 (STORAGE_VERSION 'latest');
 
 statement ok
@@ -29,6 +26,12 @@ CREATE TABLE tbl(map MAP(VARCHAR, VARCHAR));
 
 statement ok
 INSERT INTO tbl VALUES(MAP([], []));
+
+# the limit only applies from here on: committing an append to an empty on-disk table no longer
+# merges the local storage directly but appends row by row, so even the empty map above now
+# materializes a block of the configured block size
+statement ok
+SET max_memory = '1234kb';
 
 statement error
 INSERT INTO tbl VALUES(MAP(['key1', 'key2'], ['🦆🦆🦆🦆🦆🦆', 'goose']));
