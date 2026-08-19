@@ -7,6 +7,7 @@
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
+#include "duckdb/execution/operator/persistent/physical_merge_into.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/main/client_config.hpp"
@@ -535,8 +536,11 @@ void QueryProfiler::Flush(OperatorProfiler &profiler) {
 	for (auto &node : profiler.operator_infos) {
 		auto &op = node.first.get();
 		auto entry = tree_map.find(op);
+		// all profiled operators should be registered in the tree
 		D_ASSERT(entry != tree_map.end());
-
+		if (entry == tree_map.end()) {
+			continue;
+		}
 		auto &tree_node = entry->second.get();
 		auto &info = tree_node.GetProfilingInfo();
 
@@ -907,6 +911,15 @@ unique_ptr<ProfilingNode> QueryProfiler::CreateTree(const PhysicalOperator &root
 	}
 
 	tree_map.insert(make_pair(reference<const PhysicalOperator>(root_p), reference<ProfilingNode>(*node)));
+	if (root_p.type == PhysicalOperatorType::MERGE_INTO) {
+		// merge actions hold their target operators outside of the children - add them to the tree explicitly
+		auto &merge_into = root_p.Cast<PhysicalMergeInto>();
+		for (auto &action : merge_into.actions) {
+			if (action->op) {
+				node->AddChild(CreateTree(*action->op, child_settings, depth + 1));
+			}
+		}
+	}
 	auto children = root_p.GetChildren();
 	for (auto &child : children) {
 		auto child_node = CreateTree(child.get(), child_settings, depth + 1);
