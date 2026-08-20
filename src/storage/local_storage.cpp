@@ -603,13 +603,13 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 
 	TableAppendState append_state;
 	table.AppendLock(transaction, append_state);
-	if (storage.IsBulkAppend() ||
-	    (append_state.row_start == 0 && storage.deleted_rows == 0 && !storage.WritesToDisk())) {
+	if (storage.IsBulkAppend() || (append_state.row_start == 0 && storage.deleted_rows == 0)) {
 		// bulk append (at least one full row group, no deletes): move over the storage directly.
-		// Appends to an empty table are also merged directly if the table cannot be written to
-		// disk (temporary / in-memory / read-only, e.g. WAL replay of a read-only attach) -
-		// there are no optimistically written blocks to manage, and merging avoids re-appending
-		// row by row.
+		// Appends to an empty table are also merged directly. Upstream only does that where the
+		// optimistic writer cannot write to disk, because there a re-append is cheap: its transient
+		// segments start small and grow (duckdb/duckdb#22542). This branch has no adaptive segment
+		// sizing, so every transient segment is block-sized and re-appending costs one block per
+		// column - 1.2GB for a 5000-column table that merging handles in ~40MB.
 		// first flush any outstanding blocks
 		storage.FlushBlocks();
 		// Append to the indexes.

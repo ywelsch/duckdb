@@ -11,10 +11,8 @@ require noforcestorage
 
 require no_alternative_verify
 
-# the limit has to fit the block that the CTAS below materializes on commit (appends to an empty
-# on-disk table are no longer merged directly), and stay small enough for duckdb_logs to run out
 statement ok
-SET memory_limit='2000kb';
+SET memory_limit='1000kb';
 
 statement ok
 SET enable_logging=true;
