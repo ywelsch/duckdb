@@ -12,6 +12,7 @@
 #include "duckdb/catalog/catalog_set.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/planner/constraints/bound_unique_constraint.hpp"
+#include "duckdb/storage/table/partition_key.hpp"
 
 namespace duckdb {
 
@@ -45,6 +46,25 @@ public:
 	unique_ptr<BlockingSample> GetSample() override;
 
 	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override;
+
+	unique_ptr<CreateInfo> GetInfo() const override;
+	void BindUpdateConstraints(Binder &binder, LogicalGet &get, LogicalProjection &proj, LogicalUpdate &update,
+	                           ClientContext &context) override;
+
+	//! The columns this table is partitioned by, with their transforms, in declaration order.
+	//! Empty if the table is not partitioned.
+	const vector<PartitionKey> &GetPartitionColumns() const {
+		return partition_columns;
+	}
+	//! Resolve PARTITIONED BY keys to columns and transforms, throwing a BinderException if a key is not a
+	//! reference to an existing, non-generated column, optionally wrapped in a supported transform.
+	//! Partitioning of DuckDB tables is derived from statistics rather than persisted, so this accepts a narrower
+	//! set of keys than a catalog that stores partition values per file (see DuckLake).
+	DUCKDB_API static vector<PartitionKey> ResolvePartitionColumns(const vector<unique_ptr<ParsedExpression>> &keys,
+	                                                               const ColumnList &columns);
+	//! Render a resolved partition key back as a parsed expression, so it round-trips through the catalog
+	DUCKDB_API static unique_ptr<ParsedExpression> PartitionKeyToExpression(const PartitionKey &key,
+	                                                                        const Identifier &column_name);
 
 	void SetAsRoot() override;
 
@@ -111,5 +131,7 @@ private:
 	shared_ptr<CatalogSet> triggers;
 	//! Manages dependencies of the individual columns of the table
 	ColumnDependencyManager column_dependency_manager;
+	//! The columns this table is partitioned by (PARTITIONED BY), as logical indices plus transforms
+	vector<PartitionKey> partition_columns;
 };
 } // namespace duckdb

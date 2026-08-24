@@ -22,7 +22,6 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/catalog/catalog_entry/table_column_type.hpp"
 #include "duckdb/catalog/catalog_entry/column_dependency_manager.hpp"
-#include "duckdb/storage/table/partition_key.hpp"
 #include "duckdb/common/table_column.hpp"
 
 namespace duckdb {
@@ -163,26 +162,10 @@ public:
 	                                                                 TriggerTiming timing, TriggerEventType event_type,
 	                                                                 TriggerForEach for_each) const;
 
-public:
-	//! The columns this table is partitioned by, with their transforms, in declaration order.
-	//! Empty if the table is not partitioned.
-	const vector<PartitionKey> &GetPartitionColumns() const {
-		return partition_columns;
-	}
-	//! Resolve PARTITIONED BY keys to columns and transforms, throwing a BinderException if a key is not a
-	//! reference to an existing, non-generated column, optionally wrapped in a supported transform.
-	DUCKDB_API static vector<PartitionKey> ResolvePartitionColumns(const vector<unique_ptr<ParsedExpression>> &keys,
-	                                                               const ColumnList &columns);
-	//! Render a resolved partition key back as a parsed expression, so it round-trips through the catalog
-	DUCKDB_API static unique_ptr<ParsedExpression> PartitionKeyToExpression(const PartitionKey &key,
-	                                                                        const Identifier &column_name);
-
 protected:
 	//! A list of columns that are part of this table
 	ColumnList columns;
 	//! A list of constraints that are part of this table
 	vector<unique_ptr<Constraint>> constraints;
-	//! The columns this table is partitioned by (PARTITIONED BY), as logical indices plus transforms
-	vector<PartitionKey> partition_columns;
 };
 } // namespace duckdb

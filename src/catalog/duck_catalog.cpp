@@ -61,7 +61,7 @@ ErrorData DuckCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 		// PARTITIONED BY is supported, but only for plain column references - validate them here so that the
 		// error surfaces before any storage is created
 		try {
-			TableCatalogEntry::ResolvePartitionColumns(base.partition_keys, base.columns);
+			DuckTableEntry::ResolvePartitionColumns(base.partition_keys, base.columns);
 		} catch (std::exception &ex) {
 			return ErrorData(ex);
 		}

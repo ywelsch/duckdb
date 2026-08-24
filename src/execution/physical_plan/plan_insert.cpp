@@ -124,7 +124,7 @@ PhysicalOperator &PhysicalPlanGenerator::GroupByPartitionKeys(PhysicalOperator &
 }
 
 //! The indices of the partition columns within a plan that produces one column per physical table column
-static vector<idx_t> GetPartitionPlanColumns(TableCatalogEntry &table) {
+static vector<idx_t> GetPartitionPlanColumns(DuckTableEntry &table) {
 	vector<idx_t> result;
 	auto &columns = table.GetColumns();
 	for (auto &partition_key : table.GetPartitionColumns()) {
@@ -145,7 +145,7 @@ PhysicalOperator &DuckCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 	// were stored rather than the order they were supplied. RETURNING has no defined order, and skipping the
 	// grouping here instead would cost the table its layout - such an insert would write row groups holding every
 	// partition, which is worse than a surprising order.
-	plan = planner.GroupByPartitionKeys(*plan, GetPartitionPlanColumns(op.table));
+	plan = planner.GroupByPartitionKeys(*plan, GetPartitionPlanColumns(op.table.Cast<DuckTableEntry>()));
 	// the flags below depend on the shape of the plan, so they are computed after the rewrites above
 	bool parallel_streaming_insert = !PhysicalPlanGenerator::PreserveInsertionOrder(context, *plan);
 	bool use_batch_index = PhysicalPlanGenerator::UseBatchIndex(context, *plan);
