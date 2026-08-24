@@ -1,0 +1,118 @@
+# name: test/sql/partitioning/native_partitioning_time.test
+# description: Time-based (day-granularity) partitioning, and the high-cardinality guard
+# group: [partitioning]
+
+load {TEST_DIR}/native_partitioning_time.db
+
+statement ok
+CREATE MACRO mixed_row_groups(tbl, col) AS TABLE
+    SELECT row_group_id
+    FROM pragma_storage_info(tbl)
+    WHERE column_name = col
+    GROUP BY row_group_id
+    HAVING count(DISTINCT stats.min::VARCHAR) > 1
+        OR count(DISTINCT stats.max::VARCHAR) > 1
+        OR bool_or(stats.min::VARCHAR IS DISTINCT FROM stats.max::VARCHAR);
+
+# Day-granularity partitioning is expressed by partitioning on a DATE column. DATE statistics are numeric, so
+# the single-value derivation works on them like any other numeric column.
+statement ok
+CREATE TABLE events(d DATE, ts TIMESTAMP, v INTEGER) PARTITIONED BY (d);
+
+statement ok
+INSERT INTO events
+SELECT DATE '2024-03-01' + INTERVAL (i % 30) DAY,
+       TIMESTAMP '2024-03-01' + INTERVAL (i % 30) DAY + INTERVAL (i % 86400) SECOND,
+       i
+FROM range(600000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('events');
+----
+30
+
+query I
+SELECT count(*) FROM mixed_row_groups('events', 'd');
+----
+0
+
+# a single day reads a single row group
+query II
+EXPLAIN ANALYZE SELECT sum(v) FROM events WHERE d = DATE '2024-03-05';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 1 / 30.*
+
+# a date range reads exactly the days in it
+query II
+EXPLAIN ANALYZE SELECT sum(v) FROM events WHERE d >= DATE '2024-03-05' AND d < DATE '2024-03-12';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 7 / 30.*
+
+# A filter on the correlated TIMESTAMP column prunes to the same granularity without any partition transform:
+# grouping the rows by day also makes the timestamp column's zone maps day-tight.
+query II
+EXPLAIN ANALYZE SELECT sum(v) FROM events WHERE ts >= TIMESTAMP '2024-03-05' AND ts < TIMESTAMP '2024-03-06';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 1 / 30.*
+
+# a filter on a column unrelated to the partition key prunes nothing
+query II
+EXPLAIN ANALYZE SELECT sum(v) FROM events WHERE v % 7 = 0;
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 30 / 30.*
+
+query I
+SELECT sum(v) FROM events WHERE d = DATE '2024-03-05';
+----
+5999780000
+
+# partition transforms are not supported - the day column has to be stored
+statement error
+CREATE TABLE transformed(ts TIMESTAMP, v INTEGER) PARTITIONED BY (date_trunc('day', ts));
+----
+<REGEX>:.*PARTITIONED BY only supports references to columns of the table.*
+
+# a generated column cannot be a partition key either: it has no storage, so it has no statistics to derive from
+statement error
+CREATE TABLE generated(ts TIMESTAMP, d DATE GENERATED ALWAYS AS (ts::DATE), v INTEGER) PARTITIONED BY (d);
+----
+<REGEX>:.*cannot reference the generated column.*
+
+# Partitioning on a raw TIMESTAMP asks for one partition per distinct instant. The append path refuses to close
+# a row group that holds less than a vector of rows, because such a row group cannot save any IO by being
+# pruned - so a high-cardinality partition key degrades to ordinary row groups instead of one per row.
+statement ok
+CREATE TABLE per_second(ts TIMESTAMP, v INTEGER) PARTITIONED BY (ts);
+
+statement ok
+INSERT INTO per_second SELECT TIMESTAMP '2024-03-01' + INTERVAL (i) SECOND, i FROM range(50000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM per_second;
+----
+50000
+
+# 50000 distinct partition values, but the row group count stays proportional to the data size
+query I
+SELECT count(DISTINCT row_group_id) <= 32 FROM pragma_storage_info('per_second');
+----
+true
+
+# those row groups hold many partition values, which is allowed: readers derive partition membership from
+# statistics, so a mixed row group simply stops being prunable
+query I
+SELECT count(*) > 0 FROM mixed_row_groups('per_second', 'ts');
+----
+true
+
+# and the data is still correct and still range-prunable, because the rows arrive in timestamp order
+query I
+SELECT sum(v) FROM per_second WHERE ts < TIMESTAMP '2024-03-01 00:10:00';
+----
+179700

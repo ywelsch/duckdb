@@ -7,6 +7,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/index/art/art.hpp"
 #include "duckdb/execution/index/bound_index.hpp"
+#include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/profiler/profiling_utils.hpp"
 #include "duckdb/main/query_profiler.hpp"
@@ -633,12 +634,18 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 	state.row_start = UnsafeNumericCast<row_t>(next_row_id);
 	state.current_row = state.row_start;
 	state.total_append_count = 0;
+	state.row_group_append_counts.clear();
 
 	// start writing to the row_groups
 	state.row_groups = GetRowGroups();
 	auto l = state.row_groups->Lock();
-	// We need a new row group if there are none yet or the append mode forces us to create a new row group
-	bool needs_new_row_group = state.row_groups->IsEmpty(l) || row_group_append_mode == RowGroupAppendMode::REQUIRE_NEW;
+	// We need a new row group if there are none yet or the append mode forces us to create a new row group.
+	// For partitioned tables we always start a new row group: we do not know the partition value of the trailing
+	// row group, so appending into it could mix two partitions.
+	// FIXME: derive the trailing row group's partition value from its statistics (min == max) and keep appending
+	// into it when it matches, to avoid a fresh row group per append
+	bool needs_new_row_group =
+	    state.row_groups->IsEmpty(l) || row_group_append_mode == RowGroupAppendMode::REQUIRE_NEW || IsPartitioned();
 	// Otherwise we evaluate the row_group_append_mode
 	if (!needs_new_row_group) {
 		auto last_row_group = state.row_groups->GetLastSegment(l);
@@ -673,7 +680,127 @@ void RowGroupCollection::InitializeAppend(TableAppendState &state) {
 	InitializeAppend(tdata, state);
 }
 
+bool RowGroupCollection::HasSingleValuePartitions(const vector<column_t> &column_ids) {
+	auto row_groups = GetRowGroups();
+	vector<Value> values;
+	for (auto &node : row_groups->SegmentNodes()) {
+		if (!node.GetNode().TryGetConstantColumnValues(column_ids, values)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool RowGroupCollection::IsPartitioned() const {
+	return !info->GetPartitionColumns().empty();
+}
+
+idx_t RowGroupCollection::StartNewRowGroup(TableAppendState &state) {
+	auto &current_row_group = state.row_group_append_state.row_group->GetNode();
+	// record how many rows this row group received, so FinalizeAppend can attribute version info correctly even
+	// when the row group was closed before it was full
+	D_ASSERT(state.row_group_append_state.offset_in_row_group >= current_row_group.count);
+	state.row_group_append_counts.push_back(state.row_group_append_state.offset_in_row_group - current_row_group.count);
+	current_row_group.FinalizeAppend(state.row_group_append_state);
+	auto closed_row_group_idx = state.row_group_append_state.row_group->GetIndex();
+	auto next_start = state.row_group_start + state.row_group_append_state.offset_in_row_group;
+
+	auto l = state.row_groups->Lock();
+	AppendRowGroup(l, next_start);
+	auto last_row_group = state.row_groups->GetLastSegment(l);
+	RowGroup::InitializeAppend(*last_row_group, state.row_group_append_state);
+	state.row_group_start = next_start;
+	return closed_row_group_idx;
+}
+
 optional_idx RowGroupCollection::Append(DataChunk &chunk, TableAppendState &state) {
+	if (!IsPartitioned()) {
+		return AppendInternal(chunk, state);
+	}
+	return AppendPartitioned(chunk, state);
+}
+
+optional_idx RowGroupCollection::AppendPartitioned(DataChunk &chunk, TableAppendState &state) {
+	auto &partition_columns = info->GetPartitionColumns();
+	const idx_t count = chunk.size();
+	if (count == 0) {
+		return optional_idx();
+	}
+
+	// encode the partition value of every row into a single comparable blob
+	DataChunk partition_chunk;
+	vector<LogicalType> partition_types;
+	vector<OrderModifiers> modifiers;
+	for (auto &column_id : partition_columns) {
+		partition_types.push_back(types[column_id]);
+		modifiers.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST);
+	}
+	partition_chunk.InitializeEmpty(partition_types);
+	for (idx_t i = 0; i < partition_columns.size(); i++) {
+		partition_chunk.data[i].Reference(chunk.data[partition_columns[i]]);
+	}
+	partition_chunk.CheckCardinality(count);
+
+	Vector partition_keys(LogicalType::BLOB, count);
+	CreateSortKeyHelpers::CreateSortKey(partition_chunk, modifiers, partition_keys);
+	auto keys = FlatVector::GetData<string_t>(partition_keys);
+
+	auto same_key = [](const string_t &key, const string &other) {
+		return key.GetSize() == other.size() && memcmp(key.GetData(), other.data(), other.size()) == 0;
+	};
+
+	optional_idx flushed_row_group_idx;
+	idx_t run_start = 0;
+	while (run_start < count) {
+		// a new row group is needed whenever the partition value differs from the one of the current row group.
+		// note that InitializeAppend always starts a fresh row group for partitioned tables, so on the first run
+		// of the first chunk there is nothing to close
+		if (!state.has_current_partition_key) {
+			state.current_partition_key = keys[run_start].GetString();
+			state.has_current_partition_key = true;
+		} else if (!same_key(keys[run_start], state.current_partition_key)) {
+			// The current row group holds rows of the previous partition, so close it - but only once it holds
+			// enough rows to be worth skipping. Scans read at vector granularity, so a row group smaller than a
+			// vector cannot save any IO by being pruned, while every row group costs metadata. Without this floor a
+			// high-cardinality partition key (e.g. PARTITIONED BY on a raw TIMESTAMP) would produce one row group
+			// per row. Breaking the invariant here is safe: readers derive partition membership from statistics, so
+			// a row group holding more than one partition merely stops being prunable.
+			auto min_rows = MinValue<idx_t>(STANDARD_VECTOR_SIZE, GetRowGroupSize() / 2);
+			if (state.row_group_append_state.offset_in_row_group >= min_rows) {
+				// note that we deliberately do not report this row group as flushable: it was closed early and is
+				// therefore (usually) not full, so writing it to disk now would write out a small row group that
+				// still has to be compacted. Only row groups that filled up are written out eagerly.
+				StartNewRowGroup(state);
+			}
+			state.current_partition_key = keys[run_start].GetString();
+		}
+		// find the extent of the run of rows sharing this partition value
+		idx_t run_end = run_start + 1;
+		while (run_end < count && same_key(keys[run_end], state.current_partition_key)) {
+			run_end++;
+		}
+		if (run_start == 0 && run_end == count) {
+			// the whole chunk belongs to a single partition - append it without slicing
+			auto flushed = AppendInternal(chunk, state);
+			if (flushed.IsValid()) {
+				flushed_row_group_idx = flushed;
+			}
+			break;
+		}
+		DataChunk run_chunk;
+		run_chunk.InitializeEmpty(types);
+		run_chunk.Slice(chunk, run_start, run_end);
+		run_chunk.Flatten();
+		auto flushed = AppendInternal(run_chunk, state);
+		if (flushed.IsValid()) {
+			flushed_row_group_idx = flushed;
+		}
+		run_start = run_end;
+	}
+	return flushed_row_group_idx;
+}
+
+optional_idx RowGroupCollection::AppendInternal(DataChunk &chunk, TableAppendState &state) {
 	const idx_t row_group_size = GetRowGroupSize();
 	D_ASSERT(chunk.ColumnCount() == types.size());
 	chunk.Verify(GetDatabase());
@@ -696,8 +823,6 @@ optional_idx RowGroupCollection::Append(DataChunk &chunk, TableAppendState &stat
 		if (remaining == 0) {
 			break;
 		}
-		// finalize the append state for the current row group
-		current_row_group.FinalizeAppend(state.row_group_append_state);
 		// we expect max 1 iteration of this loop (i.e. a single chunk should never overflow more than one
 		// row_group)
 		D_ASSERT(chunk.size() == remaining + append_count);
@@ -705,16 +830,8 @@ optional_idx RowGroupCollection::Append(DataChunk &chunk, TableAppendState &stat
 		if (remaining < chunk.size()) {
 			chunk.Slice(append_count, remaining);
 		}
-		// append a new row_group
-		flushed_row_group_idx = state.row_group_append_state.row_group->GetIndex();
-		auto next_start = state.row_group_start + state.row_group_append_state.offset_in_row_group;
-
-		auto l = state.row_groups->Lock();
-		AppendRowGroup(l, next_start);
-		// set up the append state for this row_group
-		auto last_row_group = state.row_groups->GetLastSegment(l);
-		RowGroup::InitializeAppend(*last_row_group, state.row_group_append_state);
-		state.row_group_start = next_start;
+		// finalize the current row group and append a new one
+		flushed_row_group_idx = StartNewRowGroup(state);
 	}
 	state.current_row += row_t(total_append_count);
 
@@ -736,13 +853,25 @@ void RowGroupCollection::FinalizeAppend(TransactionData transaction, TableAppend
 	// now push version info into all row groups
 	auto remaining = state.total_append_count;
 	auto row_group = state.start_row_group;
+	idx_t closed_idx = 0;
 	while (remaining > 0) {
 		auto &current_row_group = row_group->GetNode();
-		auto append_count = MinValue<idx_t>(remaining, row_group_size - current_row_group.count);
+		// for row groups we already closed we know exactly how many rows they received - for a row group that was
+		// filled up this is the same as the amount of space it had, but a row group can also be closed early
+		idx_t append_count;
+		if (closed_idx < state.row_group_append_counts.size()) {
+			append_count = state.row_group_append_counts[closed_idx++];
+		} else {
+			append_count = MinValue<idx_t>(remaining, row_group_size - current_row_group.count);
+		}
+		// a recorded count can be zero: if the previous chunk filled a row group exactly, the append re-initializes
+		// on that full row group and immediately closes it again without adding any rows
+		D_ASSERT(append_count <= remaining);
 		current_row_group.AppendVersionInfo(transaction, append_count);
 		remaining -= append_count;
 		row_group = state.row_groups->GetNextSegment(*row_group);
 	}
+	state.row_group_append_counts.clear();
 	total_rows += state.total_append_count;
 	next_row_id += state.total_append_count;
 	D_ASSERT(next_row_id.load() >= total_rows.load());
@@ -1485,7 +1614,27 @@ struct VacuumState {
 	idx_t row_start = 0;
 	idx_t next_vacuum_idx = 0;
 	vector<optional_idx> row_group_counts;
+	//! Partitioned tables only: the row groups to merge, keyed by the segment index the merge is anchored at.
+	//! Row groups of one partition are generally not adjacent (every append lands at the end of the table), so
+	//! unlike the adjacent merge windows these sets can be sparse.
+	map<idx_t, vector<idx_t>> partition_merge_sets;
+	//! Segments that a merge set anchored at a lower segment index will consume
+	unordered_set<idx_t> claimed_segments;
+	//! Set when a merge combines row groups that are not adjacent. The merged row group is larger than the rowid
+	//! range of the segment it replaces, so the checkpoint has to renumber rowids densely instead of preserving
+	//! each row group's rowid range (which is what it does when the storage version can persist rowid gaps).
+	bool compact_row_ids = false;
 };
+
+static bool SamePartition(const vector<Value> &lhs, const vector<Value> &rhs) {
+	D_ASSERT(lhs.size() == rhs.size());
+	for (idx_t i = 0; i < lhs.size(); i++) {
+		if (!Value::NotDistinctFrom(lhs[i], rhs[i])) {
+			return false;
+		}
+	}
+	return true;
+}
 
 class VacuumTask : public BaseCheckpointTask {
 public:
@@ -1493,6 +1642,14 @@ public:
 	           idx_t merge_count, idx_t target_count, idx_t merge_rows)
 	    : BaseCheckpointTask(checkpoint_state), vacuum_state(vacuum_state), segment_idx(segment_idx),
 	      merge_count(merge_count), target_count(target_count), merge_rows(merge_rows) {
+	}
+	//! Merge an explicit set of row groups into a single one. Used for partitioned tables, where the row groups that
+	//! may be merged together are not necessarily adjacent
+	VacuumTask(CollectionCheckpointState &checkpoint_state, VacuumState &vacuum_state, vector<idx_t> merge_segments_p,
+	           idx_t merge_rows)
+	    : BaseCheckpointTask(checkpoint_state), vacuum_state(vacuum_state), segment_idx(merge_segments_p[0]),
+	      merge_count(merge_segments_p.size()), target_count(1), merge_rows(merge_rows),
+	      merge_segments(std::move(merge_segments_p)) {
 	}
 
 	void ExecuteTask() override {
@@ -1549,12 +1706,19 @@ public:
 		idx_t total_row_groups = vacuum_state.row_group_counts.size();
 		optional_idx row_start;
 		idx_t live_row_offset = 0;
-		for (idx_t c_idx = segment_idx; merged_groups < merge_count && c_idx < total_row_groups; c_idx++) {
-			if (vacuum_state.row_group_counts[c_idx] == 0) {
-				continue;
+		// the segments to merge: either an explicit (possibly sparse) set, or the next merge_count live segments
+		// starting at segment_idx
+		vector<idx_t> segments_to_merge = merge_segments;
+		if (segments_to_merge.empty()) {
+			for (idx_t c_idx = segment_idx; merged_groups < merge_count && c_idx < total_row_groups; c_idx++) {
+				if (vacuum_state.row_group_counts[c_idx] == 0) {
+					continue;
+				}
+				merged_groups++;
+				segments_to_merge.push_back(c_idx);
 			}
-			merged_groups++;
-
+		}
+		for (auto &c_idx : segments_to_merge) {
 			auto current_segment = checkpoint_state.GetSegment(c_idx);
 			if (!row_start.IsValid()) {
 				row_start = current_segment->GetRowStart();
@@ -1648,6 +1812,9 @@ private:
 	idx_t merge_count;
 	idx_t target_count;
 	idx_t merge_rows;
+	//! Explicit set of segments to merge (partitioned tables); empty means "merge_count live segments from
+	//! segment_idx onwards"
+	vector<idx_t> merge_segments;
 };
 
 void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkpoint_state, VacuumState &state,
@@ -1746,6 +1913,91 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 			checkpoint_state.DropSegment(segment_idx);
 		}
 	}
+	if (IsPartitioned()) {
+		BuildPartitionMergeSets(checkpoint_state, state);
+	}
+}
+
+void RowGroupCollection::BuildPartitionMergeSets(CollectionCheckpointState &checkpoint_state, VacuumState &state) {
+	// Merging row groups of different partitions would put two partition values into one row group and break the
+	// invariant the append path maintains, so a merge set may only contain row groups of the same partition.
+	// Those are generally not adjacent - every append lands at the end of the table - so the merge sets are built
+	// here across the whole table instead of as a sliding window over neighbours.
+	if (!state.can_vacuum_deletes) {
+		return;
+	}
+	if (state.index_strategy == VacuumIndexStrategy::KEEP_ROW_IDS ||
+	    state.index_strategy == VacuumIndexStrategy::REMAP) {
+		// Compacting across gaps shifts the rowids of row groups that are not part of the merge, which the
+		// incremental remap cannot express (it derives new rowids from the merged range alone).
+		// FIXME: support REMAP by remapping the shifted row groups as well
+		return;
+	}
+	auto &partition_columns = info->GetPartitionColumns();
+	const idx_t row_group_size = GetRowGroupSize();
+
+	// group the mergeable row groups by partition value, preserving segment order within each partition
+	vector<vector<Value>> partition_values;
+	vector<vector<idx_t>> partition_segments;
+	vector<Value> current_values;
+	for (idx_t segment_idx = 0; segment_idx < state.row_group_counts.size(); segment_idx++) {
+		if (!state.row_group_counts[segment_idx].IsValid() || state.row_group_counts[segment_idx].GetIndex() == 0) {
+			continue;
+		}
+		if (state.row_group_counts[segment_idx].GetIndex() >= row_group_size) {
+			// already full - merging it would only rewrite it
+			continue;
+		}
+		auto segment = checkpoint_state.GetSegment(segment_idx);
+		if (!segment) {
+			continue;
+		}
+		if (!segment->GetNode().TryGetConstantColumnValues(partition_columns, current_values)) {
+			continue;
+		}
+		bool found = false;
+		for (idx_t i = 0; i < partition_values.size(); i++) {
+			if (SamePartition(partition_values[i], current_values)) {
+				partition_segments[i].push_back(segment_idx);
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			partition_values.push_back(current_values);
+			partition_segments.push_back({segment_idx});
+		}
+	}
+
+	// within each partition, pack the row groups into merge sets of at most one row group worth of rows
+	for (auto &segments : partition_segments) {
+		idx_t set_start = 0;
+		while (set_start + 1 < segments.size()) {
+			idx_t merge_rows = state.row_group_counts[segments[set_start]].GetIndex();
+			idx_t set_end = set_start + 1;
+			while (set_end < segments.size()) {
+				auto next_rows = state.row_group_counts[segments[set_end]].GetIndex();
+				if (merge_rows + next_rows > row_group_size) {
+					break;
+				}
+				merge_rows += next_rows;
+				set_end++;
+			}
+			if (set_end - set_start < 2) {
+				// nothing fits together with this row group - move on
+				set_start++;
+				continue;
+			}
+			vector<idx_t> merge_set(segments.begin() + NumericCast<int64_t>(set_start),
+			                        segments.begin() + NumericCast<int64_t>(set_end));
+			for (idx_t i = 1; i < merge_set.size(); i++) {
+				state.claimed_segments.insert(merge_set[i]);
+			}
+			state.partition_merge_sets.emplace(merge_set[0], std::move(merge_set));
+			state.compact_row_ids = true;
+			set_start = set_end;
+		}
+	}
 }
 
 bool RowGroupCollection::ScheduleVacuumTasks(CollectionCheckpointState &checkpoint_state, VacuumState &state,
@@ -1760,6 +2012,10 @@ bool RowGroupCollection::ScheduleVacuumTasks(CollectionCheckpointState &checkpoi
 		// this segment is being vacuumed by a previously scheduled task
 		return true;
 	}
+	if (state.claimed_segments.count(segment_idx)) {
+		// this segment is consumed by a partition merge set anchored at a lower segment index
+		return true;
+	}
 	if (state.row_group_counts[segment_idx].IsValid() && state.row_group_counts[segment_idx].GetIndex() == 0) {
 		// segment was already dropped - skip
 		D_ASSERT(checkpoint_state.SegmentIsDropped(segment_idx));
@@ -1767,6 +2023,27 @@ bool RowGroupCollection::ScheduleVacuumTasks(CollectionCheckpointState &checkpoi
 	}
 	if (!schedule_vacuum) {
 		return false;
+	}
+	if (IsPartitioned()) {
+		// the adjacent merge window below cannot be used: neighbouring row groups may hold different partitions.
+		// InitializeVacuumState has precomputed which row groups may be merged together instead
+		auto entry = state.partition_merge_sets.find(segment_idx);
+		if (entry == state.partition_merge_sets.end()) {
+			return false;
+		}
+		idx_t merge_rows = 0;
+		for (auto &merge_segment_idx : entry->second) {
+			merge_rows += state.row_group_counts[merge_segment_idx].GetIndex();
+		}
+		// merging row groups that are not adjacent closes the rowid gaps between them, which shifts the rowids of
+		// every row group after the first one in the set
+		checkpoint_state.writer.SetRowIdsChanged();
+		DUCKDB_LOG(checkpoint_state.writer.GetDatabase(), CheckpointLogType, GetAttached(), *info, segment_idx,
+		           NumericCast<idx_t>(entry->second.size()), idx_t(1), merge_rows, state.row_start);
+		checkpoint_state.executor->ScheduleTask(
+		    make_uniq<VacuumTask>(checkpoint_state, state, entry->second, merge_rows));
+		state.row_start += merge_rows;
+		return true;
 	}
 	idx_t merge_rows;
 	idx_t next_idx = 0;
@@ -2010,16 +2287,17 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 		auto &row_group_writer = checkpoint_state.writers[segment_idx];
 		auto source_row_start = entry->GetRowStart();
 		auto row_start = source_row_start;
-		if (!can_persist_rowid_gaps) {
+		if (!can_persist_rowid_gaps || vacuum_state.compact_row_ids) {
 			// Older storage versions do not serialize next_row_id, so the checkpointed row groups must have
-			// contiguous numbering for rowids.
+			// contiguous numbering for rowids. A partition merge also needs dense numbering, because the merged
+			// row group does not fit in the rowid range of the segment it replaces.
 			row_start = base_row_id + new_total_rows;
-			// If rowids must remain stable, dense old-storage output must not move this surviving row group.
+			// If rowids must remain stable, dense output must not move this surviving row group.
 			D_ASSERT(vacuum_state.can_change_row_ids || row_start == source_row_start);
 		}
 		if (!row_group_writer) {
 			// row group was not checkpointed - this can happen if compressing is disabled for in-memory tables
-			D_ASSERT(row_start == source_row_start);
+			D_ASSERT(row_start == source_row_start || vacuum_state.compact_row_ids);
 			new_row_groups->AppendSegment(l, entry->ReferenceNode(), row_start);
 			new_total_rows += existing_row_group.count;
 			new_next_row_id = MaxValue<idx_t>(new_next_row_id, row_start + existing_row_group.count - base_row_id);

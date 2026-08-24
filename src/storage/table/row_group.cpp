@@ -1956,6 +1956,58 @@ RowGroupPointer RowGroup::Deserialize(Deserializer &deserializer) {
 }
 
 //===--------------------------------------------------------------------===//
+// Constant Column Values
+//===--------------------------------------------------------------------===//
+bool RowGroup::TryGetConstantColumnValues(const vector<column_t> &column_ids, vector<Value> &partition_values) {
+	partition_values.clear();
+	for (auto &column_id : column_ids) {
+		auto stats = GetStatistics(StorageIndex(column_id));
+		if (!stats) {
+			return false;
+		}
+		if (!stats->CanHaveNoNull()) {
+			// the row group holds only NULLs for this column, which is a partition of its own
+			partition_values.push_back(Value(stats->GetType()));
+			continue;
+		}
+		if (stats->CanHaveNull()) {
+			// a mix of NULLs and values is more than one partition
+			return false;
+		}
+		switch (stats->GetStatsType()) {
+		case StatisticsType::NUMERIC_STATS: {
+			if (!NumericStats::HasMinMax(*stats)) {
+				return false;
+			}
+			auto min = NumericStats::Min(*stats);
+			if (min != NumericStats::Max(*stats)) {
+				return false;
+			}
+			partition_values.push_back(std::move(min));
+			break;
+		}
+		case StatisticsType::STRING_STATS: {
+			// string statistics only keep a prefix of the min and max. They pin down a single value only if that
+			// value was stored in full, i.e. its length is the longest string in the row group - a truncated
+			// prefix is always shorter than the length the statistics report
+			if (!StringStats::HasMaxStringLength(*stats)) {
+				return false;
+			}
+			auto min = StringStats::Min(*stats);
+			if (min != StringStats::Max(*stats) || min.size() != StringStats::MaxStringLength(*stats)) {
+				return false;
+			}
+			partition_values.push_back(Value(min));
+			break;
+		}
+		default:
+			return false;
+		}
+	}
+	return true;
+}
+
+//===--------------------------------------------------------------------===//
 // GetPartitionStats
 //===--------------------------------------------------------------------===//
 struct DuckDBPartitionRowGroup : public PartitionRowGroup {

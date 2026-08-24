@@ -124,6 +124,9 @@ public:
 
 public:
 	PhysicalOperator &ResolveDefaultsProjection(LogicalInsert &op, PhysicalOperator &child);
+	//! Sort the input of an insert by the given plan column indices, so that rows belonging to the same partition
+	//! of a partitioned table arrive together. Returns the plan unchanged if there are no partition columns.
+	PhysicalOperator &GroupByPartitionKeys(PhysicalOperator &plan, const vector<idx_t> &partition_columns);
 
 protected:
 	PhysicalOperator &CreatePlan(LogicalAggregate &op);

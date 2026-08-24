@@ -1,0 +1,148 @@
+# name: test/sql/partitioning/native_partitioning_read.test
+# description: What a partitioned layout buys on the read side
+# group: [partitioning]
+
+load {TEST_DIR}/native_partitioning_read.db
+
+statement ok
+CREATE TABLE s(region VARCHAR, v INTEGER) PARTITIONED BY (region);
+
+statement ok
+INSERT INTO s SELECT ['EU', 'US', 'APAC', 'LATAM'][i % 4 + 1], i FROM range(200000) t(i);
+
+statement ok
+CHECKPOINT;
+
+# Partition elimination needs no operator support: one value per row group makes the existing zone map check
+# exact, so an equality filter reads exactly the row groups of that partition.
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM s WHERE region = 'EU';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 1 / 4.*
+
+query I
+SELECT count(*) FROM s WHERE region = 'EU';
+----
+50000
+
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM s WHERE region IN ('EU', 'APAC');
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 2 / 4.*
+
+query I
+SELECT count(*) FROM s WHERE region IN ('EU', 'APAC');
+----
+100000
+
+# the same data without a partition key interleaves the values, so nothing can be pruned
+statement ok
+CREATE TABLE unpartitioned(region VARCHAR, v INTEGER);
+
+statement ok
+INSERT INTO unpartitioned SELECT ['EU', 'US', 'APAC', 'LATAM'][i % 4 + 1], i FROM range(200000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM unpartitioned WHERE region = 'EU';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 2 / 2.*
+
+# A grouped aggregate on the partition key needs no hash table: the scan reports SINGLE_VALUE_PARTITIONS and
+# hands the partition value of each row group to the aggregate. This works through the compress/decompress
+# projections that compressed_materialization interposes: the partition value is passed through the same
+# transformation the plan applies to the column.
+query II
+EXPLAIN SELECT region, count(*) FROM s GROUP BY region;
+----
+physical_plan	<REGEX>:.*Partitioned Aggregate.*
+
+query III
+SELECT region, count(*), sum(v) FROM s GROUP BY region ORDER BY region;
+----
+APAC	50000	5000000000
+EU	50000	4999900000
+LATAM	50000	5000050000
+US	50000	4999950000
+
+# grouping by a column the table is not partitioned by must not use it
+query II
+EXPLAIN SELECT v, count(*) FROM s GROUP BY v;
+----
+physical_plan	<REGEX>:.*Hash Group By.*
+
+# ... and neither may a table without a partition key
+query II
+EXPLAIN SELECT region, count(*) FROM unpartitioned GROUP BY region;
+----
+physical_plan	<REGEX>:.*Hash Group By.*
+
+query III
+SELECT region, count(*), sum(v) FROM unpartitioned GROUP BY region ORDER BY region;
+----
+APAC	50000	5000000000
+EU	50000	4999900000
+LATAM	50000	5000050000
+US	50000	4999950000
+
+# a compound partition key: grouping by a subset of it is still single-valued per row group
+statement ok
+CREATE TABLE c(a INTEGER, b VARCHAR, v INTEGER) PARTITIONED BY (a, b);
+
+statement ok
+INSERT INTO c SELECT i % 2, ['x', 'y'][i % 3 % 2 + 1], i FROM range(60000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query II
+EXPLAIN SELECT a, count(*) FROM c GROUP BY a;
+----
+physical_plan	<REGEX>:.*Partitioned Aggregate.*
+
+query II
+SELECT a, count(*) FROM c GROUP BY a ORDER BY a;
+----
+0	30000
+1	30000
+
+query II
+EXPLAIN SELECT a, b, count(*) FROM c GROUP BY a, b;
+----
+physical_plan	<REGEX>:.*Partitioned Aggregate.*
+
+query III
+SELECT a, b, count(*) FROM c GROUP BY a, b ORDER BY a, b;
+----
+0	x	20000
+0	y	10000
+1	x	20000
+1	y	10000
+
+# uncommitted local data is scanned from a separate collection, so the guarantee is dropped inside the
+# transaction that produced it
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO s VALUES ('EU', 1);
+
+query II
+EXPLAIN SELECT region, count(*) FROM s GROUP BY region;
+----
+physical_plan	<REGEX>:.*Hash Group By.*
+
+query I
+SELECT count(*) FROM s WHERE region = 'EU';
+----
+50001
+
+statement ok
+COMMIT;
+
+query II
+EXPLAIN SELECT region, count(*) FROM s GROUP BY region;
+----
+physical_plan	<REGEX>:.*Partitioned Aggregate.*

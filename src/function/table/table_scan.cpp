@@ -257,6 +257,11 @@ public:
 
 	OperatorPartitionData TableScanGetPartitionData(ClientContext &context,
 	                                                TableFunctionGetPartitionInput &input) override {
+		if (input.partition_info.RequiresPartitionColumns()) {
+			// an index scan hands out row ids in batches that do not follow row group boundaries, so a batch can
+			// span partitions
+			throw InternalException("TableScan::GetPartitionData: partition columns not supported for index scans");
+		}
 		auto &l_state = input.local_state->Cast<IndexScanLocalState>();
 		return OperatorPartitionData(l_state.batch_index);
 	}
@@ -435,13 +440,40 @@ public:
 	                                                TableFunctionGetPartitionInput &input) override {
 		auto &l_state = input.local_state->Cast<TableScanLocalState>();
 		if (l_state.scan_state.table_state.row_group) {
-			return OperatorPartitionData(l_state.scan_state.table_state.batch_index);
+			OperatorPartitionData result(l_state.scan_state.table_state.batch_index);
+			AddPartitionValues(l_state, input.partition_info, result);
+			return result;
 		}
 		if (l_state.scan_state.local_state.row_group) {
 			return OperatorPartitionData(l_state.scan_state.table_state.batch_index +
 			                             l_state.scan_state.local_state.batch_index);
 		}
 		return OperatorPartitionData(0);
+	}
+
+	//! A partitioned table holds a single value per row group for each of its partition columns, and a scan never
+	//! crosses a row group boundary within a chunk - so the values of the row group being scanned describe the
+	//! partition of every row handed out
+	static void AddPartitionValues(TableScanLocalState &l_state, const OperatorPartitionInfo &partition_info,
+	                               OperatorPartitionData &result) {
+		if (!partition_info.RequiresPartitionColumns()) {
+			return;
+		}
+		auto &scan_column_ids = l_state.scan_state.GetColumnIds();
+		vector<column_t> table_column_ids;
+		for (auto &partition_column : partition_info.partition_columns) {
+			table_column_ids.push_back(scan_column_ids[partition_column].GetPrimaryIndex());
+		}
+		vector<Value> partition_values;
+		auto &row_group = l_state.scan_state.table_state.row_group->GetNode();
+		if (!row_group.TryGetConstantColumnValues(table_column_ids, partition_values)) {
+			throw InternalException("Table scan was asked for partition values, but row group %llu does not hold a "
+			                        "single value for the partition columns",
+			                        l_state.scan_state.table_state.row_group->GetIndex());
+		}
+		for (auto &partition_value : partition_values) {
+			result.partition_data.emplace_back(std::move(partition_value));
+		}
 	}
 
 	idx_t TableScanRowsScanned(LocalTableFunctionState &state) override {
@@ -922,12 +954,14 @@ double TableScanProgress(ClientContext &context, const FunctionData *bind_data_p
 }
 
 OperatorPartitionData TableScanGetPartitionData(ClientContext &context, TableFunctionGetPartitionInput &input) {
-	if (input.partition_info.RequiresPartitionColumns()) {
-		throw InternalException("TableScan::GetPartitionData: partition columns not supported");
-	}
-
 	auto &g_state = input.global_state->Cast<TableScanGlobalState>();
 	return g_state.TableScanGetPartitionData(context, input);
+}
+
+TablePartitionInfo TableScanGetPartitionInfo(ClientContext &context, TableFunctionPartitionInput &input) {
+	auto &bind_data = input.bind_data->Cast<TableScanBindData>();
+	auto &duck_table = bind_data.table.Cast<DuckTableEntry>();
+	return duck_table.GetStorage().GetPartitionInfo(context, input.partition_ids);
 }
 
 vector<PartitionStatistics> TableScanGetPartitionStats(ClientContext &context, GetPartitionStatsInput &input) {
@@ -1059,6 +1093,7 @@ TableFunction TableScanFunction::GetFunction() {
 	scan_function.to_string = TableScanToString;
 	scan_function.table_scan_progress = TableScanProgress;
 	scan_function.get_partition_data = TableScanGetPartitionData;
+	scan_function.get_partition_info = TableScanGetPartitionInfo;
 	scan_function.get_partition_stats = TableScanGetPartitionStats;
 	scan_function.get_bind_info = TableScanGetBindInfo;
 	scan_function.projection_pushdown = true;

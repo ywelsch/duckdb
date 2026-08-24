@@ -307,6 +307,9 @@ public:
 	void AddIndex(unique_ptr<Index> index);
 
 	//! Returns a list of the partition stats
+	//! Whether the row groups of this table each hold a single value for the given columns, so that operators can
+	//! treat a row group as one partition
+	TablePartitionInfo GetPartitionInfo(ClientContext &context, const vector<column_t> &column_ids);
 	vector<PartitionStatistics> GetPartitionStats(ClientContext &context);
 
 private:

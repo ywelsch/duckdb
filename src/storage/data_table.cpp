@@ -268,6 +268,39 @@ idx_t DataTable::GetRowGroupSize() const {
 	return row_groups->GetRowGroupSize();
 }
 
+TablePartitionInfo DataTable::GetPartitionInfo(ClientContext &context, const vector<column_t> &column_ids) {
+	auto &partition_columns = info->GetPartitionColumns();
+	if (partition_columns.empty()) {
+		return TablePartitionInfo::NOT_PARTITIONED;
+	}
+	// only answer for columns the table is actually partitioned by - otherwise every aggregate over any table would
+	// pay for loading all row group metadata
+	for (auto &column_id : column_ids) {
+		bool is_partition_column = false;
+		for (auto &partition_column : partition_columns) {
+			if (partition_column == column_id) {
+				is_partition_column = true;
+				break;
+			}
+		}
+		if (!is_partition_column) {
+			return TablePartitionInfo::NOT_PARTITIONED;
+		}
+	}
+	// transaction-local appends are scanned from a separate collection whose trailing row group is still open, so
+	// its statistics cannot be relied on yet
+	auto &local_storage = LocalStorage::Get(context, db);
+	if (local_storage.GetStorage(*this)) {
+		return TablePartitionInfo::NOT_PARTITIONED;
+	}
+	// the declaration alone is not enough: row groups written before the table was partitioned, or by an engine
+	// that does not know about partitioning, can hold more than one value
+	if (!row_groups->HasSingleValuePartitions(column_ids)) {
+		return TablePartitionInfo::NOT_PARTITIONED;
+	}
+	return TablePartitionInfo::SINGLE_VALUE_PARTITIONS;
+}
+
 vector<PartitionStatistics> DataTable::GetPartitionStats(ClientContext &context) {
 	auto &transaction = DuckTransaction::Get(context, db);
 	auto result = row_groups->GetPartitionStats(transaction);
