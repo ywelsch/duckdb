@@ -640,12 +640,7 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 	state.row_groups = GetRowGroups();
 	auto l = state.row_groups->Lock();
 	// We need a new row group if there are none yet or the append mode forces us to create a new row group.
-	// For partitioned tables we always start a new row group: we do not know the partition value of the trailing
-	// row group, so appending into it could mix two partitions.
-	// FIXME: derive the trailing row group's partition value from its statistics (min == max) and keep appending
-	// into it when it matches, to avoid a fresh row group per append
-	bool needs_new_row_group =
-	    state.row_groups->IsEmpty(l) || row_group_append_mode == RowGroupAppendMode::REQUIRE_NEW || IsPartitioned();
+	bool needs_new_row_group = state.row_groups->IsEmpty(l) || row_group_append_mode == RowGroupAppendMode::REQUIRE_NEW;
 	// Otherwise we evaluate the row_group_append_mode
 	if (!needs_new_row_group) {
 		auto last_row_group = state.row_groups->GetLastSegment(l);
@@ -660,8 +655,19 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 			needs_new_row_group = row_group_size < last_row_group->GetNode().count;
 		}
 	}
+	state.has_current_partition_key = false;
+	if (!needs_new_row_group && IsPartitioned()) {
+		// Continue appending into the trailing row group only if we can establish which partition it holds, so that
+		// the append path notices when the incoming rows belong to a different one. If its partition cannot be
+		// established we start a new row group rather than risk quietly mixing two partitions into it.
+		auto last_row_group = state.row_groups->GetLastSegment(l);
+		if (!TrySeedPartitionKey(state, last_row_group->GetNode())) {
+			needs_new_row_group = true;
+		}
+	}
 	if (needs_new_row_group) {
 		AppendRowGroup(l, state.row_groups->GetBaseRowId() + next_row_id);
+		state.has_current_partition_key = false;
 	}
 	state.start_row_group = state.row_groups->GetLastSegment(l);
 	D_ASSERT(state.row_groups->GetBaseRowId() + next_row_id ==
@@ -678,6 +684,62 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 void RowGroupCollection::InitializeAppend(TableAppendState &state) {
 	TransactionData tdata(0, 0);
 	InitializeAppend(tdata, state);
+}
+
+//! Partition keys are encoded with create_sort_key so that a compound key becomes one comparable value. The
+//! modifiers only have to be stable, since the encoding is compared for equality and never ordered.
+static vector<OrderModifiers> PartitionKeyModifiers(idx_t count) {
+	vector<OrderModifiers> result;
+	for (idx_t i = 0; i < count; i++) {
+		result.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST);
+	}
+	return result;
+}
+
+//! Encode partition values obtained from statistics the same way the append path encodes them from a chunk
+static string EncodePartitionKey(const vector<LogicalType> &partition_types, const vector<Value> &partition_values) {
+	DataChunk chunk;
+	chunk.Initialize(Allocator::DefaultAllocator(), partition_types, 1);
+	for (idx_t i = 0; i < partition_values.size(); i++) {
+		chunk.data[i].SetValue(0, partition_values[i]);
+	}
+	chunk.SetCardinalityUnsafe(1);
+
+	Vector keys(LogicalType::BLOB, 1);
+	CreateSortKeyHelpers::CreateSortKey(chunk, PartitionKeyModifiers(partition_values.size()), keys);
+	return FlatVector::GetData<string_t>(keys)[0].GetString();
+}
+
+bool RowGroupCollection::TrySeedPartitionKey(TableAppendState &state, RowGroup &row_group) {
+	state.has_current_partition_key = false;
+	if (row_group.count == 0) {
+		// nothing in the row group yet - the first appended row decides its partition
+		return true;
+	}
+	auto &partition_columns = info->GetPartitionColumns();
+	vector<Value> partition_values;
+	if (!row_group.TryGetConstantColumnValues(partition_columns, partition_values)) {
+		// we cannot tell which partition the trailing row group holds, so we must not append into it
+		return false;
+	}
+	vector<LogicalType> partition_types;
+	for (auto &column_id : partition_columns) {
+		partition_types.push_back(types[column_id]);
+	}
+	state.current_partition_key = EncodePartitionKey(partition_types, partition_values);
+	state.has_current_partition_key = true;
+	return true;
+}
+
+bool RowGroupCollection::HasSingleValuePartitions(const vector<column_t> &column_ids) {
+	auto row_groups = GetRowGroups();
+	vector<Value> values;
+	for (auto &node : row_groups->SegmentNodes()) {
+		if (!node.GetNode().TryGetConstantColumnValues(column_ids, values)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 bool RowGroupCollection::IsPartitioned() const {
@@ -719,10 +781,9 @@ optional_idx RowGroupCollection::AppendPartitioned(DataChunk &chunk, TableAppend
 	// encode the partition value of every row into a single comparable blob
 	DataChunk partition_chunk;
 	vector<LogicalType> partition_types;
-	vector<OrderModifiers> modifiers;
+	auto modifiers = PartitionKeyModifiers(partition_columns.size());
 	for (auto &column_id : partition_columns) {
 		partition_types.push_back(types[column_id]);
-		modifiers.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST);
 	}
 	partition_chunk.InitializeEmpty(partition_types);
 	for (idx_t i = 0; i < partition_columns.size(); i++) {
