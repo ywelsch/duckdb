@@ -225,3 +225,63 @@ query I
 SELECT count(*) FROM mixed_row_groups('moved', 'p');
 ----
 0
+
+# Repeated appends that stay within one partition continue filling the trailing row group instead of starting a
+# fresh one each time. The append path establishes the trailing row group's partition from its statistics; if it
+# cannot (mixed, or statistics that cannot pin down a single value) it starts a new row group instead.
+statement ok
+SET checkpoint_threshold='1TB';
+
+statement ok
+CREATE TABLE appended(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+loop i 0 20
+
+statement ok
+INSERT INTO appended SELECT 0, {i} * 3000 + j FROM range(0, 3000) t(j);
+
+endloop
+
+query II
+SELECT count(*), count(DISTINCT v) FROM appended;
+----
+60000	60000
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('appended');
+----
+1
+
+# switching partition still breaks the row group
+statement ok
+INSERT INTO appended SELECT 1, 100000 + j FROM range(0, 3000) t(j);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('appended');
+----
+2
+
+query I
+SELECT count(*) FROM mixed_row_groups('appended', 'p');
+----
+0
+
+# and going back to the first partition appends to the tail, not to the earlier row group of that partition
+statement ok
+INSERT INTO appended SELECT 0, 200000 + j FROM range(0, 3000) t(j);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('appended');
+----
+3
+
+query I
+SELECT count(*) FROM mixed_row_groups('appended', 'p');
+----
+0
+
+query III
+SELECT p, count(*), sum(v) FROM appended GROUP BY p ORDER BY p;
+----
+0	63000	2404468500
+1	3000	304498500
