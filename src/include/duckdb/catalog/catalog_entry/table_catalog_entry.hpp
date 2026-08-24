@@ -162,10 +162,23 @@ public:
 	                                                                 TriggerTiming timing, TriggerEventType event_type,
 	                                                                 TriggerForEach for_each) const;
 
+public:
+	//! The logical indices of the columns this table is partitioned by, in declaration order.
+	//! Empty if the table is not partitioned.
+	const vector<LogicalIndex> &GetPartitionColumns() const {
+		return partition_columns;
+	}
+	//! Resolve PARTITIONED BY keys to logical column indices, throwing a BinderException if a key is anything
+	//! other than a reference to an existing, non-generated column of the table.
+	DUCKDB_API static vector<LogicalIndex> ResolvePartitionColumns(const vector<unique_ptr<ParsedExpression>> &keys,
+	                                                               const ColumnList &columns);
+
 protected:
 	//! A list of columns that are part of this table
 	ColumnList columns;
 	//! A list of constraints that are part of this table
 	vector<unique_ptr<Constraint>> constraints;
+	//! The columns this table is partitioned by (PARTITIONED BY), as logical indices
+	vector<LogicalIndex> partition_columns;
 };
 } // namespace duckdb

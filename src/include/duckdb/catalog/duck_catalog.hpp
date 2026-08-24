@@ -26,6 +26,9 @@ public:
 		return "duckdb";
 	}
 
+	//! DuckDB tables support PARTITIONED BY (on plain columns); SORTED BY and WITH are still rejected
+	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
+
 	mutex &GetWriteLock() {
 		return write_lock;
 	}

@@ -9,6 +9,7 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parser/constraints/list.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/constraints/bound_check_constraint.hpp"
@@ -26,6 +27,33 @@ namespace duckdb {
 
 constexpr const char *TableCatalogEntry::Name;
 
+vector<LogicalIndex> TableCatalogEntry::ResolvePartitionColumns(const vector<unique_ptr<ParsedExpression>> &keys,
+                                                                const ColumnList &columns) {
+	vector<LogicalIndex> result;
+	logical_index_set_t seen;
+	for (auto &key : keys) {
+		if (key->GetExpressionType() != ExpressionType::COLUMN_REF) {
+			throw BinderException(
+			    "PARTITIONED BY only supports references to columns of the table, but found the expression \"%s\"",
+			    key->ToString());
+		}
+		auto &colref = key->Cast<ColumnRefExpression>();
+		auto &name = colref.GetColumnName();
+		if (!columns.ColumnExists(name)) {
+			throw BinderException("PARTITIONED BY references column \"%s\", which does not exist in the table", name);
+		}
+		auto &column = columns.GetColumn(name);
+		if (column.Generated()) {
+			throw BinderException("PARTITIONED BY cannot reference the generated column \"%s\"", name);
+		}
+		if (!seen.insert(column.Logical()).second) {
+			throw BinderException("PARTITIONED BY references column \"%s\" more than once", name);
+		}
+		result.push_back(column.Logical());
+	}
+	return result;
+}
+
 TableCatalogEntry::TableCatalogEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info)
     : StandardEntry(CatalogType::TABLE_ENTRY, schema, catalog, info.GetTableName()), columns(std::move(info.columns)),
       constraints(std::move(info.constraints)) {
@@ -33,6 +61,7 @@ TableCatalogEntry::TableCatalogEntry(Catalog &catalog, SchemaCatalogEntry &schem
 	this->dependencies = info.dependencies;
 	this->comment = info.comment;
 	this->tags = info.tags;
+	this->partition_columns = ResolvePartitionColumns(info.partition_keys, this->columns);
 }
 
 bool TableCatalogEntry::HasGeneratedColumns() const {
@@ -107,6 +136,10 @@ unique_ptr<CreateInfo> TableCatalogEntry::GetInfo() const {
 	result->internal = internal;
 	result->comment = comment;
 	result->tags = tags;
+	for (auto &partition_column : partition_columns) {
+		auto &column = columns.GetColumn(partition_column);
+		result->partition_keys.push_back(make_uniq<ColumnRefExpression>(column.Name()));
+	}
 	return std::move(result);
 }
 
@@ -323,6 +356,16 @@ void TableCatalogEntry::BindUpdateConstraints(Binder &binder, LogicalGet &get, L
 	for (auto &col_index : update.columns) {
 		auto &column = GetColumns().GetColumn(col_index);
 		if (!column.Type().SupportsRegularUpdate()) {
+			update.update_is_del_and_insert = true;
+			break;
+		}
+	}
+
+	// an update of a partition column has to move the row into a row group of its new partition, which an in-place
+	// update cannot do - turn it into a delete and an insert so the append path places it correctly
+	physical_index_set_t updated_columns(update.columns.begin(), update.columns.end());
+	for (auto &partition_column : partition_columns) {
+		if (updated_columns.count(GetColumns().LogicalToPhysical(partition_column))) {
 			update.update_is_del_and_insert = true;
 			break;
 		}

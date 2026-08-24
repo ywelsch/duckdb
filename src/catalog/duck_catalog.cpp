@@ -1,6 +1,8 @@
 #include "duckdb/catalog/duck_catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/catalog/catalog_entry/duck_schema_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
@@ -51,6 +53,29 @@ bool DuckCatalog::IsDuckCatalog() {
 
 bool DuckCatalog::SupportsMultipleDMLCTEs() const {
 	return true;
+}
+
+ErrorData DuckCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
+	auto &base = info.Base().Cast<CreateTableInfo>();
+	if (!base.partition_keys.empty()) {
+		// PARTITIONED BY is supported, but only for plain column references - validate them here so that the
+		// error surfaces before any storage is created
+		try {
+			TableCatalogEntry::ResolvePartitionColumns(base.partition_keys, base.columns);
+		} catch (std::exception &ex) {
+			return ErrorData(ex);
+		}
+	}
+	if (!base.sort_keys.empty()) {
+		return ErrorData(ExceptionType::CATALOG,
+		                 StringUtil::Format("SORTED BY is not supported for tables in a %s catalog", GetCatalogType()));
+	}
+	if (!base.options.empty()) {
+		return ErrorData(
+		    ExceptionType::CATALOG,
+		    StringUtil::Format("WITH clause is not supported for tables in a %s catalog", GetCatalogType()));
+	}
+	return ErrorData();
 }
 
 optional_ptr<DependencyManager> DuckCatalog::GetDependencyManager() {

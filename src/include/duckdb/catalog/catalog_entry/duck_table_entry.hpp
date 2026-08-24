@@ -78,6 +78,12 @@ public:
 	bool DropTrigger(CatalogTransaction transaction, const Identifier &name, bool cascade);
 
 private:
+	//! Translate the (logical) partition columns of this entry into storage indices on the shared DataTableInfo,
+	//! so that the append path can enforce one partition value per row group
+	void StorePartitionColumns();
+	//! Carry the PARTITIONED BY keys over to a CreateTableInfo built for an altered version of this table.
+	//! ALTER paths construct the info from scratch, so without this the partition key would be silently dropped.
+	void CopyPartitionKeys(CreateTableInfo &create_info, optional_ptr<RenameColumnInfo> rename = nullptr) const;
 	unique_ptr<CatalogEntry> RenameColumn(ClientContext &context, RenameColumnInfo &info);
 	unique_ptr<CatalogEntry> RenameField(ClientContext &context, RenameFieldInfo &info);
 	unique_ptr<CatalogEntry> AddColumn(ClientContext &context, AddColumnInfo &info);

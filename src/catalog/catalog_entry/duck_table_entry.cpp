@@ -156,6 +156,9 @@ DuckTableEntry::DuckTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, Bou
 		if (!info.indexes.empty()) {
 			storage->SetIndexStorageInfo(std::move(info.indexes));
 		}
+		// the DataTableInfo is shared with the table we inherited the storage from, but the storage indices of the
+		// partition columns may have shifted (e.g. because a preceding column was dropped) - recompute them
+		StorePartitionColumns();
 		return;
 	}
 
@@ -168,6 +171,7 @@ DuckTableEntry::DuckTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, Bou
 	}
 	storage = make_shared_ptr<DataTable>(catalog.GetAttached(), StorageManager::Get(catalog).GetTableIOManager(&info),
 	                                     schema.GetSchemaPath(), name, std::move(column_defs), std::move(info.data));
+	StorePartitionColumns();
 
 	// Create the unique indexes for the UNIQUE, PRIMARY KEY, and FOREIGN KEY constraints.
 	idx_t indexes_idx = 0;
@@ -424,6 +428,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::RenameColumn(ClientContext &context, Re
 	create_info->temporary = temporary;
 	create_info->comment = comment;
 	create_info->tags = tags;
+	CopyPartitionKeys(*create_info, info);
 	for (auto &col : columns.Logical()) {
 		auto copy = col.Copy();
 		if (rename_idx == col.Logical()) {
@@ -499,6 +504,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::AddColumn(ClientContext &context, AddCo
 	create_info->temporary = temporary;
 	create_info->comment = comment;
 	create_info->tags = tags;
+	CopyPartitionKeys(*create_info);
 
 	for (auto &col : columns.Logical()) {
 		create_info->columns.AddColumn(col.Copy());
@@ -815,6 +821,13 @@ unique_ptr<CatalogEntry> DuckTableEntry::RemoveColumn(ClientContext &context, Re
 	create_info->temporary = temporary;
 	create_info->comment = comment;
 	create_info->tags = tags;
+	for (auto &partition_column : partition_columns) {
+		if (partition_column == removed_index) {
+			throw CatalogException("Cannot drop column \"%s\": the table is partitioned by it",
+			                       columns.GetColumn(removed_index).Name());
+		}
+	}
+	CopyPartitionKeys(*create_info);
 
 	logical_index_set_t removed_columns;
 	if (column_dependency_manager.HasDependents(removed_index)) {
@@ -1148,6 +1161,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::ChangeColumnType(ClientContext &context
 	create_info->temporary = temporary;
 	create_info->comment = comment;
 	create_info->tags = tags;
+	CopyPartitionKeys(*create_info);
 
 	// Bind the USING expression.
 	auto binder = Binder::CreateBinder(context);
@@ -1270,6 +1284,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::AddForeignKeyConstraint(AlterForeignKey
 	create_info->temporary = temporary;
 	create_info->comment = comment;
 	create_info->tags = tags;
+	CopyPartitionKeys(*create_info);
 
 	create_info->columns = columns.Copy();
 	for (idx_t i = 0; i < constraints.size(); i++) {
@@ -1295,6 +1310,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::DropForeignKeyConstraint(ClientContext 
 	create_info->temporary = temporary;
 	create_info->comment = comment;
 	create_info->tags = tags;
+	CopyPartitionKeys(*create_info);
 
 	create_info->columns = columns.Copy();
 	for (idx_t i = 0; i < constraints.size(); i++) {
@@ -1400,6 +1416,29 @@ unique_ptr<CatalogEntry> DuckTableEntry::Copy(ClientContext &context) const {
 	auto binder = Binder::CreateBinder(context);
 	auto bound_create_info = binder->BindCreateTableCheckpoint(std::move(create_info), schema);
 	return make_uniq<DuckTableEntry>(catalog, schema, *bound_create_info, storage, triggers);
+}
+
+void DuckTableEntry::CopyPartitionKeys(CreateTableInfo &create_info, optional_ptr<RenameColumnInfo> rename) const {
+	for (auto &partition_column : partition_columns) {
+		auto &column_name = columns.GetColumn(partition_column).Name();
+		if (rename && column_name == rename->old_name) {
+			create_info.partition_keys.push_back(make_uniq<ColumnRefExpression>(rename->new_name));
+			continue;
+		}
+		create_info.partition_keys.push_back(make_uniq<ColumnRefExpression>(column_name));
+	}
+}
+
+void DuckTableEntry::StorePartitionColumns() {
+	if (partition_columns.empty()) {
+		return;
+	}
+	vector<column_t> storage_partition_columns;
+	storage_partition_columns.reserve(partition_columns.size());
+	for (auto &partition_column : partition_columns) {
+		storage_partition_columns.push_back(columns.GetColumn(partition_column).StorageOid());
+	}
+	storage->GetDataTableInfo()->SetPartitionColumns(std::move(storage_partition_columns));
 }
 
 void DuckTableEntry::SetAsRoot() {

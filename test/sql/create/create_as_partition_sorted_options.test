@@ -2,10 +2,11 @@
 # description: Test CREATE OR REPLACE TABLE
 # group: [create]
 
-statement error
+statement ok
 CREATE TABLE integers PARTITIONED BY (i) as select range i from range(10);
-----
-<REGEX>:.*PARTITIONED BY is not supported for tables in a duckdb catalog.*
+
+statement ok
+DROP TABLE integers;
 
 statement error
 CREATE TABLE integers SORTED BY (i) as select range i from range(10);
@@ -15,7 +16,7 @@ CREATE TABLE integers SORTED BY (i) as select range i from range(10);
 statement error
 CREATE TABLE integers PARTITIONED BY (i) SORTED BY (i) as select range i from range(10);
 ----
-<REGEX>:.*PARTITIONED BY is not supported for tables in a duckdb catalog.*
+<REGEX>:.*SORTED BY is not supported for tables in a duckdb catalog.*
 
 statement error
 CREATE TABLE iceberg_table
@@ -38,7 +39,7 @@ WITH (
 )
 as select range i, range::DATE date from range(10);
 ----
-<REGEX>:.*PARTITIONED BY is not supported for tables in a duckdb catalog.*
+<REGEX>:.*PARTITIONED BY references column "id", which does not exist in the table.*
 
 statement error
 CREATE TABLE iceberg_table
@@ -76,7 +77,7 @@ WITH (
 )
 as select range id, range::DATE date from range(10);
 ----
-<REGEX>:.*PARTITIONED BY is not supported for tables in a duckdb catalog.*
+<REGEX>:.*SORTED BY is not supported for tables in a duckdb catalog.*
 
 # WITH must come after sorted and partition options
 statement error
@@ -101,7 +102,7 @@ CREATE TABLE iceberg_table
 Partitioned by (getvariable('location_var'))
 as select range id, range::DATE date from range(10);
 ----
-<REGEX>:.*PARTITIONED BY is not supported for tables in a duckdb catalog.*
+<REGEX>:.*PARTITIONED BY only supports references to columns of the table.*
 
 # Table options using a environment variable
 statement error
