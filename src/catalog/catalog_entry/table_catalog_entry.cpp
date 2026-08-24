@@ -10,6 +10,7 @@
 #include "duckdb/parser/constraints/list.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/constraints/bound_check_constraint.hpp"
@@ -27,18 +28,34 @@ namespace duckdb {
 
 constexpr const char *TableCatalogEntry::Name;
 
-vector<LogicalIndex> TableCatalogEntry::ResolvePartitionColumns(const vector<unique_ptr<ParsedExpression>> &keys,
+vector<PartitionKey> TableCatalogEntry::ResolvePartitionColumns(const vector<unique_ptr<ParsedExpression>> &keys,
                                                                 const ColumnList &columns) {
-	vector<LogicalIndex> result;
-	logical_index_set_t seen;
+	vector<PartitionKey> result;
 	for (auto &key : keys) {
-		if (key->GetExpressionType() != ExpressionType::COLUMN_REF) {
+		// a key is either a column, or a column wrapped in one of the supported transforms
+		auto transform = PartitionTransform::IDENTITY;
+		optional_ptr<const ParsedExpression> column_expr = key.get();
+		if (key->GetExpressionType() == ExpressionType::FUNCTION && !key->Cast<FunctionExpression>().IsOperator()) {
+			auto &function = key->Cast<FunctionExpression>();
+			if (!TryParsePartitionTransform(function.FunctionName(), transform)) {
+				throw BinderException(
+				    "PARTITIONED BY does not support the transform \"%s\". Supported transforms are year, month, "
+				    "day and hour, or a plain column reference",
+				    function.FunctionName());
+			}
+			if (function.GetArguments().size() != 1) {
+				throw BinderException("PARTITIONED BY transform \"%s\" takes exactly one argument",
+				                      function.FunctionName());
+			}
+			column_expr = &function.GetArguments()[0].GetExpression();
+		}
+		if (column_expr->GetExpressionType() != ExpressionType::COLUMN_REF) {
 			throw BinderException(
-			    "PARTITIONED BY only supports references to columns of the table, but found the expression \"%s\"",
+			    "PARTITIONED BY only supports references to columns of the table, optionally wrapped in a "
+			    "transform, but found the expression \"%s\"",
 			    key->ToString());
 		}
-		auto &colref = key->Cast<ColumnRefExpression>();
-		auto &name = colref.GetColumnName();
+		auto &name = column_expr->Cast<ColumnRefExpression>().GetColumnName();
 		if (!columns.ColumnExists(name)) {
 			throw BinderException("PARTITIONED BY references column \"%s\", which does not exist in the table", name);
 		}
@@ -46,12 +63,42 @@ vector<LogicalIndex> TableCatalogEntry::ResolvePartitionColumns(const vector<uni
 		if (column.Generated()) {
 			throw BinderException("PARTITIONED BY cannot reference the generated column \"%s\"", name);
 		}
-		if (!seen.insert(column.Logical()).second) {
-			throw BinderException("PARTITIONED BY references column \"%s\" more than once", name);
+		if (!PartitionTransformSupportsType(transform, column.Type())) {
+			throw BinderException("PARTITIONED BY transform \"%s\" cannot be applied to column \"%s\" of type %s",
+			                      PartitionTransformName(transform), name, column.Type().ToString());
 		}
-		result.push_back(column.Logical());
+		for (auto &existing : result) {
+			if (existing.column == column.Logical().index && existing.transform == transform) {
+				throw BinderException("PARTITIONED BY references column \"%s\" with the same transform more than once",
+				                      name);
+			}
+		}
+		result.emplace_back(column.Logical().index, transform);
+	}
+	if (!PartitionKeysAreDerivable(result)) {
+		// month, day and hour repeat, so a row group's partition value can only be established from the column's
+		// minimum and maximum once every coarser unit is pinned by an earlier key. Without that the layout would
+		// still be written, but nothing could prove it - the table would never be compacted and never pruned
+		// exactly. Rejecting is friendlier than degrading silently, and the fix is to name the coarser units.
+		throw BinderException(
+		    "PARTITIONED BY with a %s transform also requires the coarser units of the same column, because %s "
+		    "repeats: partition by (year(col), month(col)) rather than (month(col)), and likewise add day and hour "
+		    "in order",
+		    PartitionTransformName(result.back().transform), PartitionTransformName(result.back().transform));
 	}
 	return result;
+}
+
+unique_ptr<ParsedExpression> TableCatalogEntry::PartitionKeyToExpression(const PartitionKey &key,
+                                                                         const Identifier &column_name) {
+	auto column_ref = make_uniq<ColumnRefExpression>(column_name);
+	auto transform_name = PartitionTransformName(key.transform);
+	if (!transform_name) {
+		return std::move(column_ref);
+	}
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(std::move(column_ref));
+	return make_uniq<FunctionExpression>(transform_name, std::move(arguments));
 }
 
 TableCatalogEntry::TableCatalogEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info)
@@ -136,9 +183,9 @@ unique_ptr<CreateInfo> TableCatalogEntry::GetInfo() const {
 	result->internal = internal;
 	result->comment = comment;
 	result->tags = tags;
-	for (auto &partition_column : partition_columns) {
-		auto &column = columns.GetColumn(partition_column);
-		result->partition_keys.push_back(make_uniq<ColumnRefExpression>(column.Name()));
+	for (auto &partition_key : partition_columns) {
+		auto &column = columns.GetColumn(LogicalIndex(partition_key.column));
+		result->partition_keys.push_back(PartitionKeyToExpression(partition_key, column.Name()));
 	}
 	return std::move(result);
 }
@@ -364,8 +411,8 @@ void TableCatalogEntry::BindUpdateConstraints(Binder &binder, LogicalGet &get, L
 	// an update of a partition column has to move the row into a row group of its new partition, which an in-place
 	// update cannot do - turn it into a delete and an insert so the append path places it correctly
 	physical_index_set_t updated_columns(update.columns.begin(), update.columns.end());
-	for (auto &partition_column : partition_columns) {
-		if (updated_columns.count(GetColumns().LogicalToPhysical(partition_column))) {
+	for (auto &partition_key : partition_columns) {
+		if (updated_columns.count(GetColumns().LogicalToPhysical(LogicalIndex(partition_key.column)))) {
 			update.update_is_del_and_insert = true;
 			break;
 		}

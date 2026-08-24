@@ -102,7 +102,7 @@ CREATE TABLE iceberg_table
 Partitioned by (getvariable('location_var'))
 as select range id, range::DATE date from range(10);
 ----
-<REGEX>:.*PARTITIONED BY only supports references to columns of the table.*
+<REGEX>:.*does not support the transform "getvariable".*
 
 # Table options using a environment variable
 statement error

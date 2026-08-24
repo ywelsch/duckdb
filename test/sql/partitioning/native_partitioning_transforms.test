@@ -1,0 +1,169 @@
+# name: test/sql/partitioning/native_partitioning_transforms.test
+# description: PARTITIONED BY with year/month/day/hour transforms
+# group: [partitioning]
+
+load {TEST_DIR}/native_partitioning_transforms.db
+
+statement ok
+CREATE MACRO mixed_days(tbl) AS TABLE
+    SELECT row_group_id
+    FROM pragma_storage_info(tbl)
+    WHERE column_name = 'ts'
+    GROUP BY row_group_id
+    HAVING bool_or(stats.min::DATE::VARCHAR IS DISTINCT FROM stats.max::DATE::VARCHAR);
+
+statement ok
+SET checkpoint_threshold='1TB';
+
+# Day granularity straight off a TIMESTAMP column, with no stored date column. The transform vocabulary matches
+# DuckLake's: identity, year, month, day, hour, where the temporal ones extract a component rather than truncate.
+statement ok
+CREATE TABLE t(ts TIMESTAMP, v INTEGER) PARTITIONED BY (year(ts), month(ts), day(ts));
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 't';
+----
+CREATE TABLE t(ts TIMESTAMP, v INTEGER) PARTITIONED BY ("year"(ts),"month"(ts),"day"(ts));
+
+statement ok
+INSERT INTO t
+SELECT TIMESTAMP '2024-01-01' + INTERVAL (i % 40) DAY + INTERVAL (i % 86400) SECOND, i
+FROM range(200000) t(i);
+
+query II
+SELECT count(*), count(DISTINCT ts::DATE) FROM t;
+----
+200000	40
+
+# no row group spans more than one day
+query I
+SELECT count(*) FROM mixed_days('t');
+----
+0
+
+# so a day's worth of data reads a single row group (the total varies with how the parallel insert splits
+# batches, so only the number scanned is asserted)
+query II
+EXPLAIN ANALYZE SELECT sum(v) FROM t WHERE ts >= TIMESTAMP '2024-01-05' AND ts < TIMESTAMP '2024-01-06';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 1 /.*
+
+query II
+EXPLAIN ANALYZE SELECT sum(v) FROM t WHERE v % 7 = 0;
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: [0-9][0-9]+ /.*
+
+# the partition value is derived from the timestamp's min/max, so compaction works across appends too
+statement ok
+CREATE TABLE appended(ts TIMESTAMP, v INTEGER) PARTITIONED BY (year(ts), month(ts), day(ts));
+
+loop i 0 8
+
+statement ok
+INSERT INTO appended SELECT TIMESTAMP '2024-01-01' + INTERVAL (j % 4) DAY, j + {i} * 20000 FROM range(0, 20000) t(j);
+
+endloop
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('appended');
+----
+32
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('appended');
+----
+4
+
+query I
+SELECT count(*) FROM mixed_days('appended');
+----
+0
+
+query II
+SELECT count(*), count(DISTINCT v) FROM appended;
+----
+160000	160000
+
+# hour granularity, and the transform survives a restart
+statement ok
+CREATE TABLE hourly(ts TIMESTAMP, v INTEGER) PARTITIONED BY (year(ts), month(ts), day(ts), hour(ts));
+
+statement ok
+INSERT INTO hourly SELECT TIMESTAMP '2024-03-01' + INTERVAL (i % 6) HOUR, i FROM range(60000) t(i);
+
+statement ok
+CHECKPOINT;
+
+restart
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 'hourly';
+----
+CREATE TABLE hourly(ts TIMESTAMP, v INTEGER) PARTITIONED BY ("year"(ts),"month"(ts),"day"(ts),"hour"(ts));
+
+query II
+SELECT count(*), count(DISTINCT date_trunc('hour', ts)) FROM hourly;
+----
+60000	6
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('hourly');
+----
+6
+
+# a transform mixed with a plain column
+statement ok
+CREATE TABLE mixed(region VARCHAR, d DATE, v INTEGER) PARTITIONED BY (region, year(d));
+
+statement ok
+INSERT INTO mixed SELECT ['EU', 'US'][i % 2 + 1], DATE '2023-01-01' + INTERVAL (i % 2) YEAR, i FROM range(80000) t(i);
+
+query III
+SELECT region, year(d), count(*) FROM mixed GROUP BY 1, 2 ORDER BY 1, 2;
+----
+EU	2023	40000
+US	2024	40000
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('mixed');
+----
+2
+
+# Periodic transforms need their coarser units, otherwise a row group's partition value cannot be established from
+# the column's bounds: January 2023 and January 2024 both have month 1, so equal months at the bounds would not
+# mean every row in between agrees.
+statement error
+CREATE TABLE bad1(ts TIMESTAMP, v INTEGER) PARTITIONED BY (month(ts));
+----
+<REGEX>:.*also requires the coarser units of the same column.*
+
+statement error
+CREATE TABLE bad2(ts TIMESTAMP, v INTEGER) PARTITIONED BY (year(ts), day(ts));
+----
+<REGEX>:.*also requires the coarser units of the same column.*
+
+# bucket is in DuckLake's vocabulary but is a hash: it cannot be derived from min/max at all, and nothing in the
+# native format can exploit it, so it is rejected rather than silently degrading
+statement error
+CREATE TABLE bad3(ts TIMESTAMP, v INTEGER) PARTITIONED BY (bucket(8, v));
+----
+<REGEX>:.*does not support the transform "bucket".*
+
+# type checks
+statement error
+CREATE TABLE bad4(d DATE, v INTEGER) PARTITIONED BY (year(d), month(d), day(d), hour(d));
+----
+<REGEX>:.*transform "hour" cannot be applied to column "d" of type DATE.*
+
+statement error
+CREATE TABLE bad5(v INTEGER) PARTITIONED BY (year(v));
+----
+<REGEX>:.*transform "year" cannot be applied to column "v" of type INTEGER.*
+
+statement error
+CREATE TABLE bad6(ts TIMESTAMP) PARTITIONED BY (date_trunc('day', ts));
+----
+<REGEX>:.*does not support the transform "date_trunc".*

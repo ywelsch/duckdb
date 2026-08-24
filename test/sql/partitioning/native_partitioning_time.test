@@ -69,11 +69,12 @@ SELECT sum(v) FROM events WHERE d = DATE '2024-03-05';
 ----
 5999780000
 
-# partition transforms are not supported - the day column has to be stored
+# Day granularity can also be had straight off the timestamp with the year/month/day transforms - see
+# native_partitioning_transforms.test. Only that fixed vocabulary is accepted, not arbitrary expressions.
 statement error
 CREATE TABLE transformed(ts TIMESTAMP, v INTEGER) PARTITIONED BY (date_trunc('day', ts));
 ----
-<REGEX>:.*PARTITIONED BY only supports references to columns of the table.*
+<REGEX>:.*does not support the transform "date_trunc".*
 
 # a generated column cannot be a partition key either: it has no storage, so it has no statistics to derive from
 statement error

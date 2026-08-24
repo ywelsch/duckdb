@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/storage/table/partition_key.hpp"
 #include "duckdb/storage/table/chunk_info.hpp"
 #include "duckdb/storage/statistics/segment_statistics.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
@@ -226,10 +227,10 @@ public:
 	void GetColumnSegmentInfo(const QueryContext &context, idx_t row_group_index, vector<ColumnSegmentInfo> &result,
 	                          const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
 	static PartitionStatistics GetPartitionStats(SegmentNode<RowGroup> &row_group, TransactionData transaction);
-	//! If this row group is known to hold exactly one distinct, exactly-represented value for each of the given
-	//! columns, writes those values to result and returns true. Derived from the persisted statistics alone, so it
-	//! is conservative: a row group that does hold a single value can still be reported as unknown.
-	bool TryGetConstantColumnValues(const vector<column_t> &column_ids, vector<Value> &result);
+	//! If this row group is known to hold exactly one distinct partition value for the given keys, writes those
+	//! values to result and returns true. Derived from the persisted statistics alone, so it is conservative: a row
+	//! group that does hold a single value can still be reported as unknown.
+	bool TryGetPartitionValues(const vector<PartitionKey> &partition_keys, vector<Value> &result);
 
 	idx_t GetAllocationSize() const {
 		return allocation_size;

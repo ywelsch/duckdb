@@ -131,7 +131,7 @@ CREATE TABLE iceberg_table (
   category string)
 Partitioned by (getvariable('location_var'));
 ----
-<REGEX>:.*PARTITIONED BY only supports references to columns of the table.*
+<REGEX>:.*does not support the transform "getvariable".*
 
 # Table options using a environment variable
 statement error

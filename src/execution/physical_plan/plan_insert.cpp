@@ -127,8 +127,9 @@ PhysicalOperator &PhysicalPlanGenerator::GroupByPartitionKeys(PhysicalOperator &
 static vector<idx_t> GetPartitionPlanColumns(TableCatalogEntry &table) {
 	vector<idx_t> result;
 	auto &columns = table.GetColumns();
-	for (auto &partition_column : table.GetPartitionColumns()) {
-		result.push_back(columns.LogicalToPhysical(partition_column).index);
+	for (auto &partition_key : table.GetPartitionColumns()) {
+		// grouping by the source column also groups by any transform of it, since a transform is a function of it
+		result.push_back(columns.LogicalToPhysical(LogicalIndex(partition_key.column)).index);
 	}
 	return result;
 }

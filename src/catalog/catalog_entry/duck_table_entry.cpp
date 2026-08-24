@@ -821,8 +821,8 @@ unique_ptr<CatalogEntry> DuckTableEntry::RemoveColumn(ClientContext &context, Re
 	create_info->temporary = temporary;
 	create_info->comment = comment;
 	create_info->tags = tags;
-	for (auto &partition_column : partition_columns) {
-		if (partition_column == removed_index) {
+	for (auto &partition_key : partition_columns) {
+		if (LogicalIndex(partition_key.column) == removed_index) {
 			throw CatalogException("Cannot drop column \"%s\": the table is partitioned by it",
 			                       columns.GetColumn(removed_index).Name());
 		}
@@ -1419,13 +1419,10 @@ unique_ptr<CatalogEntry> DuckTableEntry::Copy(ClientContext &context) const {
 }
 
 void DuckTableEntry::CopyPartitionKeys(CreateTableInfo &create_info, optional_ptr<RenameColumnInfo> rename) const {
-	for (auto &partition_column : partition_columns) {
-		auto &column_name = columns.GetColumn(partition_column).Name();
-		if (rename && column_name == rename->old_name) {
-			create_info.partition_keys.push_back(make_uniq<ColumnRefExpression>(rename->new_name));
-			continue;
-		}
-		create_info.partition_keys.push_back(make_uniq<ColumnRefExpression>(column_name));
+	for (auto &partition_key : partition_columns) {
+		auto &column_name = columns.GetColumn(LogicalIndex(partition_key.column)).Name();
+		auto &target = rename && column_name == rename->old_name ? rename->new_name : column_name;
+		create_info.partition_keys.push_back(PartitionKeyToExpression(partition_key, target));
 	}
 }
 
@@ -1433,10 +1430,11 @@ void DuckTableEntry::StorePartitionColumns() {
 	if (partition_columns.empty()) {
 		return;
 	}
-	vector<column_t> storage_partition_columns;
+	vector<PartitionKey> storage_partition_columns;
 	storage_partition_columns.reserve(partition_columns.size());
-	for (auto &partition_column : partition_columns) {
-		storage_partition_columns.push_back(columns.GetColumn(partition_column).StorageOid());
+	for (auto &partition_key : partition_columns) {
+		auto &column = columns.GetColumn(LogicalIndex(partition_key.column));
+		storage_partition_columns.emplace_back(column.StorageOid(), partition_key.transform);
 	}
 	storage->GetDataTableInfo()->SetPartitionColumns(std::move(storage_partition_columns));
 }

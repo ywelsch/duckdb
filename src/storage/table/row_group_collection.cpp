@@ -718,13 +718,13 @@ bool RowGroupCollection::TrySeedPartitionKey(TableAppendState &state, RowGroup &
 	}
 	auto &partition_columns = info->GetPartitionColumns();
 	vector<Value> partition_values;
-	if (!row_group.TryGetConstantColumnValues(partition_columns, partition_values)) {
+	if (!row_group.TryGetPartitionValues(partition_columns, partition_values)) {
 		// we cannot tell which partition the trailing row group holds, so we must not append into it
 		return false;
 	}
 	vector<LogicalType> partition_types;
-	for (auto &column_id : partition_columns) {
-		partition_types.push_back(types[column_id]);
+	for (auto &partition_key : partition_columns) {
+		partition_types.push_back(PartitionTransformReturnType(partition_key.transform, types[partition_key.column]));
 	}
 	state.current_partition_key = EncodePartitionKey(partition_types, partition_values);
 	state.has_current_partition_key = true;
@@ -771,12 +771,14 @@ optional_idx RowGroupCollection::AppendPartitioned(DataChunk &chunk, TableAppend
 	DataChunk partition_chunk;
 	vector<LogicalType> partition_types;
 	auto modifiers = PartitionKeyModifiers(partition_columns.size());
-	for (auto &column_id : partition_columns) {
-		partition_types.push_back(types[column_id]);
+	for (auto &partition_key : partition_columns) {
+		partition_types.push_back(PartitionTransformReturnType(partition_key.transform, types[partition_key.column]));
 	}
-	partition_chunk.InitializeEmpty(partition_types);
+	partition_chunk.Initialize(Allocator::DefaultAllocator(), partition_types, count);
 	for (idx_t i = 0; i < partition_columns.size(); i++) {
-		partition_chunk.data[i].Reference(chunk.data[partition_columns[i]]);
+		auto &partition_key = partition_columns[i];
+		ApplyPartitionTransform(partition_key.transform, chunk.data[partition_key.column], partition_chunk.data[i],
+		                        count);
 	}
 	partition_chunk.CheckCardinality(count);
 
@@ -1991,7 +1993,7 @@ void RowGroupCollection::BuildPartitionMergeSets(CollectionCheckpointState &chec
 		if (!segment) {
 			continue;
 		}
-		if (!segment->GetNode().TryGetConstantColumnValues(partition_columns, current_values)) {
+		if (!segment->GetNode().TryGetPartitionValues(partition_columns, current_values)) {
 			continue;
 		}
 		bool found = false;

@@ -21,8 +21,8 @@ PhysicalOperator &DuckCatalog::PlanCreateTableAs(ClientContext &context, Physica
 	// CTAS produces exactly the table's columns in order, so a logical column index is also a plan column index
 	auto &base = op.info->Base();
 	vector<idx_t> partition_columns;
-	for (auto &partition_column : TableCatalogEntry::ResolvePartitionColumns(base.partition_keys, base.columns)) {
-		partition_columns.push_back(partition_column.index);
+	for (auto &partition_key : TableCatalogEntry::ResolvePartitionColumns(base.partition_keys, base.columns)) {
+		partition_columns.push_back(partition_key.column);
 	}
 	auto &plan = planner.GroupByPartitionKeys(plan_p, partition_columns);
 

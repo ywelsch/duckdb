@@ -10,6 +10,7 @@
 
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/table_index_list.hpp"
+#include "duckdb/storage/table/partition_key.hpp"
 
 namespace duckdb {
 class AttachedDatabase;
@@ -43,15 +44,15 @@ public:
 	TableIndexList &GetIndexes() {
 		return indexes;
 	}
-	//! The storage indices of the columns this table is partitioned by (empty if the table is not partitioned).
+	//! The columns this table is partitioned by, as storage indices plus transforms (empty if not partitioned).
 	//! Appends into a partitioned table start a new row group whenever the partition key changes, so that every
 	//! row group holds rows of at most one partition value.
-	const vector<column_t> &GetPartitionColumns() const {
+	const vector<PartitionKey> &GetPartitionColumns() const {
 		return partition_columns;
 	}
 	//! Set the partition columns. Only called while the table is being created, before it is visible to any
 	//! other thread - there is no synchronization here.
-	void SetPartitionColumns(vector<column_t> columns) {
+	void SetPartitionColumns(vector<PartitionKey> columns) {
 		partition_columns = std::move(columns);
 	}
 	//! Find and move out an IndexStorageInfo by name from the stored collection.
@@ -84,8 +85,8 @@ private:
 	TableIndexList indexes;
 	//! Index storage information of the indexes created by this table
 	vector<IndexStorageInfo> index_storage_infos;
-	//! The storage indices of the partition columns, if the table is partitioned
-	vector<column_t> partition_columns;
+	//! The partition keys of this table, if it is partitioned
+	vector<PartitionKey> partition_columns;
 	//! Lock held while checkpointing
 	StorageLock checkpoint_lock;
 	//! The last seen checkpoint while doing a concurrent operation, if any

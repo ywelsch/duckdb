@@ -1,4 +1,5 @@
 #include "duckdb/storage/table/row_group.hpp"
+#include "duckdb/storage/table/partition_key.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/transaction/commit_state.hpp"
@@ -1958,16 +1959,22 @@ RowGroupPointer RowGroup::Deserialize(Deserializer &deserializer) {
 //===--------------------------------------------------------------------===//
 // Constant Column Values
 //===--------------------------------------------------------------------===//
-bool RowGroup::TryGetConstantColumnValues(const vector<column_t> &column_ids, vector<Value> &partition_values) {
+bool RowGroup::TryGetPartitionValues(const vector<PartitionKey> &partition_keys, vector<Value> &partition_values) {
+	if (!PartitionKeysAreDerivable(partition_keys)) {
+		// a periodic transform whose coarser units are not pinned: equal values at the column's bounds would not
+		// mean the rows in between agree
+		return false;
+	}
 	partition_values.clear();
-	for (auto &column_id : column_ids) {
+	for (auto &partition_key : partition_keys) {
+		auto column_id = partition_key.column;
 		auto stats = GetStatistics(StorageIndex(column_id));
 		if (!stats) {
 			return false;
 		}
 		if (!stats->CanHaveNoNull()) {
 			// the row group holds only NULLs for this column, which is a partition of its own
-			partition_values.push_back(Value(stats->GetType()));
+			partition_values.push_back(ApplyPartitionTransform(partition_key.transform, Value(stats->GetType())));
 			continue;
 		}
 		if (stats->CanHaveNull()) {
@@ -1979,8 +1986,9 @@ bool RowGroup::TryGetConstantColumnValues(const vector<column_t> &column_ids, ve
 			if (!NumericStats::HasMinMax(*stats)) {
 				return false;
 			}
-			auto min = NumericStats::Min(*stats);
-			if (min != NumericStats::Max(*stats)) {
+			auto min = ApplyPartitionTransform(partition_key.transform, NumericStats::Min(*stats));
+			auto max = ApplyPartitionTransform(partition_key.transform, NumericStats::Max(*stats));
+			if (min != max) {
 				return false;
 			}
 			partition_values.push_back(std::move(min));
