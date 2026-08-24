@@ -98,6 +98,22 @@ struct IndexLock {
 	unique_lock<mutex> index_lock;
 };
 
+//! One open append cursor. A partitioned table keeps one per partition it is writing, so rows of a partition can
+//! be appended whenever they arrive instead of having to arrive together.
+struct PartitionAppendCursor {
+	explicit PartitionAppendCursor(TableAppendState &parent) : append_state(parent), row_group_start(0) {
+	}
+
+	RowGroupAppendState append_state;
+	idx_t row_group_start;
+};
+
+//! A row group this append filled, and how many rows it received
+struct AppendedRowGroup {
+	optional_ptr<SegmentNode<RowGroup>> node;
+	idx_t count;
+};
+
 struct TableAppendState {
 	TableAppendState();
 	~TableAppendState();
@@ -125,6 +141,15 @@ struct TableAppendState {
 	//! table starts a new row group whenever the partition value changes), so the number of rows a row group
 	//! received cannot be derived from the row group size.
 	vector<idx_t> row_group_append_counts;
+	//! For partitioned tables writing with fanout: one open cursor per partition, keyed by the create_sort_key
+	//! encoding of the partition value
+	unordered_map<string, unique_ptr<PartitionAppendCursor>> partition_cursors;
+	//! The row groups this append has filled, so version info can be attributed without assuming the append
+	//! touched a contiguous run of row groups
+	vector<AppendedRowGroup> appended_row_groups;
+	//! The end of the rowid space this append has reserved. Each cursor reserves a whole row group worth of ids
+	//! up front, so what it does not use becomes a gap.
+	idx_t reserved_row_id_end;
 	//! For partitioned tables: the create_sort_key encoding of the partition value of the row group we are
 	//! currently appending to. When the next row has a different partition value we start a new row group, so that
 	//! every row group holds rows of at most one partition. Empty until the first row has been appended.

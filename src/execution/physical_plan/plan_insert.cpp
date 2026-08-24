@@ -149,11 +149,8 @@ PhysicalOperator &DuckCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 		//! Deprecated: The column_index_map is only populated by older versions.
 		plan = planner.ResolveDefaultsProjection(op, *plan);
 	}
-	// Note that this also reorders what an INSERT ... RETURNING hands back: the rows come out in the order they
-	// were stored rather than the order they were supplied. RETURNING has no defined order, and skipping the
-	// grouping here instead would cost the table its layout - such an insert would write row groups holding every
-	// partition, which is worse than a surprising order.
-	plan = planner.GroupByPartitionKeys(*plan, GetPartitionPlanColumns(op.table.Cast<DuckTableEntry>()));
+	// PROTOTYPE: the input is no longer grouped here. A partitioned table keeps one open row group per partition
+	// while appending, so rows can arrive in any order (see RowGroupCollection::AppendFanout).
 	// the flags below depend on the shape of the plan, so they are computed after the rewrites above
 	bool parallel_streaming_insert = !PhysicalPlanGenerator::PreserveInsertionOrder(context, *plan);
 	bool use_batch_index = PhysicalPlanGenerator::UseBatchIndex(context, *plan);

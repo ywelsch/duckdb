@@ -638,6 +638,19 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 
 	// start writing to the row_groups
 	state.row_groups = GetRowGroups();
+	state.reserved_row_id_end = next_row_id;
+	state.partition_cursors.clear();
+	state.appended_row_groups.clear();
+	if (FanoutAppend()) {
+		// each partition opens its own row group on first use, so there is no single row group to append into and
+		// nothing below applies - in particular the trailing row group does not have to end at next_row_id, since
+		// a previous fanout append will have left gaps
+		state.start_row_group = nullptr;
+		state.transaction = transaction;
+		state.stats = TableStatistics();
+		state.stats.InitializeEmpty(types);
+		return;
+	}
 	auto l = state.row_groups->Lock();
 	// We need a new row group if there are none yet or the append mode forces us to create a new row group.
 	bool needs_new_row_group = state.row_groups->IsEmpty(l) || row_group_append_mode == RowGroupAppendMode::REQUIRE_NEW;
@@ -753,9 +766,122 @@ idx_t RowGroupCollection::StartNewRowGroup(TableAppendState &state) {
 	return closed_row_group_idx;
 }
 
+PartitionAppendCursor &RowGroupCollection::GetPartitionCursor(TableAppendState &state, const string &partition_key) {
+	auto entry = state.partition_cursors.find(partition_key);
+	if (entry != state.partition_cursors.end()) {
+		return *entry->second;
+	}
+	// first rows of this partition in this append - reserve a row group worth of rowids for it and open a row group
+	// at the start of that window. Whatever the window does not use stays a gap, which the storage format allows.
+	auto cursor = make_uniq<PartitionAppendCursor>(state);
+	auto l = state.row_groups->Lock();
+	auto window_start = state.row_groups->GetBaseRowId() + state.reserved_row_id_end;
+	AppendRowGroup(l, window_start);
+	state.reserved_row_id_end += GetRowGroupSize();
+	auto last_row_group = state.row_groups->GetLastSegment(l);
+	RowGroup::InitializeAppend(*last_row_group, cursor->append_state);
+	cursor->row_group_start = window_start;
+	auto &result = *cursor;
+	state.partition_cursors.emplace(partition_key, std::move(cursor));
+	return result;
+}
+
+void RowGroupCollection::RollPartitionCursor(TableAppendState &state, PartitionAppendCursor &cursor) {
+	auto &row_group = cursor.append_state.row_group->GetNode();
+	state.appended_row_groups.push_back({cursor.append_state.row_group, cursor.append_state.offset_in_row_group});
+	row_group.FinalizeAppend(cursor.append_state);
+
+	auto l = state.row_groups->Lock();
+	auto window_start = state.row_groups->GetBaseRowId() + state.reserved_row_id_end;
+	AppendRowGroup(l, window_start);
+	state.reserved_row_id_end += GetRowGroupSize();
+	auto last_row_group = state.row_groups->GetLastSegment(l);
+	RowGroup::InitializeAppend(*last_row_group, cursor.append_state);
+	cursor.row_group_start = window_start;
+}
+
+optional_idx RowGroupCollection::AppendFanout(DataChunk &chunk, TableAppendState &state) {
+	auto &partition_columns = info->GetPartitionColumns();
+	const idx_t count = chunk.size();
+	if (count == 0) {
+		return optional_idx();
+	}
+	const idx_t row_group_size = GetRowGroupSize();
+
+	DataChunk partition_chunk;
+	vector<LogicalType> partition_types;
+	auto modifiers = PartitionKeyModifiers(partition_columns.size());
+	for (auto &partition_key : partition_columns) {
+		partition_types.push_back(PartitionTransformReturnType(partition_key.transform, types[partition_key.column]));
+	}
+	partition_chunk.Initialize(Allocator::DefaultAllocator(), partition_types, count);
+	for (idx_t i = 0; i < partition_columns.size(); i++) {
+		auto &partition_key = partition_columns[i];
+		ApplyPartitionTransform(partition_key.transform, chunk.data[partition_key.column], partition_chunk.data[i],
+		                        count);
+	}
+	partition_chunk.CheckCardinality(count);
+
+	Vector partition_keys(LogicalType::BLOB, count);
+	CreateSortKeyHelpers::CreateSortKey(partition_chunk, modifiers, partition_keys);
+	auto keys = FlatVector::GetData<string_t>(partition_keys);
+
+	auto same_key = [](const string_t &key, const string &other) {
+		return key.GetSize() == other.size() && memcmp(key.GetData(), other.data(), other.size()) == 0;
+	};
+
+	state.total_append_count += count;
+	idx_t run_start = 0;
+	while (run_start < count) {
+		auto key = keys[run_start].GetString();
+		idx_t run_end = run_start + 1;
+		while (run_end < count && same_key(keys[run_end], key)) {
+			run_end++;
+		}
+		// each partition has its own open row group, so the run goes straight in wherever it belongs - there is no
+		// need for the input to be grouped
+		DataChunk run_chunk;
+		optional_ptr<DataChunk> to_append = chunk;
+		if (run_start != 0 || run_end != count) {
+			run_chunk.InitializeEmpty(types);
+			run_chunk.Slice(chunk, run_start, run_end);
+			run_chunk.Flatten();
+			to_append = run_chunk;
+		}
+		auto &cursor = GetPartitionCursor(state, key);
+		idx_t remaining = to_append->size();
+		while (remaining > 0) {
+			auto &row_group = cursor.append_state.row_group->GetNode();
+			idx_t append_count = MinValue<idx_t>(remaining, row_group_size - cursor.append_state.offset_in_row_group);
+			if (append_count > 0) {
+				auto previous_allocation_size = row_group.GetAllocationSize();
+				row_group.Append(cursor.append_state, *to_append, append_count);
+				allocation_size += row_group.GetAllocationSize() - previous_allocation_size;
+				remaining -= append_count;
+			}
+			if (remaining > 0) {
+				to_append->Slice(append_count, remaining);
+				RollPartitionCursor(state, cursor);
+			}
+		}
+		run_start = run_end;
+	}
+
+	auto local_stats_lock = state.stats.GetLock();
+	for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
+		auto &column_stats = state.stats.GetStats(*local_stats_lock, col_idx);
+		column_stats.UpdateDistinctStatistics(chunk.data[col_idx], chunk.size(), state.hashes);
+	}
+	// row groups opened by fanout are written out at finalize, not eagerly
+	return optional_idx();
+}
+
 optional_idx RowGroupCollection::Append(DataChunk &chunk, TableAppendState &state) {
 	if (!IsPartitioned()) {
 		return AppendInternal(chunk, state);
+	}
+	if (FanoutAppend()) {
+		return AppendFanout(chunk, state);
 	}
 	return AppendPartitioned(chunk, state);
 }
@@ -887,6 +1013,35 @@ optional_idx RowGroupCollection::AppendInternal(DataChunk &chunk, TableAppendSta
 }
 
 void RowGroupCollection::FinalizeAppend(TransactionData transaction, TableAppendState &state) {
+	if (FanoutAppend()) {
+		// close every open cursor, then attribute version info to the row groups that actually received rows -
+		// they are not a contiguous run, and each holds only what its partition contributed
+		for (auto &entry : state.partition_cursors) {
+			auto &cursor = *entry.second;
+			state.appended_row_groups.push_back({cursor.append_state.row_group, cursor.append_state.offset_in_row_group});
+			cursor.append_state.row_group->GetNode().FinalizeAppend(cursor.append_state);
+		}
+		state.partition_cursors.clear();
+		for (auto &appended : state.appended_row_groups) {
+			if (appended.count == 0) {
+				continue;
+			}
+			appended.node->GetNode().AppendVersionInfo(transaction, appended.count);
+		}
+		state.appended_row_groups.clear();
+		total_rows += state.total_append_count;
+		// the rowid space consumed is the reserved windows, not the rows written - the difference is a gap
+		next_row_id = state.reserved_row_id_end;
+		D_ASSERT(next_row_id.load() >= total_rows.load());
+		state.total_append_count = 0;
+
+		auto local_stats_lock = state.stats.GetLock();
+		auto global_stats_lock = stats.GetLock();
+		for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
+			stats.GetStats(*global_stats_lock, col_idx).Merge(state.stats.GetStats(*local_stats_lock, col_idx));
+		}
+		return;
+	}
 	// first finalize the append of the final row group we appended to
 	auto &last_row_group = state.row_group_append_state.row_group->GetNode();
 	last_row_group.FinalizeAppend(state.row_group_append_state);
@@ -1060,7 +1215,9 @@ void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<Dat
 	idx_t source_offset = 0;
 	idx_t target_row_start = start_index;
 	for (auto &entry : segments) {
-		D_ASSERT(entry->GetRowStart() == source_row_groups->GetBaseRowId() + source_offset);
+		// a fanout append leaves gaps between the source row groups, so the source is not necessarily dense.
+		// the merge assigns fresh contiguous starts below regardless
+		D_ASSERT(entry->GetRowStart() >= source_row_groups->GetBaseRowId() + source_offset);
 		auto row_group = entry->MoveNode();
 		row_group->MoveToCollection(*this);
 		idx_t row_group_count = row_group->count;
@@ -1082,7 +1239,9 @@ void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<Dat
 	}
 	stats.MergeStats(data.stats);
 	D_ASSERT(source_offset == data.total_rows.load());
-	D_ASSERT(data.next_row_id.load() == data.total_rows.load());
+	// a fanout append reserves a whole row group of rowids per partition, so the source's rowid space is larger
+	// than the rows it holds. The merge assigns fresh contiguous starts, so the target stays dense.
+	D_ASSERT(data.next_row_id.load() >= data.total_rows.load());
 	total_rows += data.total_rows.load();
 	next_row_id = target_row_start - target_base_row_id;
 	if (is_persistent) {

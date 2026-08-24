@@ -28,6 +28,7 @@ class TableDataWriter;
 class TableIndexList;
 class TableStatistics;
 struct TableAppendState;
+struct PartitionAppendCursor;
 class DuckTransaction;
 class BoundConstraint;
 class RowGroupSegmentTree;
@@ -125,6 +126,15 @@ public:
 	optional_idx Append(DataChunk &chunk, TableAppendState &state);
 	//! Whether this collection belongs to a partitioned table
 	bool IsPartitioned() const;
+	//! Allow this collection to keep one append cursor open per partition, reserving a row group worth of rowids
+	//! for each and leaving what it does not use as a gap. Only safe where nothing assumes that rows are given
+	//! consecutive rowids in arrival order, which is why it is opt-in per collection.
+	void SetFanoutAppend(bool enabled) {
+		fanout_append = enabled;
+	}
+	bool FanoutAppend() const {
+		return fanout_append && IsPartitioned();
+	}
 	//! Seed the append state with the partition value of the row group we are about to append into, so that the
 	//! append path can tell when the incoming rows belong to another partition. Returns false if that value cannot
 	//! be established from statistics, in which case the caller must start a new row group instead
@@ -232,6 +242,12 @@ private:
 	optional_idx AppendInternal(DataChunk &chunk, TableAppendState &state);
 	//! Append a chunk to a partitioned table, breaking the row group whenever the partition value changes
 	optional_idx AppendPartitioned(DataChunk &chunk, TableAppendState &state);
+	//! Append a chunk to a partitioned table by writing each partition into its own open row group
+	optional_idx AppendFanout(DataChunk &chunk, TableAppendState &state);
+	//! Get the cursor for a partition, opening a new row group for it if it has none
+	PartitionAppendCursor &GetPartitionCursor(TableAppendState &state, const string &partition_key);
+	//! Close the row group a cursor is filling and open a fresh one for it
+	void RollPartitionCursor(TableAppendState &state, PartitionAppendCursor &cursor);
 	//! Close the row group currently being appended to and start a new one. Returns the index of the closed
 	//! row group so the caller can flush it to disk
 	idx_t StartNewRowGroup(TableAppendState &state);
@@ -269,6 +285,8 @@ private:
 	vector<MetaBlockPointer> metadata_pointers;
 	//! Controls whether the next append creates a new row group or reuses the existing one
 	RowGroupAppendMode row_group_append_mode;
+	//! Whether this collection may keep one append cursor open per partition
+	bool fanout_append = false;
 	//! Whether or not we can append to a checkpointed row group
 	bool can_append_to_checkpointed_row_group = true;
 };

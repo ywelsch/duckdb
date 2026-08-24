@@ -59,6 +59,10 @@ unique_ptr<OptimisticWriteCollection> OptimisticDataWriter::CreateCollection(Dat
 	auto max_row_id = NumericCast<idx_t>(MAX_ROW_ID);
 	auto row_groups = make_shared_ptr<RowGroupCollection>(std::move(table_info), io_manager, insert_types, max_row_id);
 
+	// this collection is transaction-local and merged into the table as whole row groups, so nothing depends on its
+	// rows getting consecutive rowids in arrival order - unless an index is built from them as they arrive
+	row_groups->SetFanoutAppend(storage.GetDataTableInfo()->GetIndexes().Empty());
+
 	auto result = make_uniq<OptimisticWriteCollection>();
 	result->collection = std::move(row_groups);
 	if (type == OptimisticWritePartialManagers::PER_COLUMN) {
