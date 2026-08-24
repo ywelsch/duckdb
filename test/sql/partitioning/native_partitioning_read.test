@@ -1,0 +1,59 @@
+# name: test/sql/partitioning/native_partitioning_read.test
+# description: Partition elimination on a partitioned table
+# group: [partitioning]
+
+load {TEST_DIR}/native_partitioning_read.db
+
+statement ok
+CREATE TABLE s(region VARCHAR, v INTEGER) PARTITIONED BY (region);
+
+statement ok
+INSERT INTO s SELECT ['EU', 'US', 'APAC', 'LATAM'][i % 4 + 1], i FROM range(200000) t(i);
+
+statement ok
+CHECKPOINT;
+
+# Partition elimination needs no operator support: one value per row group makes the existing zone map check
+# exact, so an equality filter reads exactly the row groups of that partition.
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM s WHERE region = 'EU';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 1 / 4.*
+
+query I
+SELECT count(*) FROM s WHERE region = 'EU';
+----
+50000
+
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM s WHERE region IN ('EU', 'APAC');
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 2 / 4.*
+
+query I
+SELECT count(*) FROM s WHERE region IN ('EU', 'APAC');
+----
+100000
+
+# the same data without a partition key interleaves the values, so nothing can be pruned
+statement ok
+CREATE TABLE unpartitioned(region VARCHAR, v INTEGER);
+
+statement ok
+INSERT INTO unpartitioned SELECT ['EU', 'US', 'APAC', 'LATAM'][i % 4 + 1], i FROM range(200000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM unpartitioned WHERE region = 'EU';
+----
+analyzed_plan	<REGEX>:.*Row Groups Scanned: 2 / 2.*
+
+# Grouped aggregates on the partition key could avoid their hash table entirely, but the plumbing that reports
+# SINGLE_VALUE_PARTITIONS to the optimizer is deferred along with the operator work
+# (branch yw/partitioned-aggregate-passthrough), so nothing here depends on it.
+query II
+SELECT count(*), sum(v) FROM s WHERE region = 'APAC';
+----
+50000	5000000000

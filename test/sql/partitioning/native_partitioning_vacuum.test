@@ -1,0 +1,138 @@
+# name: test/sql/partitioning/native_partitioning_vacuum.test
+# description: Checkpoint vacuum compacts row groups of a partitioned table within each partition
+# group: [partitioning]
+
+load {TEST_DIR}/native_partitioning_vacuum.db
+
+statement ok
+CREATE MACRO mixed_row_groups(tbl, col) AS TABLE
+    SELECT row_group_id
+    FROM pragma_storage_info(tbl)
+    WHERE column_name = col
+    GROUP BY row_group_id
+    HAVING count(DISTINCT stats.min::VARCHAR) > 1
+        OR count(DISTINCT stats.max::VARCHAR) > 1
+        OR bool_or(stats.min::VARCHAR IS DISTINCT FROM stats.max::VARCHAR);
+
+# keep automatic checkpoints out of the way so the un-compacted state is observable
+statement ok
+SET checkpoint_threshold='1TB';
+
+statement ok
+CREATE TABLE t(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+# Each insert starts new row groups (the trailing row group's partition is unknown to the append path), so ten
+# inserts over four partitions leave ~40 small row groups - and the row groups of one partition are NOT adjacent,
+# because every insert appends at the end of the table.
+loop i 0 10
+
+statement ok
+INSERT INTO t SELECT j % 4, j + {i} * 10000 FROM range(0, 10000) t(j);
+
+endloop
+
+query II
+SELECT count(*), sum(v) FROM t;
+----
+100000	4999950000
+
+# ten inserts x four partitions, none of them compacted yet
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('t');
+----
+40
+
+# a full checkpoint merges the row groups of each partition into one
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('t');
+----
+4
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+query II
+SELECT count(*), sum(v) FROM t;
+----
+100000	4999950000
+
+# the data survives a restart
+restart
+
+query II
+SELECT count(*), sum(v) FROM t;
+----
+100000	4999950000
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('t');
+----
+4
+
+# every partition is still complete and correctly placed
+query III
+SELECT p, count(*), sum(v) FROM t GROUP BY p ORDER BY p;
+----
+0	25000	1249950000
+1	25000	1249975000
+2	25000	1250000000
+3	25000	1250025000
+
+# deletes are reclaimed when two row groups of a partition can be merged again
+statement ok
+DELETE FROM t WHERE v % 5 <> 0;
+
+statement ok
+INSERT INTO t SELECT j % 4, 1000000 + j FROM range(0, 10000) t(j);
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('t');
+----
+4
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+query I
+SELECT count(*) FROM t;
+----
+30000
+
+# a partition that does not fit in a single row group keeps more than one, and they stay single-valued
+statement ok
+CREATE TABLE big(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+loop i 0 4
+
+statement ok
+INSERT INTO big SELECT j % 2, j + {i} * 100000 FROM range(0, 100000) t(j);
+
+endloop
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM mixed_row_groups('big', 'p');
+----
+0
+
+query II
+SELECT count(*), count(DISTINCT v) FROM big;
+----
+400000	400000

@@ -17,7 +17,15 @@
 namespace duckdb {
 
 PhysicalOperator &DuckCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
-                                                 LogicalCreateTable &op, PhysicalOperator &plan) {
+                                                 LogicalCreateTable &op, PhysicalOperator &plan_p) {
+	// CTAS produces exactly the table's columns in order, so a logical column index is also a plan column index
+	auto &base = op.info->Base();
+	vector<idx_t> partition_columns;
+	for (auto &partition_column : TableCatalogEntry::ResolvePartitionColumns(base.partition_keys, base.columns)) {
+		partition_columns.push_back(partition_column.index);
+	}
+	auto &plan = planner.GroupByPartitionKeys(plan_p, partition_columns);
+
 	bool parallel_streaming_insert = !PhysicalPlanGenerator::PreserveInsertionOrder(context, plan);
 	bool use_batch_index = PhysicalPlanGenerator::UseBatchIndex(context, plan);
 	auto num_threads = TaskScheduler::GetScheduler(context).NumberOfThreads();

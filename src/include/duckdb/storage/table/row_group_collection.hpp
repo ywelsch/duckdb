@@ -123,6 +123,8 @@ public:
 	//! Appends to the row group collection. Returns the finished row group index if a new row group has been appended
 	//! to
 	optional_idx Append(DataChunk &chunk, TableAppendState &state);
+	//! Whether this collection belongs to a partitioned table
+	bool IsPartitioned() const;
 	//! FinalizeAppend flushes an append with a variable number of rows.
 	void FinalizeAppend(TransactionData transaction, TableAppendState &state);
 	void CommitAppend(transaction_t commit_id, idx_t row_start, idx_t count);
@@ -151,6 +153,9 @@ public:
 
 	void InitializeVacuumState(CollectionCheckpointState &checkpoint_state, VacuumState &state,
 	                           optional_idx checkpoint_row_group_count);
+	//! Determine which row groups of a partitioned table may be merged together: only row groups holding the same
+	//! partition value, which are generally not adjacent
+	void BuildPartitionMergeSets(CollectionCheckpointState &checkpoint_state, VacuumState &state);
 	bool ScheduleVacuumTasks(CollectionCheckpointState &checkpoint_state, VacuumState &state, idx_t segment_idx,
 	                         bool schedule_vacuum);
 	unique_ptr<CheckpointTask> GetCheckpointTask(CollectionCheckpointState &checkpoint_state, idx_t segment_idx);
@@ -219,6 +224,14 @@ public:
 	shared_ptr<RowGroupSegmentTree> GetRowGroups() const;
 
 private:
+	//! Append a chunk that is known to belong to a single partition (or to a non-partitioned table)
+	optional_idx AppendInternal(DataChunk &chunk, TableAppendState &state);
+	//! Append a chunk to a partitioned table, breaking the row group whenever the partition value changes
+	optional_idx AppendPartitioned(DataChunk &chunk, TableAppendState &state);
+	//! Close the row group currently being appended to and start a new one. Returns the index of the closed
+	//! row group so the caller can flush it to disk
+	idx_t StartNewRowGroup(TableAppendState &state);
+
 	optional_ptr<SegmentNode<RowGroup>> NextUpdateRowGroup(RowGroupSegmentTree &row_groups, row_t *ids, idx_t &pos,
 	                                                       idx_t count) const;
 

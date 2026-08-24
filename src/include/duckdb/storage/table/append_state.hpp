@@ -120,6 +120,16 @@ struct TableAppendState {
 	TableStatistics stats;
 	//! Cached hash vector
 	Vector hashes;
+	//! The number of rows appended to each row group we have already moved past, in order, starting at
+	//! start_row_group. FinalizeAppend needs this because a row group can be closed before it is full (a partitioned
+	//! table starts a new row group whenever the partition value changes), so the number of rows a row group
+	//! received cannot be derived from the row group size.
+	vector<idx_t> row_group_append_counts;
+	//! For partitioned tables: the create_sort_key encoding of the partition value of the row group we are
+	//! currently appending to. When the next row has a different partition value we start a new row group, so that
+	//! every row group holds rows of at most one partition. Empty until the first row has been appended.
+	string current_partition_key;
+	bool has_current_partition_key = false;
 };
 
 struct ConstraintState {

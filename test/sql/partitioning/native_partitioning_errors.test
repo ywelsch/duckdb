@@ -1,0 +1,84 @@
+# name: test/sql/partitioning/native_partitioning_errors.test
+# description: What PARTITIONED BY rejects on native DuckDB tables
+# group: [partitioning]
+
+statement ok
+CREATE TABLE t(a INTEGER, b VARCHAR, g INTEGER GENERATED ALWAYS AS (a + 1));
+
+# only plain column references are supported as partition keys
+statement error
+CREATE TABLE e1(a INTEGER, ts TIMESTAMP) PARTITIONED BY (year(ts));
+----
+<REGEX>:.*PARTITIONED BY only supports references to columns of the table.*
+
+statement error
+CREATE TABLE e2(a INTEGER) PARTITIONED BY (a + 1);
+----
+<REGEX>:.*PARTITIONED BY only supports references to columns of the table.*
+
+statement error
+CREATE TABLE e3(a INTEGER) PARTITIONED BY (b);
+----
+<REGEX>:.*does not exist in the table.*
+
+statement error
+CREATE TABLE e4(a INTEGER) PARTITIONED BY (a, a);
+----
+<REGEX>:.*more than once.*
+
+statement error
+CREATE TABLE e5(a INTEGER, g INTEGER GENERATED ALWAYS AS (a + 1)) PARTITIONED BY (g);
+----
+<REGEX>:.*cannot reference the generated column.*
+
+# SORTED BY and WITH are still not supported
+statement error
+CREATE TABLE e6(a INTEGER) SORTED BY (a);
+----
+<REGEX>:.*SORTED BY is not supported for tables in a duckdb catalog.*
+
+statement error
+CREATE TABLE e7(a INTEGER) WITH ('format' = 'parquet');
+----
+<REGEX>:.*WITH clause is not supported for tables in a duckdb catalog.*
+
+# ALTER TABLE ... SET PARTITIONED BY is not implemented yet
+statement error
+ALTER TABLE t SET PARTITIONED BY (a);
+----
+<REGEX>:.*SET PARTITIONED BY is not supported for DuckDB tables.*
+
+# CTAS accepts the clause too
+statement ok
+CREATE TABLE ctas PARTITIONED BY (p) AS SELECT i % 3 AS p, i AS v FROM range(1000) t(i);
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 'ctas';
+----
+CREATE TABLE ctas(p BIGINT, v BIGINT) PARTITIONED BY (p);
+
+# a partition column cannot be dropped
+statement ok
+CREATE TABLE dropme(a INTEGER, b INTEGER) PARTITIONED BY (a);
+
+statement error
+ALTER TABLE dropme DROP COLUMN a;
+----
+<REGEX>:.*the table is partitioned by it.*
+
+statement ok
+ALTER TABLE dropme DROP COLUMN b;
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 'dropme';
+----
+CREATE TABLE dropme(a INTEGER) PARTITIONED BY (a);
+
+# renaming a partition column keeps the table partitioned by it
+statement ok
+ALTER TABLE dropme RENAME COLUMN a TO renamed;
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 'dropme';
+----
+CREATE TABLE dropme(renamed INTEGER) PARTITIONED BY (renamed);

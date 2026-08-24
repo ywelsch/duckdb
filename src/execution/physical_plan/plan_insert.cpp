@@ -10,6 +10,9 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/execution/operator/order/physical_order.hpp"
+#include "duckdb/execution/operator/join/physical_join.hpp"
+#include "duckdb/planner/bound_result_modifier.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
 namespace duckdb {
@@ -98,9 +101,50 @@ PhysicalOperator &PhysicalPlanGenerator::ResolveDefaultsProjection(LogicalInsert
 	return proj;
 }
 
+PhysicalOperator &PhysicalPlanGenerator::GroupByPartitionKeys(PhysicalOperator &plan,
+                                                              const vector<idx_t> &partition_columns) {
+	if (partition_columns.empty()) {
+		return plan;
+	}
+	// The append path starts a new row group whenever the partition value changes, so rows of the same partition
+	// have to arrive together - otherwise interleaved input produces a row group per run of equal values.
+	// FIXME: a full sort is more than we need (we only need grouping, not ordering) and it materializes the input.
+	// Partitioning the input into per-partition buffers instead would stream.
+	auto types = plan.GetTypes();
+	vector<BoundOrderByNode> orders;
+	for (auto column_index : partition_columns) {
+		orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+		                    make_uniq<BoundReferenceExpression>(types[column_index], column_index));
+	}
+	auto projection_map = PhysicalJoin::FillProjectionMap(plan, vector<ProjectionIndex>());
+	auto &order =
+	    Make<PhysicalOrder>(std::move(types), std::move(orders), std::move(projection_map), plan.estimated_cardinality);
+	order.children.push_back(plan);
+	return order;
+}
+
+//! The indices of the partition columns within a plan that produces one column per physical table column
+static vector<idx_t> GetPartitionPlanColumns(TableCatalogEntry &table) {
+	vector<idx_t> result;
+	auto &columns = table.GetColumns();
+	for (auto &partition_column : table.GetPartitionColumns()) {
+		result.push_back(columns.LogicalToPhysical(partition_column).index);
+	}
+	return result;
+}
+
 PhysicalOperator &DuckCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                           optional_ptr<PhysicalOperator> plan) {
 	D_ASSERT(plan);
+	if (!op.column_index_map.empty()) {
+		//! Deprecated: The column_index_map is only populated by older versions.
+		plan = planner.ResolveDefaultsProjection(op, *plan);
+	}
+	if (!op.return_chunk) {
+		// RETURNING would expose the reordering, so leave those inserts alone
+		plan = planner.GroupByPartitionKeys(*plan, GetPartitionPlanColumns(op.table));
+	}
+	// the flags below depend on the shape of the plan, so they are computed after the rewrites above
 	bool parallel_streaming_insert = !PhysicalPlanGenerator::PreserveInsertionOrder(context, *plan);
 	bool use_batch_index = PhysicalPlanGenerator::UseBatchIndex(context, *plan);
 	auto num_threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
@@ -117,10 +161,6 @@ PhysicalOperator &DuckCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 		// When we potentially need to perform updates, we have to check that row is not updated twice
 		// that currently needs to be done for every chunk, which would add a huge bottleneck to parallelized insertion
 		parallel_streaming_insert = false;
-	}
-	if (!op.column_index_map.empty()) {
-		//! Deprecated: The column_index_map is only populated by older versions.
-		plan = planner.ResolveDefaultsProjection(op, *plan);
 	}
 	if (use_batch_index && !parallel_streaming_insert) {
 		auto &insert = planner.Make<PhysicalBatchInsert>(op.types, op.table.Cast<DuckTableEntry>(),

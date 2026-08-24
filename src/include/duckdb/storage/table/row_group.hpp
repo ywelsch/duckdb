@@ -226,6 +226,10 @@ public:
 	void GetColumnSegmentInfo(const QueryContext &context, idx_t row_group_index, vector<ColumnSegmentInfo> &result,
 	                          const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {});
 	static PartitionStatistics GetPartitionStats(SegmentNode<RowGroup> &row_group, TransactionData transaction);
+	//! If this row group is known to hold exactly one distinct, exactly-represented value for each of the given
+	//! columns, writes those values to result and returns true. Derived from the persisted statistics alone, so it
+	//! is conservative: a row group that does hold a single value can still be reported as unknown.
+	bool TryGetConstantColumnValues(const vector<column_t> &column_ids, vector<Value> &result);
 
 	idx_t GetAllocationSize() const {
 		return allocation_size;

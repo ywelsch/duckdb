@@ -1,0 +1,227 @@
+# name: test/sql/partitioning/native_partitioning.test
+# description: PARTITIONED BY on native DuckDB tables - every row group holds at most one partition value
+# group: [partitioning]
+
+# The partition value of a row group is established the way the read side has to establish it: from the
+# persisted per-row-group statistics of the partition column. A row group that mixes two partition values
+# has min != max.
+load {TEST_DIR}/native_partitioning.db
+
+statement ok
+CREATE MACRO mixed_row_groups(tbl, col) AS TABLE
+    SELECT row_group_id
+    FROM pragma_storage_info(tbl)
+    WHERE column_name = col
+    GROUP BY row_group_id
+    HAVING count(DISTINCT stats.min::VARCHAR) > 1
+        OR count(DISTINCT stats.max::VARCHAR) > 1
+        OR bool_or(stats.min::VARCHAR IS DISTINCT FROM stats.max::VARCHAR);
+
+statement ok
+CREATE TABLE t(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+# the partition key round-trips through the catalog
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 't';
+----
+CREATE TABLE t(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO t SELECT i % 4, i FROM range(300000) t(i) ORDER BY i % 4;
+
+query II
+SELECT count(*), sum(v) FROM t;
+----
+300000	44999850000
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+# more rows than a single row group per partition, so partitions span several row groups
+statement ok
+INSERT INTO t SELECT 100 + i % 2, i FROM range(400000) t(i) ORDER BY i % 2;
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+query II
+SELECT count(*), sum(v) FROM t;
+----
+700000	124999650000
+
+# the invariant survives a checkpoint and a restart
+statement ok
+CHECKPOINT;
+
+restart
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 't';
+----
+CREATE TABLE t(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+# ... and across deletes and updates of non-partition columns
+statement ok
+DELETE FROM t WHERE v % 7 = 0;
+
+statement ok
+UPDATE t SET v = v + 1 WHERE p = 2;
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+# unsorted input still upholds the invariant - it just fragments into more row groups
+statement ok
+CREATE TABLE unsorted(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO unsorted SELECT i % 8, i FROM range(20000) t(i);
+
+query I
+SELECT count(*) FROM mixed_row_groups('unsorted', 'p');
+----
+0
+
+query II
+SELECT count(*), sum(v) FROM unsorted;
+----
+20000	199990000
+
+# compound partition keys
+statement ok
+CREATE TABLE compound(a INTEGER, b VARCHAR, v INTEGER) PARTITIONED BY (a, b);
+
+statement ok
+INSERT INTO compound SELECT i % 3, ['x', 'y'][i % 2 + 1], i FROM range(60000) t(i) ORDER BY i % 3, i % 2;
+
+query I
+SELECT count(*) FROM mixed_row_groups('compound', 'a');
+----
+0
+
+query I
+SELECT count(*) FROM mixed_row_groups('compound', 'b');
+----
+0
+
+query II
+SELECT count(*), sum(v) FROM compound;
+----
+60000	1799970000
+
+# NULLs form their own partition
+statement ok
+CREATE TABLE with_nulls(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO with_nulls SELECT CASE WHEN i % 3 = 0 THEN NULL ELSE i % 3 END, i FROM range(30000) t(i) ORDER BY i % 3;
+
+query II
+SELECT count(*), count(p) FROM with_nulls;
+----
+30000	20000
+
+query I
+SELECT count(*) FROM mixed_row_groups('with_nulls', 'p');
+----
+0
+
+# a partitioned table can be altered - the partition columns follow the column they refer to
+statement ok
+ALTER TABLE t ADD COLUMN extra INTEGER DEFAULT 42;
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 't';
+----
+CREATE TABLE t(p INTEGER, v INTEGER, extra INTEGER DEFAULT(42)) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO t VALUES (7, 1, 1);
+
+query I
+SELECT count(*) FROM mixed_row_groups('t', 'p');
+----
+0
+
+# an insert whose input is not grouped by partition is grouped by the planner, so it does not fragment
+# into one row group per run of equal values
+statement ok
+CREATE TABLE interleaved(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO interleaved SELECT i % 8, i FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM mixed_row_groups('interleaved', 'p');
+----
+0
+
+# the exact count depends on how the parallel insert splits batches, but it must stay proportional to the
+# number of partitions rather than to the number of rows (which would be 200000 without grouping)
+query I
+SELECT count(DISTINCT row_group_id) <= 32 FROM pragma_storage_info('interleaved');
+----
+true
+
+# the same holds for CREATE TABLE AS
+statement ok
+CREATE TABLE ctas PARTITIONED BY (p) AS SELECT i % 8 AS p, i AS v FROM range(200000) t(i);
+
+query I
+SELECT count(*) FROM mixed_row_groups('ctas', 'p');
+----
+0
+
+query I
+SELECT count(DISTINCT row_group_id) <= 32 FROM pragma_storage_info('ctas');
+----
+true
+
+# updating a partition column moves the row into its new partition instead of updating in place
+statement ok
+CREATE TABLE moved(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO moved SELECT i % 4, i FROM range(40000) t(i);
+
+statement ok
+UPDATE moved SET p = 99 WHERE v % 1000 = 0;
+
+query II
+SELECT count(*) FILTER (p = 99), count(*) FROM moved;
+----
+40	40000
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM mixed_row_groups('moved', 'p');
+----
+0
+
+# updating a non-partition column stays an in-place update and keeps the layout
+statement ok
+UPDATE moved SET v = v + 1 WHERE p = 1;
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM mixed_row_groups('moved', 'p');
+----
+0
