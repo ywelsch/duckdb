@@ -26,10 +26,14 @@ public:
 public:
 	PhysicalPartitionedAggregate(PhysicalPlan &physical_plan, ClientContext &context, vector<LogicalType> types,
 	                             vector<unique_ptr<Expression>> expressions, vector<unique_ptr<Expression>> groups,
-	                             vector<column_t> partitions, idx_t estimated_cardinality);
+	                             vector<column_t> partitions, vector<unique_ptr<Expression>> partition_exprs,
+	                             idx_t estimated_cardinality);
 
 	//! The partitions over which this is grouped
 	vector<column_t> partitions;
+	//! Per partition, the transformation the plan applies between the scan and this operator (null if none).
+	//! The source hands out the raw column value, but we group on the result of this expression
+	vector<unique_ptr<Expression>> partition_exprs;
 	//! The groups over which the aggregate is partitioned - note that this is only
 	vector<unique_ptr<Expression>> groups;
 	//! The aggregates that have to be computed

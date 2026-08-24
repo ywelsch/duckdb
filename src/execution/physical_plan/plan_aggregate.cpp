@@ -8,6 +8,7 @@
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
@@ -30,7 +31,8 @@ hugeint_t GetRangeHugeint(const BaseStatistics &nstats) {
 }
 
 static bool CanUsePartitionedAggregate(ClientContext &context, LogicalAggregate &op, PhysicalOperator &child,
-                                       vector<column_t> &partition_columns) {
+                                       vector<column_t> &partition_columns,
+                                       vector<unique_ptr<Expression>> &partition_exprs) {
 	if (op.grouping_sets.size() > 1 || !op.grouping_functions.empty()) {
 		return false;
 	}
@@ -42,12 +44,47 @@ static bool CanUsePartitionedAggregate(ClientContext &context, LogicalAggregate 
 		}
 	}
 
-	return PhysicalPlanGenerator::HasSingleValuePartitions(context, op.groups, child, partition_columns);
+	return PhysicalPlanGenerator::HasSingleValuePartitions(context, op.groups, child, partition_columns,
+	                                                       partition_exprs);
+}
+
+//! The single bound reference inside a projection expression that a partition value flows through. Returns false
+//! unless the expression depends on exactly one input column and is deterministic - only then does a row group that
+//! holds a single value for that column also hold a single value for the expression.
+static bool TryGetSingleColumnRef(const Expression &expr, idx_t &result) {
+	if (expr.IsVolatile() || !expr.IsConsistent()) {
+		return false;
+	}
+	bool found = false;
+	bool multiple_columns = false;
+	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+		if (child.GetExpressionType() != ExpressionType::BOUND_REF) {
+			return;
+		}
+		auto index = child.Cast<BoundReferenceExpression>().Index();
+		if (found && index != result) {
+			multiple_columns = true;
+		}
+		found = true;
+		result = index;
+	});
+	return found && !multiple_columns;
+}
+
+//! Replace the bound reference inside expr with child, so that expr(child(x)) can be evaluated in one go
+static void SubstituteBoundRef(unique_ptr<Expression> &expr, unique_ptr<Expression> child) {
+	if (expr->GetExpressionType() == ExpressionType::BOUND_REF) {
+		expr = std::move(child);
+		return;
+	}
+	ExpressionIterator::EnumerateChildren(
+	    *expr, [&](unique_ptr<Expression> &grandchild) { SubstituteBoundRef(grandchild, std::move(child)); });
 }
 
 bool PhysicalPlanGenerator::HasSingleValuePartitions(ClientContext &context,
                                                      const vector<unique_ptr<Expression>> &partitions,
-                                                     PhysicalOperator &child, vector<column_t> &partition_columns) {
+                                                     PhysicalOperator &child, vector<column_t> &partition_columns,
+                                                     vector<unique_ptr<Expression>> &partition_exprs) {
 	// check if the source is partitioned by the aggregate columns
 	// figure out the columns we are grouping by
 	for (auto &group_expr : partitions) {
@@ -57,6 +94,7 @@ bool PhysicalPlanGenerator::HasSingleValuePartitions(ClientContext &context,
 		}
 		auto &ref = group_expr->Cast<BoundReferenceExpression>();
 		partition_columns.push_back(ref.Index());
+		partition_exprs.push_back(nullptr);
 	}
 	// traverse the children of the aggregate to find the source operator
 	reference<PhysicalOperator> child_ref(child);
@@ -67,14 +105,28 @@ bool PhysicalPlanGenerator::HasSingleValuePartitions(ClientContext &context,
 			// recompute partition columns
 			auto &projection = child_op.Cast<PhysicalProjection>();
 			vector<column_t> new_columns;
-			for (auto &partition_col : partition_columns) {
-				// we only support bound reference here
-				auto &expr = projection.select_list[partition_col];
-				if (expr->GetExpressionType() != ExpressionType::BOUND_REF) {
+			for (idx_t i = 0; i < partition_columns.size(); i++) {
+				auto &expr = projection.select_list[partition_columns[i]];
+				if (expr->GetExpressionType() == ExpressionType::BOUND_REF) {
+					new_columns.push_back(expr->Cast<BoundReferenceExpression>().Index());
+					continue;
+				}
+				// the projection transforms the partition column (e.g. the cast or compression that
+				// compressed_materialization introduces). A deterministic function of a single column is still
+				// constant within a row group, so keep going - but remember the transformation, because the
+				// consumer groups on its result rather than on the raw column value
+				idx_t ref_index;
+				if (!TryGetSingleColumnRef(*expr, ref_index)) {
 					return false;
 				}
-				auto &ref = expr->Cast<BoundReferenceExpression>();
-				new_columns.push_back(ref.Index());
+				new_columns.push_back(ref_index);
+				auto expr_copy = expr->Copy();
+				if (partition_exprs[i]) {
+					// an outer transformation was already recorded - nest this one inside it
+					SubstituteBoundRef(partition_exprs[i], std::move(expr_copy));
+				} else {
+					partition_exprs[i] = std::move(expr_copy);
+				}
 			}
 			// continue into child node with new columns
 			partition_columns = std::move(new_columns);
@@ -114,7 +166,35 @@ bool PhysicalPlanGenerator::HasSingleValuePartitions(ClientContext &context,
 		// we only support single-value partitions currently
 		return false;
 	}
+	// the recorded transformations are evaluated against a chunk holding just the raw partition value, so their
+	// bound references have to point at column 0
+	for (auto &partition_expr : partition_exprs) {
+		if (!partition_expr) {
+			continue;
+		}
+		ExpressionIterator::EnumerateExpression(partition_expr, [](unique_ptr<Expression> &child) {
+			if (child->GetExpressionType() == ExpressionType::BOUND_REF) {
+				child->Cast<BoundReferenceExpression>().IndexMutable() = 0;
+			}
+		});
+	}
 	// we have single value partitions!
+	return true;
+}
+
+bool PhysicalPlanGenerator::HasSingleValuePartitionColumns(ClientContext &context,
+                                                           const vector<unique_ptr<Expression>> &partitions,
+                                                           PhysicalOperator &child,
+                                                           vector<column_t> &partition_columns) {
+	vector<unique_ptr<Expression>> partition_exprs;
+	if (!HasSingleValuePartitions(context, partitions, child, partition_columns, partition_exprs)) {
+		return false;
+	}
+	for (auto &partition_expr : partition_exprs) {
+		if (partition_expr) {
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -276,11 +356,13 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalAggregate &op) {
 	// groups! create a GROUP BY aggregator
 	// use a partitioned or perfect hash aggregate if possible
 	vector<column_t> partition_columns;
+	vector<unique_ptr<Expression>> partition_exprs;
 	vector<idx_t> required_bits;
-	if (can_use_simple_aggregation && CanUsePartitionedAggregate(context, op, plan, partition_columns)) {
-		auto &group_by =
-		    Make<PhysicalPartitionedAggregate>(context, op.types, std::move(op.expressions), std::move(op.groups),
-		                                       std::move(partition_columns), op.estimated_cardinality);
+	if (can_use_simple_aggregation &&
+	    CanUsePartitionedAggregate(context, op, plan, partition_columns, partition_exprs)) {
+		auto &group_by = Make<PhysicalPartitionedAggregate>(context, op.types, std::move(op.expressions),
+		                                                    std::move(op.groups), std::move(partition_columns),
+		                                                    std::move(partition_exprs), op.estimated_cardinality);
 		group_by.children.push_back(plan);
 		return group_by;
 	}
