@@ -731,17 +731,6 @@ bool RowGroupCollection::TrySeedPartitionKey(TableAppendState &state, RowGroup &
 	return true;
 }
 
-bool RowGroupCollection::HasSingleValuePartitions(const vector<column_t> &column_ids) {
-	auto row_groups = GetRowGroups();
-	vector<Value> values;
-	for (auto &node : row_groups->SegmentNodes()) {
-		if (!node.GetNode().TryGetConstantColumnValues(column_ids, values)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 bool RowGroupCollection::IsPartitioned() const {
 	return !info->GetPartitionColumns().empty();
 }

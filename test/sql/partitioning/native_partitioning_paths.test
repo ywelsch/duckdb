@@ -1,0 +1,128 @@
+# name: test/sql/partitioning/native_partitioning_paths.test
+# description: Every insert path lays a partitioned table out, and the limits of that
+# group: [partitioning]
+
+load {TEST_DIR}/native_partitioning_paths.db
+
+statement ok
+CREATE MACRO mixed_row_groups(tbl, col) AS TABLE
+    SELECT row_group_id
+    FROM pragma_storage_info(tbl)
+    WHERE column_name = col
+    GROUP BY row_group_id
+    HAVING count(DISTINCT stats.min::VARCHAR) > 1
+        OR count(DISTINCT stats.max::VARCHAR) > 1
+        OR bool_or(stats.min::VARCHAR IS DISTINCT FROM stats.max::VARCHAR);
+
+statement ok
+SET checkpoint_threshold='1TB';
+
+# INSERT ... RETURNING is grouped like any other insert. That reorders what it hands back - the rows come out in
+# storage order, not input order - which is the deliberate trade: skipping the grouping would leave the table with
+# row groups holding every partition.
+statement ok
+CREATE TABLE returning_tbl(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO returning_tbl SELECT i % 8, i FROM range(200000) t(i) RETURNING p;
+
+query I
+SELECT count(*) FROM mixed_row_groups('returning_tbl', 'p');
+----
+0
+
+query I
+SELECT count(DISTINCT row_group_id) <= 16 FROM pragma_storage_info('returning_tbl');
+----
+true
+
+query II
+SELECT count(*), sum(v) FROM returning_tbl;
+----
+200000	19999900000
+
+# COPY ... FROM is planned as an insert, so it is grouped too
+statement ok
+COPY (SELECT i % 8 AS p, i AS v FROM range(200000) t(i)) TO '{TEST_DIR}/native_partitioning_paths.csv';
+
+statement ok
+CREATE TABLE copied(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+COPY copied FROM '{TEST_DIR}/native_partitioning_paths.csv';
+
+query I
+SELECT count(*) FROM mixed_row_groups('copied', 'p');
+----
+0
+
+query I
+SELECT count(DISTINCT row_group_id) <= 16 FROM pragma_storage_info('copied');
+----
+true
+
+# A table with an index is laid out normally on append - only compaction is affected (see below)
+statement ok
+CREATE TABLE indexed(p INTEGER, v INTEGER PRIMARY KEY) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO indexed SELECT j % 4, j FROM range(0, 40000) t(j);
+
+statement ok
+INSERT INTO indexed SELECT j % 4, 100000 + j FROM range(0, 40000) t(j);
+
+query I
+SELECT count(*) FROM mixed_row_groups('indexed', 'p');
+----
+0
+
+query II
+SELECT count(*), (SELECT count(*) FROM indexed WHERE v = 100001) FROM indexed;
+----
+80000	1
+
+# Two row groups per partition, each well under the row group size, so compaction could merge them into one.
+# It does not: partition merge sets are only built when rowids may be renumbered freely, and the incremental
+# index remap (VacuumIndexStrategy::REMAP) derives new rowids positionally within a contiguous merge, which a
+# sparse partition merge cannot express. So an indexed partitioned table never compacts.
+# This test pins that limitation - it should start failing when REMAP learns to take an explicit mapping.
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('indexed');
+----
+8
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('indexed');
+----
+8
+
+query I
+SELECT count(*) FROM mixed_row_groups('indexed', 'p');
+----
+0
+
+# the same shape without an index does compact
+statement ok
+CREATE TABLE unindexed(p INTEGER, v INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO unindexed SELECT j % 4, j FROM range(0, 40000) t(j);
+
+statement ok
+INSERT INTO unindexed SELECT j % 4, 100000 + j FROM range(0, 40000) t(j);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('unindexed');
+----
+8
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('unindexed');
+----
+4

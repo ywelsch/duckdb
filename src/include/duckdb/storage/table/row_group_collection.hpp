@@ -125,9 +125,6 @@ public:
 	optional_idx Append(DataChunk &chunk, TableAppendState &state);
 	//! Whether this collection belongs to a partitioned table
 	bool IsPartitioned() const;
-	//! Whether every row group holds at most one distinct value for each of the given columns. Note that this
-	//! forces every row group's metadata to be loaded
-	bool HasSingleValuePartitions(const vector<column_t> &column_ids);
 	//! Seed the append state with the partition value of the row group we are about to append into, so that the
 	//! append path can tell when the incoming rows belong to another partition. Returns false if that value cannot
 	//! be established from statistics, in which case the caller must start a new row group instead
