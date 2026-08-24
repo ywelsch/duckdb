@@ -2,17 +2,33 @@
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/common/types/value_map.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 
 namespace duckdb {
 
-PhysicalPartitionedAggregate::PhysicalPartitionedAggregate(PhysicalPlan &physical_plan, ClientContext &context,
-                                                           vector<LogicalType> types,
-                                                           vector<unique_ptr<Expression>> aggregates_p,
-                                                           vector<unique_ptr<Expression>> groups_p,
-                                                           vector<column_t> partitions_p, idx_t estimated_cardinality)
+PhysicalPartitionedAggregate::PhysicalPartitionedAggregate(
+    PhysicalPlan &physical_plan, ClientContext &context, vector<LogicalType> types,
+    vector<unique_ptr<Expression>> aggregates_p, vector<unique_ptr<Expression>> groups_p, vector<column_t> partitions_p,
+    vector<unique_ptr<Expression>> partition_exprs_p, idx_t estimated_cardinality)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::PARTITIONED_AGGREGATE, std::move(types),
                        estimated_cardinality),
-      partitions(std::move(partitions_p)), groups(std::move(groups_p)), aggregates(std::move(aggregates_p)) {
+      partitions(std::move(partitions_p)), partition_exprs(std::move(partition_exprs_p)), groups(std::move(groups_p)),
+      aggregates(std::move(aggregates_p)) {
+}
+
+//! Turn the raw partition value the source handed out into the value this operator groups on
+static Value ApplyPartitionExpression(ClientContext &context, const Expression &expr, const Value &partition_value) {
+	DataChunk input;
+	vector<LogicalType> input_types {partition_value.type()};
+	input.Initialize(Allocator::Get(context), input_types, 1);
+	input.data[0].SetValue(0, partition_value);
+	input.SetCardinalityUnsafe(1);
+
+	Vector result(expr.GetReturnType(), 1);
+	ExpressionExecutor executor(context);
+	executor.AddExpression(expr);
+	executor.ExecuteExpression(input, result);
+	return result.GetValue(0);
 }
 
 OperatorPartitionInfo PhysicalPartitionedAggregate::RequiredPartitionInfo() const {
@@ -103,7 +119,11 @@ SinkResultType PhysicalPartitionedAggregate::Sink(ExecutionContext &context, Dat
 			auto column_name = to_string(partition_idx);
 			auto &partition = input.local_state.partition_info.partition_data[partition_idx];
 			D_ASSERT(Value::NotDistinctFrom(partition.min_val, partition.max_val));
-			partition_values.emplace_back(make_pair(std::move(column_name), partition.min_val));
+			auto &partition_expr = partition_exprs[partition_idx];
+			auto partition_value = partition_expr
+			                           ? ApplyPartitionExpression(context.client, *partition_expr, partition.min_val)
+			                           : partition.min_val;
+			partition_values.emplace_back(make_pair(std::move(column_name), std::move(partition_value)));
 		}
 		lstate.current_partition = Value::STRUCT(std::move(partition_values));
 

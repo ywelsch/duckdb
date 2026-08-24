@@ -110,8 +110,16 @@ public:
 	//! The order preservation type of the given operator decided by recursively looking at its children
 	static OrderPreservationType OrderPreservationRecursive(PhysicalOperator &op);
 	//! Determine whether a child has a single value partitioning for the given expressions.
+	//! partition_exprs receives, per partition column, the expression chain the plan applies between the scan and
+	//! the consumer (null if the value is passed through unchanged), so the consumer can turn the scan's raw
+	//! partition value into the value it is grouping on. Its single bound reference is index 0.
 	static bool HasSingleValuePartitions(ClientContext &context, const vector<unique_ptr<Expression>> &partitions,
-	                                     PhysicalOperator &child, vector<column_t> &partition_columns);
+	                                     PhysicalOperator &child, vector<column_t> &partition_columns,
+	                                     vector<unique_ptr<Expression>> &partition_exprs);
+	//! As above, but only when the partition values reach the consumer unchanged - for consumers that use the
+	//! value as a partition identity and would wrongly split a partition if two raw values mapped onto one
+	static bool HasSingleValuePartitionColumns(ClientContext &context, const vector<unique_ptr<Expression>> &partitions,
+	                                           PhysicalOperator &child, vector<column_t> &partition_columns);
 	//! Make a physical operator in the physical plan.
 	template <class T, class... ARGS>
 	PhysicalOperator &Make(ARGS &&... args) {
