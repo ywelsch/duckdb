@@ -53,14 +53,7 @@ analyzed_plan	<REGEX>:.*Row Groups Scanned: 2 / 2.*
 # A grouped aggregate on the partition key needs no hash table: the scan reports SINGLE_VALUE_PARTITIONS and
 # hands the partition value of each row group to the aggregate.
 #
-# compressed_materialization interposes a compress/decompress projection between the scan and the aggregate, and
-# the walk that decides whether the source is single-value partitioned only passes through projections that are a
-# plain column reference - so under default settings it loses the trail and the aggregate is not chosen. Teaching
-# it to pass through single-column transformations is deferred (branch yw/partitioned-aggregate-passthrough), so
-# the optimizer is disabled here to exercise the operator.
-statement ok
-SET disabled_optimizers='compressed_materialization';
-
+# This works through the compress/decompress projections that compressed_materialization interposes.
 query II
 EXPLAIN SELECT region, count(*) FROM s GROUP BY region;
 ----
