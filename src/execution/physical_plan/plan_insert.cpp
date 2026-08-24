@@ -108,8 +108,16 @@ PhysicalOperator &PhysicalPlanGenerator::GroupByPartitionKeys(PhysicalOperator &
 	}
 	// The append path starts a new row group whenever the partition value changes, so rows of the same partition
 	// have to arrive together - otherwise interleaved input produces a row group per run of equal values.
-	// FIXME: a full sort is more than we need (we only need grouping, not ordering) and it materializes the input.
-	// Partitioning the input into per-partition buffers instead would stream.
+	//
+	// A full sort is more than this needs in principle, since only grouping matters and not ordering, and it
+	// materializes the input: a 20M row insert into 16 partitions spills ~720MB under a 250MB memory limit.
+	// Holding rows back in per-partition buffers instead was tried and is worse on both counts. The buffers are
+	// themselves memory that spills under the same limit, so the temp footprint went up rather than down, and
+	// bounding them means flushing partial partitions, which leaves row groups holding two adjacent partition
+	// values - so an equality filter went from reading one row group to reading three. Bounded-memory buffering
+	// cannot reproduce what a global sort gives here.
+	// What would: handing each writer whole partitions rather than a slice of every partition, i.e. an exchange
+	// that repartitions the stream by the partition key. That does not exist for inserts today.
 	auto types = plan.GetTypes();
 	vector<BoundOrderByNode> orders;
 	for (auto column_index : partition_columns) {
