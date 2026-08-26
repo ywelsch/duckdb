@@ -97,9 +97,9 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	transaction_t unique_start_time = current_start_timestamp++;
 	transaction_t transaction_id = current_transaction_id++;
 	// snapshots must not observe commits that are not yet durable, nor a newer catalog version
-	auto snapshot_bound = GetSnapshotBound();
-	auto start_time = MinValue<transaction_t>(unique_start_time, snapshot_bound.start_time);
-	auto catalog_version = MinValue<idx_t>(last_committed_version, snapshot_bound.catalog_version);
+	auto caps = GetDurabilityCaps();
+	auto start_time = MinValue<transaction_t>(unique_start_time, caps.snapshot_bound);
+	auto catalog_version = MinValue<idx_t>(last_committed_version, caps.catalog_version);
 	if (active_transactions.empty()) {
 		lowest_active_start = start_time;
 		lowest_active_id = transaction_id;
@@ -297,9 +297,9 @@ bool DuckTransactionManager::HasUnsyncedCommits() {
 	return !unsynced_commits.empty();
 }
 
-DuckTransactionManager::SnapshotBound DuckTransactionManager::GetSnapshotBound() {
+DuckTransactionManager::DurabilityCaps DuckTransactionManager::GetDurabilityCaps() {
 	lock_guard<mutex> guard(durability_lock);
-	SnapshotBound bound;
+	DurabilityCaps caps;
 	for (auto &entry : unsynced_commits) {
 		if (entry.commit_id <= durable_commit_bound) {
 			// durable already - its own thread has not removed the entry yet
@@ -307,11 +307,11 @@ DuckTransactionManager::SnapshotBound DuckTransactionManager::GetSnapshotBound()
 		}
 		// the first commit that is not durable: a snapshot stops below it, and the catalog version
 		// recorded just before it published is exactly the one that snapshot observes
-		bound.start_time = entry.commit_id;
-		bound.catalog_version = entry.catalog_version;
+		caps.snapshot_bound = entry.commit_id;
+		caps.catalog_version = entry.catalog_version;
 		break;
 	}
-	return bound;
+	return caps;
 }
 
 void DuckTransactionManager::RegisterUnsyncedCommit(transaction_t commit_id, idx_t wal_offset, idx_t catalog_version) {
@@ -369,7 +369,7 @@ DuckTransactionManager::UpdateTransactionHorizon(optional_ptr<DuckTransaction> e
 		horizon.lowest_transaction_id = MinValue(horizon.lowest_transaction_id, active_transaction->transaction_id);
 	}
 	// commits pending durability pin the horizon: bounded snapshots may need their old versions
-	horizon.lowest_start_time = MinValue<transaction_t>(horizon.lowest_start_time, GetSnapshotBound().start_time);
+	horizon.lowest_start_time = MinValue<transaction_t>(horizon.lowest_start_time, GetDurabilityCaps().snapshot_bound);
 	lowest_active_start = horizon.lowest_start_time;
 	lowest_active_id = horizon.lowest_transaction_id;
 	return horizon;

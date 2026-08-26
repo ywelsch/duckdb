@@ -137,16 +137,16 @@ private:
 	//! Sweep transactions pinned only by not-yet-durable commits; nothing else re-triggers it
 	void GarbageCollectDurableTransactions();
 	bool HasUnsyncedCommits();
-	struct SnapshotBound {
-		//! The highest start time that observes only durable commits
-		transaction_t start_time = MAX_TRANSACTION_ID;
+	struct DurabilityCaps {
+		//! The highest snapshot bound that observes only durable commits
+		transaction_t snapshot_bound = MAX_TRANSACTION_ID;
 		//! The catalog version that snapshot observes. Prepared statements compare versions for
 		//! equality, so this has to be exact: any other value can match a plan bound against a
 		//! different catalog state and skip a re-bind that was needed
 		idx_t catalog_version = DConstants::INVALID_INDEX;
 	};
-	//! The snapshot bound while commits are pending durability (unbounded otherwise)
-	SnapshotBound GetSnapshotBound();
+	//! The caps a new snapshot must respect while commits are pending durability (none otherwise)
+	DurabilityCaps GetDurabilityCaps();
 
 	//! Commits are published before their WAL flush marker is synced: until then they are tracked
 	//! here and new snapshots are bounded below them, so no transaction can observe a commit a
