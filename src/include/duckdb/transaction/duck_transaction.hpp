@@ -28,23 +28,23 @@ struct DataTableInfo;
 struct UndoBufferProperties;
 
 struct CommitInfo {
-	transaction_t commit_id;
+	CommitId commit_id;
 	ActiveTransactionState active_transactions = ActiveTransactionState::UNSET;
 	optional_ptr<CommitDropState> drop_state;
 };
 
 class DuckTransaction : public Transaction {
 public:
-	DuckTransaction(DuckTransactionManager &manager, ClientContext &context, transaction_t start_time,
-	                transaction_t transaction_id, idx_t catalog_version);
+	DuckTransaction(DuckTransactionManager &manager, ClientContext &context, CommitId start_time,
+	                TransactionId transaction_id, idx_t catalog_version);
 	~DuckTransaction() override;
 
 	//! The start timestamp of this transaction
-	transaction_t start_time;
+	CommitId start_time;
 	//! The transaction id of this transaction
-	transaction_t transaction_id;
+	TransactionId transaction_id;
 	//! The commit id of this transaction, if it has successfully been committed
-	transaction_t commit_id;
+	CommitId commit_id;
 
 	atomic<idx_t> catalog_version;
 

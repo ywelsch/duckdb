@@ -20,18 +20,20 @@ class Transaction;
 //! holding them separately invites pairing the wrong two, which no type can catch once both are
 //! SnapshotId.
 struct SnapshotView {
-	SnapshotView(transaction_t snapshot_bound_p, transaction_t transaction_id_p)
+	SnapshotView(SnapshotBound snapshot_bound_p, TransactionId transaction_id_p)
 	    : snapshot_bound(snapshot_bound_p), transaction_id(transaction_id_p) {
 	}
 
 	//! The bound this reads at
-	transaction_t snapshot_bound;
+	SnapshotBound snapshot_bound;
 	//! The id of the transaction reading, so it can see what it has written itself
-	transaction_t transaction_id;
+	TransactionId transaction_id;
 
-	//! Whether a stamp is visible from here: committed below the bound, or written by us
-	bool Sees(transaction_t stamp) const {
-		return stamp.VisibleTo(snapshot_bound) || stamp == transaction_id;
+	//! Whether a stamp is visible from here. The two cases are stated, rather than left to the
+	//! number line: an uncommitted stamp is visible only if it is ours.
+	bool Sees(Stamp stamp) const {
+		return stamp.IsCommitted() ? stamp.AsCommitId().Below(snapshot_bound)
+		                           : stamp.AsTransactionId() == transaction_id;
 	}
 };
 

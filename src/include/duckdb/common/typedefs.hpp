@@ -28,63 +28,122 @@ typedef const data_t *const_data_ptr_t;
 
 //! Type used for the selection vector
 typedef uint32_t sel_t;
-//! A point on the transaction timeline. Stamps below TRANSACTION_ID_START are commit ids, and the
-//! snapshot bounds derived from them; stamps at or above it are ids of transactions that have not
-//! committed, so a stamp says by itself whether the transaction that wrote it committed. Catalog
-//! versions borrow the same split. Deliberately offers no ordering operators: every comparison goes
-//! through a named method that says which question is being asked.
-struct SnapshotId {
-	//! 2^62 - the split between commit ids below and transaction ids above
-	static constexpr idx_t TRANSACTION_ID_START_VALUE = 4611686018427388000ULL;
+//===--------------------------------------------------------------------===//
+// The transaction timeline, as three domains rather than one number
+//===--------------------------------------------------------------------===//
 
-	SnapshotId() = default;
-	explicit constexpr SnapshotId(idx_t value_p) : value(value_p) {
-	}
+//! 2^62 - the split between commit ids below and transaction ids above
+static constexpr idx_t TRANSACTION_ID_START_VALUE = 4611686018427388000ULL;
 
-	//! Whether the transaction that stamped this has committed
-	constexpr bool IsCommitted() const {
-		return value < TRANSACTION_ID_START_VALUE;
+struct SnapshotBound;
+
+//! A transaction that has committed. Ordered against a bound, never against a transaction id.
+struct CommitId {
+	CommitId() = default;
+	explicit constexpr CommitId(idx_t value_p) : value(value_p) {
 	}
-	//! Whether this stamp is visible to a snapshot bounded by `bound`: stamps below the bound are
-	//! visible, stamps at or above it are not. Not every bound is a transaction's start time -
-	//! callers also derive one from a commit id, or from the last commit.
-	constexpr bool VisibleTo(SnapshotId bound) const {
-		return value < bound.value;
-	}
-	//! The lower of two stamps - for folding a horizon over the active transactions
-	static constexpr SnapshotId Min(SnapshotId a, SnapshotId b) {
-		return a.value < b.value ? a : b;
-	}
-	//! The higher of two stamps
-	static constexpr SnapshotId Max(SnapshotId a, SnapshotId b) {
-		return a.value > b.value ? a : b;
-	}
-	//! The next stamp on the timeline - turns an inclusive bound into an exclusive one
-	constexpr SnapshotId Next() const {
-		return SnapshotId(value + 1);
-	}
-	//! The previous stamp on the timeline
-	constexpr SnapshotId Prev() const {
-		return SnapshotId(value - 1);
-	}
-	//! The raw stamp - only for serialization and logging
+	//! Whether this commit is below (visible to) the given bound
+	bool Below(SnapshotBound bound) const;
 	constexpr idx_t GetIndex() const {
 		return value;
 	}
-
+	constexpr CommitId Next() const {
+		return CommitId(value + 1);
+	}
 	idx_t value = 0;
 };
 
-//! Free functions, not members: a member operator would not convert an atomic<SnapshotId> on the left
-constexpr bool operator==(SnapshotId a, SnapshotId b) {
+//! A transaction still in flight. Only ever compared for identity.
+struct TransactionId {
+	TransactionId() = default;
+	explicit constexpr TransactionId(idx_t value_p) : value(value_p) {
+	}
+	constexpr idx_t GetIndex() const {
+		return value;
+	}
+	constexpr TransactionId Next() const {
+		return TransactionId(value + 1);
+	}
+	idx_t value = 0;
+};
+
+//! An exclusive bound on the committed timeline: commits below it are visible, commits at or above
+//! it are not. Built from a commit id, so it cannot accidentally admit uncommitted stamps.
+struct SnapshotBound {
+	SnapshotBound() = default;
+	//! Everything this commit and earlier is visible
+	static constexpr SnapshotBound Through(CommitId commit) {
+		return SnapshotBound(commit.GetIndex() + 1);
+	}
+	//! Everything strictly below this commit is visible
+	static constexpr SnapshotBound Before(CommitId commit) {
+		return SnapshotBound(commit.GetIndex());
+	}
+	//! Every committed stamp is visible, and no uncommitted one
+	static constexpr SnapshotBound AllCommitted() {
+		return SnapshotBound(TRANSACTION_ID_START_VALUE);
+	}
+	constexpr idx_t GetIndex() const {
+		return value;
+	}
+	idx_t value = 0;
+
+private:
+	explicit constexpr SnapshotBound(idx_t value_p) : value(value_p) {
+	}
+};
+
+inline bool CommitId::Below(SnapshotBound bound) const {
+	return value < bound.GetIndex();
+}
+
+//! What a version slot actually holds: a TransactionId while the writer is in flight, overwritten
+//! with its CommitId when it commits. Which domain it is in is only knowable by asking.
+struct Stamp {
+	Stamp() = default;
+	explicit constexpr Stamp(idx_t value_p) : value(value_p) {
+	}
+	explicit constexpr Stamp(CommitId commit) : value(commit.GetIndex()) {
+	}
+	explicit constexpr Stamp(TransactionId id) : value(id.GetIndex()) {
+	}
+
+	constexpr bool IsCommitted() const {
+		return value < TRANSACTION_ID_START_VALUE;
+	}
+	constexpr CommitId AsCommitId() const {
+		return CommitId(value);
+	}
+	constexpr TransactionId AsTransactionId() const {
+		return TransactionId(value);
+	}
+	constexpr idx_t GetIndex() const {
+		return value;
+	}
+	idx_t value = 0;
+};
+
+constexpr bool operator==(Stamp a, Stamp b) {
 	return a.GetIndex() == b.GetIndex();
 }
-constexpr bool operator!=(SnapshotId a, SnapshotId b) {
+constexpr bool operator!=(Stamp a, Stamp b) {
+	return a.GetIndex() != b.GetIndex();
+}
+constexpr bool operator==(TransactionId a, TransactionId b) {
+	return a.GetIndex() == b.GetIndex();
+}
+constexpr bool operator!=(TransactionId a, TransactionId b) {
+	return a.GetIndex() != b.GetIndex();
+}
+constexpr bool operator==(CommitId a, CommitId b) {
+	return a.GetIndex() == b.GetIndex();
+}
+constexpr bool operator!=(CommitId a, CommitId b) {
 	return a.GetIndex() != b.GetIndex();
 }
 
-//! Type used for transaction timestamps
-typedef SnapshotId transaction_t;
+//! Type used for transaction timestamps: what is stored, unless a narrower domain is known
+typedef Stamp transaction_t;
 
 //! Type used to identify connections
 typedef idx_t connection_t;

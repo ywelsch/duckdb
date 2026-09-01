@@ -22,7 +22,7 @@ struct UndoBufferProperties;
 //! This ensures we can clean up after releasing the transaction lock.
 struct DuckCleanupInfo {
 	//! All transactions in a cleanup info share the same lowest_snapshot_bound.
-	transaction_t lowest_snapshot_bound;
+	SnapshotBound lowest_snapshot_bound;
 	vector<unique_ptr<DuckTransaction>> transactions;
 
 	void Cleanup();
@@ -123,15 +123,15 @@ private:
 
 private:
 	//! The current start timestamp used by transactions
-	transaction_t current_start_timestamp;
+	CommitId current_start_timestamp;
 	//! The current transaction ID used by transactions
-	transaction_t current_transaction_id;
+	TransactionId current_transaction_id;
 	//! The lowest active transaction id
-	atomic<transaction_t> lowest_active_id;
+	atomic<TransactionId> lowest_active_id;
 	//! The lowest active transaction timestamp
-	atomic<transaction_t> lowest_snapshot_bound;
+	atomic<SnapshotBound> lowest_snapshot_bound;
 	//! The last commit timestamp
-	atomic<transaction_t> last_commit;
+	atomic<CommitId> last_commit;
 	//! The currently active checkpoint, zero when none is running
 	atomic<idx_t> active_checkpoint;
 	//! Source of checkpoint identities
