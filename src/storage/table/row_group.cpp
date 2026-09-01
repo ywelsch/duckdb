@@ -1066,16 +1066,16 @@ ScanOptions::ScanOptions(TransactionData transaction) : transaction(transaction)
 void RowGroup::Scan(CollectionScanState &state, DataChunk &result, TableScanType type) {
 	auto &transaction_manager = DuckTransactionManager::Get(GetCollection().GetAttached());
 
-	transaction_t start_ts;
+	transaction_t snapshot_bound;
 	transaction_t transaction_id;
 	if (type == TableScanType::TABLE_SCAN_COMMITTED_ROWS) {
-		start_ts = transaction_manager.GetLastCommit().Next();
+		snapshot_bound = transaction_manager.GetLastCommit().Next();
 		transaction_id = MAX_TRANSACTION_ID;
 	} else {
-		start_ts = transaction_manager.LowestSnapshotBound();
+		snapshot_bound = transaction_manager.LowestSnapshotBound();
 		transaction_id = transaction_manager.LowestActiveId();
 	}
-	TransactionData transaction(transaction_id, start_ts);
+	TransactionData transaction(transaction_id, snapshot_bound);
 
 	ScanOptions options(transaction);
 	options.insert_type = InsertedScanType::ALL_ROWS;

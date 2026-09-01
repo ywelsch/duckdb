@@ -10,6 +10,7 @@
 
 #include "duckdb/execution/index/index_pointer.hpp"
 #include "duckdb/common/enums/scan_options.hpp"
+#include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/common/types/validity_mask.hpp"
 
 namespace duckdb {
@@ -105,8 +106,8 @@ public:
 
 private:
 	template <class INSERT_OP, class DELETE_OP>
-	idx_t TemplatedGetSelVector(transaction_t snapshot_bound, transaction_t transaction_id,
-	                            optional_ptr<SelectionVector> sel_vector, idx_t max_count) const;
+	idx_t TemplatedGetSelVector(const SnapshotView &view, optional_ptr<SelectionVector> sel_vector,
+	                            idx_t max_count) const;
 
 	IndexPointer GetInsertedPointer() const;
 	IndexPointer GetDeletedPointer() const;
