@@ -173,7 +173,7 @@ UndoBufferProperties UndoBuffer::GetProperties() {
 	return properties;
 }
 
-void UndoBuffer::Cleanup(transaction_t lowest_snapshot_bound) {
+void UndoBuffer::Cleanup(SnapshotBound lowest_snapshot_bound) {
 	// garbage collect everything in the Undo Chunk
 	// this should only happen if
 	//  (1) the transaction this UndoBuffer belongs to has successfully
@@ -196,7 +196,7 @@ void UndoBuffer::WriteToWAL(WriteAheadLog &wal, optional_ptr<StorageCommitState>
 void UndoBuffer::Commit(UndoBuffer::IteratorState &iterator_state, CommitInfo &info) {
 	active_transaction_state = info.active_transactions;
 
-	CommitState state(transaction, info.commit_id, active_transaction_state, CommitMode::COMMIT);
+	CommitState state(transaction, Stamp(info.commit_id), active_transaction_state, CommitMode::COMMIT);
 	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) { state.CommitEntry(type, data, info); });
 	state.Verify();
 }

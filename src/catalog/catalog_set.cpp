@@ -105,7 +105,7 @@ bool CatalogSet::StartChain(CatalogTransaction transaction, const Identifier &na
 	// first create a dummy deleted entry
 	// so other transactions will see that instead of the entry that is to be added.
 	auto dummy_node = make_uniq<InCatalogEntry>(CatalogType::INVALID, catalog, name);
-	dummy_node->timestamp = SnapshotId(0);
+	dummy_node->timestamp = Stamp(0);
 	dummy_node->deleted = true;
 	dummy_node->set = this;
 
@@ -164,7 +164,7 @@ optional_ptr<CatalogEntry> CatalogSet::CreateCommittedEntry(unique_ptr<CatalogEn
 
 	entry->set = this;
 	// Give the entry commit id 0, so it is visible to all transactions
-	entry->timestamp = SnapshotId(0);
+	entry->timestamp = Stamp(0);
 	map.AddEntry(std::move(entry));
 
 	return catalog_entry;
@@ -202,7 +202,7 @@ bool CatalogSet::CreateEntry(CatalogTransaction transaction, const Identifier &n
 	CheckCatalogEntryInvariants(*value, name);
 
 	// Mark this entry as being created by the current active transaction
-	value->timestamp = transaction.transaction_id;
+	value->timestamp = Stamp(transaction.transaction_id);
 	value->set = this;
 	catalog.GetDependencyManager()->AddObject(transaction, *value, dependencies);
 
@@ -289,7 +289,7 @@ bool CatalogSet::RenameEntryInternal(CatalogTransaction transaction, CatalogEntr
 	// Add a RENAMED_ENTRY before adding a DELETED_ENTRY, this makes it so that when this is committed
 	// we know that this was not a DROP statement.
 	auto renamed_tombstone = make_uniq<InCatalogEntry>(CatalogType::RENAMED_ENTRY, old.ParentCatalog(), original_name);
-	renamed_tombstone->timestamp = transaction.transaction_id;
+	renamed_tombstone->timestamp = Stamp(transaction.transaction_id);
 	renamed_tombstone->deleted = false;
 	renamed_tombstone->set = this;
 	if (!CreateEntryInternal(transaction, original_name, std::move(renamed_tombstone), read_lock,
@@ -303,7 +303,7 @@ bool CatalogSet::RenameEntryInternal(CatalogTransaction transaction, CatalogEntr
 	// Add the renamed entry
 	// Start this off with a RENAMED_ENTRY node, for commit/cleanup/rollback purposes
 	auto renamed_node = make_uniq<InCatalogEntry>(CatalogType::RENAMED_ENTRY, catalog, new_name);
-	renamed_node->timestamp = transaction.transaction_id;
+	renamed_node->timestamp = Stamp(transaction.transaction_id);
 	renamed_node->deleted = false;
 	renamed_node->set = this;
 	return CreateEntryInternal(transaction, new_name, std::move(renamed_node), read_lock);
@@ -360,7 +360,7 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 	entry = GetEntryInternal(transaction, name);
 
 	// Mark this entry as being created by this transaction
-	value->timestamp = transaction.transaction_id;
+	value->timestamp = Stamp(transaction.transaction_id);
 	value->set = this;
 	// Preserve the oid across the alter: an altered entry is the same logical object as before
 	value->oid = entry->oid;
@@ -431,7 +431,7 @@ bool CatalogSet::DropEntryInternal(CatalogTransaction transaction, const Identif
 	// set the timestamp to the timestamp of the current transaction
 	// and point it at the tombstone node
 	auto value = make_uniq<InCatalogEntry>(CatalogType::DELETED_ENTRY, entry->ParentCatalog(), entry->name);
-	value->timestamp = transaction.transaction_id;
+	value->timestamp = Stamp(transaction.transaction_id);
 	value->set = this;
 	value->deleted = true;
 	auto value_ptr = value.get();
@@ -460,14 +460,13 @@ bool CatalogSet::DropEntry(ClientContext &context, const Identifier &name, bool 
 }
 
 //! Verify that the object referenced by the dependency still exists when we commit the dependency
-void CatalogSet::VerifyExistenceOfDependency(transaction_t commit_id, CatalogEntry &entry) {
+void CatalogSet::VerifyExistenceOfDependency(CommitId commit_id, CatalogEntry &entry) {
 	auto &duck_catalog = GetCatalog();
 
 	// Make sure that we don't see any uncommitted changes
-	auto transaction_id = MAX_TRANSACTION_ID;
-	D_ASSERT(commit_id.IsCommitted());
+	auto transaction_id = TransactionId::None();
 	// This will allow us to see all committed changes made before this COMMIT happened
-	auto snapshot_bound = commit_id.Next();
+	auto snapshot_bound = SnapshotBound::Through(commit_id);
 	CatalogTransaction commit_transaction(duck_catalog.GetDatabase(), transaction_id, snapshot_bound);
 
 	D_ASSERT(entry.type == CatalogType::DEPENDENCY_ENTRY);
@@ -477,15 +476,14 @@ void CatalogSet::VerifyExistenceOfDependency(transaction_t commit_id, CatalogEnt
 
 //! Verify that no dependencies creations were committed since our transaction started, that reference the entry we're
 //! dropping
-void CatalogSet::CommitDrop(transaction_t commit_id, transaction_t snapshot_bound, CatalogEntry &entry) {
+void CatalogSet::CommitDrop(CommitId commit_id, SnapshotBound snapshot_bound, CatalogEntry &entry) {
 	auto &duck_catalog = GetCatalog();
 
 	entry.OnDrop();
 	// Make sure that we don't see any uncommitted changes
-	auto transaction_id = MAX_TRANSACTION_ID;
-	D_ASSERT(commit_id.IsCommitted());
+	auto transaction_id = TransactionId::None();
 	// This will allow us to see all committed changes made before this COMMIT happened
-	auto commit_snapshot_bound = commit_id;
+	auto commit_snapshot_bound = SnapshotBound::Before(commit_id);
 	CatalogTransaction commit_transaction(duck_catalog.GetDatabase(), transaction_id, commit_snapshot_bound);
 
 	duck_catalog.GetDependencyManager()->VerifyCommitDrop(commit_transaction, snapshot_bound, entry);
@@ -512,7 +510,7 @@ void CatalogSet::CleanupEntry(CatalogEntry &catalog_entry) {
 bool CatalogSet::CreatedByOtherActiveTransaction(CatalogTransaction transaction, transaction_t timestamp) {
 	// True if this transaction is not committed yet and the entry was made by another active (not committed)
 	// transaction
-	return !timestamp.IsCommitted() && timestamp != transaction.transaction_id;
+	return !timestamp.IsCommitted() && timestamp != Stamp(transaction.transaction_id);
 }
 
 bool CatalogSet::CommittedAfterStarting(CatalogTransaction transaction, transaction_t timestamp) {
@@ -527,12 +525,12 @@ bool CatalogSet::HasConflict(CatalogTransaction transaction, transaction_t times
 }
 
 bool CatalogSet::UseTimestamp(CatalogTransaction transaction, transaction_t timestamp) {
-	if (timestamp == transaction.transaction_id) {
+	if (timestamp == Stamp(transaction.transaction_id)) {
 		// we created this version
 		return true;
 	}
 	// otherwise it is usable exactly when the transaction's snapshot contains it
-	return timestamp.VisibleTo(transaction.snapshot_bound);
+	return timestamp.Below(transaction.snapshot_bound);
 }
 
 CatalogEntry &CatalogSet::GetEntryForTransaction(CatalogTransaction transaction, CatalogEntry &current) {

@@ -9,19 +9,19 @@ CatalogTransaction::CatalogTransaction(Catalog &catalog, ClientContext &context)
 	auto &transaction = Transaction::Get(context, catalog);
 	this->db = &DatabaseInstance::GetDatabase(context);
 	if (!transaction.IsDuckTransaction()) {
-		this->transaction_id = transaction_t(-1);
-		this->snapshot_bound = transaction_t(-1);
+		this->transaction_id = TransactionId::None();
+		this->snapshot_bound = SnapshotBound::IncludingUncommitted();
 	} else {
 		auto &dtransaction = transaction.Cast<DuckTransaction>();
 		this->transaction_id = dtransaction.transaction_id;
-		this->snapshot_bound = dtransaction.start_time;
+		this->snapshot_bound = SnapshotBound::Before(dtransaction.start_time);
 	}
 	this->transaction = &transaction;
 	this->context = &context;
 }
 
-CatalogTransaction::CatalogTransaction(DatabaseInstance &db, transaction_t transaction_id_p,
-                                       transaction_t snapshot_bound_p)
+CatalogTransaction::CatalogTransaction(DatabaseInstance &db, TransactionId transaction_id_p,
+                                       SnapshotBound snapshot_bound_p)
     : db(&db), context(nullptr), transaction(nullptr), transaction_id(transaction_id_p),
       snapshot_bound(snapshot_bound_p) {
 }
@@ -40,7 +40,10 @@ CatalogTransaction CatalogTransaction::GetSystemCatalogTransaction(ClientContext
 CatalogTransaction CatalogTransaction::GetSystemTransaction(DatabaseInstance &db) {
 	// the bound is one past the bootstrap stamp: the system transaction sees the bootstrap entries
 	// and nothing else, since the timestamp counter starts above them
-	return CatalogTransaction(db, SYSTEM_TRANSACTION_TIMESTAMP, SYSTEM_TRANSACTION_TIMESTAMP.Next());
+	// NOTE: the bootstrap entries are stamped with the bootstrap stamp itself, which sits in the
+	// commit domain - so the system transaction's *id* is a value below the split
+	return CatalogTransaction(db, TransactionId(SYSTEM_TRANSACTION_TIMESTAMP.GetIndex()),
+	                          SnapshotBound::Through(SYSTEM_TRANSACTION_TIMESTAMP));
 }
 
 } // namespace duckdb

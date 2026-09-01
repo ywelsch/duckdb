@@ -569,7 +569,7 @@ void DependencyManager::VerifyExistence(CatalogTransaction transaction, Dependen
 	}
 }
 
-void DependencyManager::VerifyCommitDrop(CatalogTransaction transaction, transaction_t snapshot_bound,
+void DependencyManager::VerifyCommitDrop(CatalogTransaction transaction, SnapshotBound snapshot_bound,
                                          CatalogEntry &object) {
 	if (IsSystemEntry(object)) {
 		return;
@@ -577,7 +577,7 @@ void DependencyManager::VerifyCommitDrop(CatalogTransaction transaction, transac
 	auto info = GetLookupProperties(object);
 	ScanDependents(transaction, info, [&](DependencyEntry &dep) {
 		auto dep_committed_at = dep.timestamp.load();
-		if (!dep_committed_at.VisibleTo(snapshot_bound)) {
+		if (!dep_committed_at.Below(snapshot_bound)) {
 			// In the event of a CASCADE, the dependency drop has not committed yet
 			// so we would be halted by the existence of a dependency we are already dropping unless we check the
 			// timestamp
@@ -595,7 +595,7 @@ void DependencyManager::VerifyCommitDrop(CatalogTransaction transaction, transac
 			return;
 		}
 		D_ASSERT(dep.Subject().flags.IsOwnership());
-		if (!dep_committed_at.VisibleTo(snapshot_bound)) {
+		if (!dep_committed_at.Below(snapshot_bound)) {
 			// Same as above, objects that are owned by the object that is being dropped will be dropped as part of this
 			// transaction. Only objects that were introduced by other transactions, that this transaction could not
 			// see, should cause this error:
@@ -677,7 +677,8 @@ void DependencyManager::ReorderEntries(catalog_entry_vector_t &entries, ClientCo
 
 void DependencyManager::ReorderEntries(catalog_entry_vector_t &entries) {
 	// Read all committed entries. A checkpoint writes internal entries too
-	CatalogTransaction transaction(catalog.GetDatabase(), TRANSACTION_ID_START.Prev(), TRANSACTION_ID_START.Prev());
+	CatalogTransaction transaction(catalog.GetDatabase(), TransactionId::None(),
+	                               SnapshotBound::Before(CommitId::Highest()));
 	ReorderEntries(entries, transaction, true);
 }
 

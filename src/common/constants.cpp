@@ -15,11 +15,11 @@ const column_t COLUMN_IDENTIFIER_ROW_NUMBER = UINT64_C(18446744073709551613);
 const column_t VIRTUAL_COLUMN_START = UINT64_C(9223372036854775808); // 2^63
 const double PI = 3.141592653589793;
 
-const transaction_t SYSTEM_TRANSACTION_TIMESTAMP = SnapshotId(1);
-const transaction_t TRANSACTION_ID_START = SnapshotId(SnapshotId::TRANSACTION_ID_START_VALUE);                // 2^62
-const transaction_t MAX_TRANSACTION_ID = SnapshotId(NumericLimits<idx_t>::Maximum()); // 2^63
-const transaction_t NOT_DELETED_ID = SnapshotId(NumericLimits<idx_t>::Maximum() - 1); // 2^64 - 1
-const idx_t MAXIMUM_QUERY_ID = NumericLimits<idx_t>::Maximum();   // 2^64
+const CommitId SYSTEM_TRANSACTION_TIMESTAMP = CommitId(1);
+const transaction_t TRANSACTION_ID_START = Stamp(TRANSACTION_ID_START_VALUE);    // 2^62
+const transaction_t MAX_TRANSACTION_ID = Stamp(NumericLimits<idx_t>::Maximum()); // 2^63
+const transaction_t NOT_DELETED_ID = Stamp(NumericLimits<idx_t>::Maximum() - 1); // 2^64 - 1
+const idx_t MAXIMUM_QUERY_ID = NumericLimits<idx_t>::Maximum();                  // 2^64
 
 bool IsPowerOfTwo(uint64_t v) {
 	return (v & (v - 1)) == 0;

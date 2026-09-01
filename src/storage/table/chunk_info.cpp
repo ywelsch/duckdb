@@ -31,7 +31,7 @@ struct StandardDeleteOperator {
 struct CommittedDeleteOperator {
 	static bool IsDeleted(const SnapshotView &view, transaction_t id) {
 		// check if this row was deleted before the given bound, regardless of who deleted it
-		return id.VisibleTo(view.snapshot_bound);
+		return id.Below(view.snapshot_bound);
 	}
 };
 
@@ -488,7 +488,7 @@ void ChunkVectorInfo::VerifyCachedCompressionState() const {
 #endif
 }
 
-VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowest_snapshot_bound) {
+VersionCompressionResult ChunkVectorInfo::CompressVersionIds(SnapshotBound lowest_snapshot_bound) {
 	if (!recheck_compression) {
 		// no ids were modified since this vector last settled - only a further modification
 		// (which re-arms the check) can make it compressible, so skip re-scanning the ids
@@ -505,7 +505,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 		bool deletes_pending = false;
 		bool deletes_uncommitted = false;
 		bool deletes_equal = true;
-		transaction_t max_delete_id = SnapshotId(0);
+		transaction_t max_delete_id = Stamp(0);
 		transaction_t shared_delete_id = NOT_DELETED_ID;
 		{
 			auto segment = allocator.GetHandle(GetDeletedPointer());
@@ -516,7 +516,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 					rows_alive = true;
 					continue;
 				}
-				if (!deleted[i].VisibleTo(lowest_snapshot_bound)) {
+				if (!deleted[i].Below(lowest_snapshot_bound)) {
 					// deleted, but the delete is not yet visible to all transactions
 					deletes_pending = true;
 					if (!deleted[i].IsCommitted()) {
@@ -524,7 +524,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 						deletes_uncommitted = true;
 					}
 				} else {
-					max_delete_id = SnapshotId::Max(max_delete_id, deleted[i]);
+					max_delete_id = Stamp::Later(max_delete_id, deleted[i]);
 				}
 				// track whether every deleted row shares a single id
 				if (shared_delete_id == NOT_DELETED_ID) {
@@ -543,7 +543,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 			pending = true;
 		} else if (!deletes_pending) {
 			// partially deleted, every delete visible to all - compress to a mask (terminal)
-			CompressDeleteToMask(SnapshotId(0));
+			CompressDeleteToMask(Stamp(0));
 		} else if (deletes_equal && !deletes_uncommitted) {
 			// partially deleted, every delete committed by the same transaction but not yet visible to
 			// all - compress to a mask carrying that single committed id (terminal). Older snapshots still
@@ -562,7 +562,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 			auto segment = allocator.GetHandle(GetInsertedPointer());
 			auto inserted = segment.GetPtr<transaction_t>();
 			for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-				if (!inserted[i].VisibleTo(lowest_snapshot_bound)) {
+				if (!inserted[i].Below(lowest_snapshot_bound)) {
 					// the insert is not yet visible to all transactions
 					can_compress = false;
 					break;
@@ -572,7 +572,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 		if (can_compress) {
 			allocator.Free(inserted_data);
 			inserted_data = IndexPointer();
-			constant_insert_id = SnapshotId(0);
+			constant_insert_id = Stamp(0);
 		} else {
 			// insert ids become visible to all transactions (or are reverted) eventually
 			pending = true;
@@ -620,7 +620,7 @@ void ChunkVectorInfo::CommitAppend(transaction_t commit_id, idx_t start, idx_t e
 	}
 }
 
-bool ChunkVectorInfo::Cleanup(transaction_t lowest_snapshot_bound) const {
+bool ChunkVectorInfo::Cleanup(SnapshotBound lowest_snapshot_bound) const {
 	if (AnyDeleted()) {
 		// if any rows are deleted we can't clean-up
 		return false;
@@ -632,18 +632,18 @@ bool ChunkVectorInfo::Cleanup(transaction_t lowest_snapshot_bound) const {
 
 		// from 1: index 0 holds the first append, which carries the lowest insert id
 		for (idx_t idx = 1; idx < STANDARD_VECTOR_SIZE; idx++) {
-			if (!inserted[idx].VisibleTo(lowest_snapshot_bound)) {
+			if (!inserted[idx].Below(lowest_snapshot_bound)) {
 				// not yet visible to every current and future snapshot - cannot compress
 				return false;
 			}
 		}
-	} else if (!ConstantInsertId().VisibleTo(lowest_snapshot_bound)) {
+	} else if (!ConstantInsertId().Below(lowest_snapshot_bound)) {
 		return false;
 	}
 	return true;
 }
 
-bool ChunkVectorInfo::HasDeletes(transaction_t snapshot_bound) const {
+bool ChunkVectorInfo::HasDeletes(SnapshotBound snapshot_bound) const {
 	if (HasConstantInsertionId() && !ConstantInsertId().IsCommitted()) {
 		// the vector was inserted by a transaction that has not committed yet
 		// the rows have to be masked as deleted when writing a checkpoint
@@ -652,20 +652,20 @@ bool ChunkVectorInfo::HasDeletes(transaction_t snapshot_bound) const {
 	if (!AnyDeleted()) {
 		return false;
 	}
-	if (snapshot_bound == MAX_TRANSACTION_ID) {
+	if (snapshot_bound == SnapshotBound::IncludingUncommitted()) {
 		return true;
 	}
 	switch (delete_state) {
 	case DeleteIdState::CONSTANT:
-		return ConstantDeleteId().VisibleTo(snapshot_bound.Next());
+		return ConstantDeleteId().Below(snapshot_bound.Next());
 	case DeleteIdState::MASKED:
 		// AnyDeleted() above guaranteed at least one deleted row; they all share mask_delete_id
-		return mask_delete_id.VisibleTo(snapshot_bound.Next());
+		return mask_delete_id.Below(snapshot_bound.Next());
 	case DeleteIdState::ARRAY: {
 		auto segment = allocator.GetHandle(GetDeletedPointer());
 		auto deleted = segment.GetPtr<transaction_t>();
 		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			if (deleted[i].VisibleTo(snapshot_bound.Next())) {
+			if (deleted[i].Below(snapshot_bound.Next())) {
 				return true;
 			}
 		}
@@ -806,9 +806,9 @@ transaction_t ChunkVectorInfo::ConstantDeleteId() const {
 	return constant_delete_id;
 }
 
-void ChunkVectorInfo::Write(WriteStream &writer, transaction_t snapshot_bound) const {
+void ChunkVectorInfo::Write(WriteStream &writer, SnapshotBound snapshot_bound) const {
 	SelectionVector sel(STANDARD_VECTOR_SIZE);
-	transaction_t transaction_id = SnapshotId(DConstants::INVALID_INDEX);
+	TransactionId transaction_id = TransactionId(DConstants::INVALID_INDEX);
 	idx_t count = GetSelVector(TransactionData(transaction_id, snapshot_bound), sel, STANDARD_VECTOR_SIZE);
 	if (count == STANDARD_VECTOR_SIZE) {
 		// nothing is deleted: skip writing anything
@@ -841,7 +841,7 @@ unique_ptr<ChunkVectorInfo> ChunkVectorInfo::Read(FixedSizeAllocator &allocator,
 	case ChunkInfoType::CONSTANT_INFO: {
 		// a fully deleted vector - the constant insert and delete ids of 0 are visible to all transactions
 		auto start = reader.Read<idx_t>();
-		auto result = make_uniq<ChunkVectorInfo>(allocator, start, SnapshotId(0), SnapshotId(0));
+		auto result = make_uniq<ChunkVectorInfo>(allocator, start, Stamp(0), Stamp(0));
 		// both ids are constant - there is nothing left to compress
 		result->recheck_compression = false;
 		return result;
@@ -864,7 +864,7 @@ unique_ptr<ChunkVectorInfo> ChunkVectorInfo::Read(FixedSizeAllocator &allocator,
 		}
 		result->delete_state = DeleteIdState::MASKED;
 		// on-disk deletes are all committed and visible to every transaction - the shared id is 0
-		result->mask_delete_id = SnapshotId(0);
+		result->mask_delete_id = Stamp(0);
 		// every id is already visible to all transactions - nothing left to compress
 		result->recheck_compression = false;
 		return result;

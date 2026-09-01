@@ -77,7 +77,7 @@ public:
 	//! Rollback
 	ErrorData Rollback();
 	//! Cleanup the undo buffer
-	void Cleanup(transaction_t lowest_snapshot_bound);
+	void Cleanup(SnapshotBound lowest_snapshot_bound);
 
 	bool ChangesMade();
 	UndoBufferProperties GetUndoProperties();

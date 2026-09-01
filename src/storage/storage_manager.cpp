@@ -264,11 +264,11 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 	} else {
 		auto &transaction_manager = db.GetTransactionManager().Cast<DuckTransactionManager>();
 		options.checkpoint_id = transaction_manager.NextCheckpointId();
-		options.snapshot_bound = transaction_manager.GetLastCommit().Next();
+		options.snapshot_bound = SnapshotBound::Through(transaction_manager.GetLastCommit());
 	}
 
 	D_ASSERT(options.checkpoint_id.IsValid());
-	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Start Checkpoint", SnapshotId(options.checkpoint_id.GetIndex()));
+	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Start Checkpoint", Stamp(options.checkpoint_id.GetIndex()));
 	if (!wal) {
 		return false;
 	}

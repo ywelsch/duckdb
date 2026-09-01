@@ -15,7 +15,7 @@
 
 namespace duckdb {
 
-CleanupState::CleanupState(DuckTransaction &transaction, transaction_t lowest_snapshot_bound,
+CleanupState::CleanupState(DuckTransaction &transaction, SnapshotBound lowest_snapshot_bound,
                            ActiveTransactionState transaction_state)
     : lowest_snapshot_bound(lowest_snapshot_bound), transaction_state(transaction_state),
       index_data_remover(transaction, QueryContext(), IndexRemovalType::DELETED_ROWS_IN_USE) {

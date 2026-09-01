@@ -18,7 +18,7 @@ namespace duckdb {
 struct CheckpointOptions {
 	CheckpointOptions()
 	    : wal_action(CheckpointWALAction::DONT_DELETE_WAL), action(CheckpointAction::CHECKPOINT_IF_REQUIRED),
-	      type(CheckpointType::FULL_CHECKPOINT), snapshot_bound(MAX_TRANSACTION_ID) {
+	      type(CheckpointType::FULL_CHECKPOINT), snapshot_bound(SnapshotBound::IncludingUncommitted()) {
 	}
 
 	CheckpointWALAction wal_action;

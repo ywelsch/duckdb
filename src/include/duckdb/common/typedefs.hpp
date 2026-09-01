@@ -32,6 +32,9 @@ typedef uint32_t sel_t;
 // The transaction timeline, as three domains rather than one number
 //===--------------------------------------------------------------------===//
 
+//! The largest representable stamp, used for the various "none" sentinels
+static constexpr idx_t NumericLimits_idx_max = 18446744073709551615ULL;
+
 //! 2^62 - the split between commit ids below and transaction ids above
 static constexpr idx_t TRANSACTION_ID_START_VALUE = 4611686018427388000ULL;
 
@@ -50,6 +53,13 @@ struct CommitId {
 	constexpr CommitId Next() const {
 		return CommitId(value + 1);
 	}
+	//! The highest possible commit id: one below the first transaction id
+	static constexpr CommitId Highest() {
+		return CommitId(TRANSACTION_ID_START_VALUE - 1);
+	}
+	static constexpr CommitId Min(CommitId a, CommitId b) {
+		return a.value < b.value ? a : b;
+	}
 	idx_t value = 0;
 };
 
@@ -63,6 +73,17 @@ struct TransactionId {
 	}
 	constexpr TransactionId Next() const {
 		return TransactionId(value + 1);
+	}
+	//! The first id handed out; ids below this are commit ids
+	static constexpr TransactionId First() {
+		return TransactionId(TRANSACTION_ID_START_VALUE);
+	}
+	//! No transaction. The identity when folding a lowest-active id over the active set
+	static constexpr TransactionId None() {
+		return TransactionId(NumericLimits_idx_max);
+	}
+	static constexpr TransactionId Min(TransactionId a, TransactionId b) {
+		return a.value < b.value ? a : b;
 	}
 	idx_t value = 0;
 };
@@ -79,9 +100,26 @@ struct SnapshotBound {
 	static constexpr SnapshotBound Before(CommitId commit) {
 		return SnapshotBound(commit.GetIndex());
 	}
-	//! Every committed stamp is visible, and no uncommitted one
+	//! Every committed stamp is visible, and no uncommitted one. Also the identity when folding a
+	//! horizon over the active transactions
 	static constexpr SnapshotBound AllCommitted() {
 		return SnapshotBound(TRANSACTION_ID_START_VALUE);
+	}
+	//! Nothing is visible
+	static constexpr SnapshotBound Nothing() {
+		return SnapshotBound(0);
+	}
+	//! Every stamp is visible, uncommitted ones included. Only correct where no uncommitted stamp
+	//! can be present; kept because that is what the untouched default used to mean
+	static constexpr SnapshotBound IncludingUncommitted() {
+		return SnapshotBound(NumericLimits_idx_max);
+	}
+	//! One past this bound, for the few places that test inclusively
+	constexpr SnapshotBound Next() const {
+		return SnapshotBound(value + 1);
+	}
+	static constexpr SnapshotBound Min(SnapshotBound a, SnapshotBound b) {
+		return a.value < b.value ? a : b;
 	}
 	constexpr idx_t GetIndex() const {
 		return value;
@@ -120,6 +158,29 @@ struct Stamp {
 	constexpr idx_t GetIndex() const {
 		return value;
 	}
+	//! Whether this stamp sorts below the bound. This is the horizon question - is the stamp old
+	//! enough to compact or clean up - not the reader question, which is SnapshotView::Sees and has
+	//! to know whose transaction id it is. For any bound derived from a commit the two agree; a
+	//! bound built with IncludingUncommitted() admits uncommitted stamps here, which is why that
+	//! constructor is named the way it is.
+	constexpr bool Below(SnapshotBound bound) const {
+		return value < bound.GetIndex();
+	}
+	//! Raw neighbours on the timeline, for the sentinels that sit next to the split
+	constexpr Stamp Next() const {
+		return Stamp(value + 1);
+	}
+	constexpr Stamp Prev() const {
+		return Stamp(value - 1);
+	}
+	//! No stamp at all
+	static constexpr Stamp None() {
+		return Stamp(NumericLimits_idx_max);
+	}
+	//! The later of two stamps on the raw timeline
+	static constexpr Stamp Later(Stamp a, Stamp b) {
+		return a.value > b.value ? a : b;
+	}
 	idx_t value = 0;
 };
 
@@ -133,6 +194,12 @@ constexpr bool operator==(TransactionId a, TransactionId b) {
 	return a.GetIndex() == b.GetIndex();
 }
 constexpr bool operator!=(TransactionId a, TransactionId b) {
+	return a.GetIndex() != b.GetIndex();
+}
+constexpr bool operator==(SnapshotBound a, SnapshotBound b) {
+	return a.GetIndex() == b.GetIndex();
+}
+constexpr bool operator!=(SnapshotBound a, SnapshotBound b) {
 	return a.GetIndex() != b.GetIndex();
 }
 constexpr bool operator==(CommitId a, CommitId b) {

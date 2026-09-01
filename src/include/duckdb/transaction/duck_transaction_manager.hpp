@@ -48,13 +48,13 @@ public:
 
 	void Checkpoint(ClientContext &context, bool force = false) override;
 
-	transaction_t LowestActiveId() const {
+	TransactionId LowestActiveId() const {
 		return lowest_active_id;
 	}
-	transaction_t LowestSnapshotBound() const {
+	SnapshotBound LowestSnapshotBound() const {
 		return lowest_snapshot_bound;
 	}
-	transaction_t GetLastCommit() const {
+	CommitId GetLastCommit() const {
 		return last_commit;
 	}
 	optional_idx GetActiveCheckpoint() const {
@@ -99,7 +99,7 @@ protected:
 
 private:
 	//! Generates a new commit timestamp
-	transaction_t GetCommitTimestamp();
+	CommitId GetCommitTimestamp();
 	//! Allocates the cleanup info, and reserves the space RemoveTransaction needs to re-home a transaction.
 	//! RemoveTransaction is noexcept, so it cannot do this itself: it must not allocate at all. Call this with
 	//! transaction_lock held, immediately before RemoveTransaction, so that a failure to allocate is reported
@@ -149,7 +149,7 @@ private:
 	//! Lock necessary to start transactions only - used by FORCE CHECKPOINT to prevent new transactions from starting
 	mutex start_transaction_lock;
 
-	atomic<idx_t> last_uncommitted_catalog_version = {SnapshotId::TRANSACTION_ID_START_VALUE};
+	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START_VALUE};
 	idx_t last_committed_version = 0;
 
 	//! Only one cleanup can be active at any time.

@@ -19,13 +19,13 @@ class Transaction;
 
 struct CatalogTransaction {
 	CatalogTransaction(Catalog &catalog, ClientContext &context);
-	CatalogTransaction(DatabaseInstance &db, transaction_t transaction_id_p, transaction_t snapshot_bound_p);
+	CatalogTransaction(DatabaseInstance &db, TransactionId transaction_id_p, SnapshotBound snapshot_bound_p);
 
 	optional_ptr<DatabaseInstance> db;
 	optional_ptr<ClientContext> context;
 	optional_ptr<Transaction> transaction;
-	transaction_t transaction_id;
-	transaction_t snapshot_bound;
+	TransactionId transaction_id;
+	SnapshotBound snapshot_bound;
 
 	bool HasContext() const {
 		return context;

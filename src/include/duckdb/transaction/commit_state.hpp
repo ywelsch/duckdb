@@ -86,8 +86,8 @@ private:
 
 class CommitState {
 public:
-	explicit CommitState(DuckTransaction &transaction, transaction_t commit_id,
-	                     ActiveTransactionState transaction_state, CommitMode commit_mode);
+	explicit CommitState(DuckTransaction &transaction, Stamp commit_id, ActiveTransactionState transaction_state,
+	                     CommitMode commit_mode);
 
 public:
 	void CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info);
@@ -102,7 +102,9 @@ private:
 
 private:
 	DuckTransaction &transaction;
-	transaction_t commit_id;
+	//! A commit id when committing, a transaction id when reverting a commit - see the assert in the
+	//! constructor, which is what lets the catalog paths below narrow it
+	Stamp commit_id;
 	IndexDataRemover index_data_remover;
 };
 

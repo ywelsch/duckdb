@@ -112,15 +112,15 @@ void RowVersionManager::AppendVersionInfo(TransactionData transaction, idx_t cou
 		    vector_idx == end_vector_idx ? row_group_end - end_vector_idx * STANDARD_VECTOR_SIZE : STANDARD_VECTOR_SIZE;
 		if (vector_start == 0 && vector_end == STANDARD_VECTOR_SIZE) {
 			// entire vector is encapsulated by append: store a single constant insert id
-			vector_info[vector_idx] =
-			    make_uniq<ChunkVectorInfo>(allocator, vector_idx * STANDARD_VECTOR_SIZE, transaction.view.transaction_id);
+			vector_info[vector_idx] = make_uniq<ChunkVectorInfo>(allocator, vector_idx * STANDARD_VECTOR_SIZE,
+			                                                     Stamp(transaction.view.transaction_id));
 		} else {
 			// part of a vector is encapsulated: append to that part
 			if (!vector_info[vector_idx]) {
 				// first time appending to this vector: create new info
 				vector_info[vector_idx] = make_uniq<ChunkVectorInfo>(allocator, vector_idx * STANDARD_VECTOR_SIZE);
 			}
-			vector_info[vector_idx]->Append(vector_start, vector_end, transaction.view.transaction_id);
+			vector_info[vector_idx]->Append(vector_start, vector_end, Stamp(transaction.view.transaction_id));
 		}
 	}
 }
@@ -143,7 +143,7 @@ void RowVersionManager::CommitAppend(transaction_t commit_id, idx_t row_group_st
 	}
 }
 
-void RowVersionManager::CleanupAppend(transaction_t lowest_snapshot_bound, idx_t row_group_start, idx_t count) {
+void RowVersionManager::CleanupAppend(SnapshotBound lowest_snapshot_bound, idx_t row_group_start, idx_t count) {
 	if (count == 0) {
 		return;
 	}
@@ -205,7 +205,7 @@ void RowVersionManager::CommitDelete(idx_t vector_idx, transaction_t commit_id, 
 	GetVectorInfo(vector_idx).CommitDelete(commit_id, info);
 }
 
-void RowVersionManager::CompressVersionIds(transaction_t lowest_snapshot_bound) {
+void RowVersionManager::CompressVersionIds(SnapshotBound lowest_snapshot_bound) {
 	lock_guard<mutex> lock(version_lock);
 	if (!needs_compression_check) {
 		// no version ids were modified since the last pass, and the last pass left nothing
@@ -275,7 +275,7 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 	}
 
 	if (uncheckpointed_delete_commit.IsValid() &&
-	    SnapshotId(uncheckpointed_delete_commit.GetIndex()).VisibleTo(options.snapshot_bound)) {
+	    CommitId(uncheckpointed_delete_commit.GetIndex()).Below(options.snapshot_bound)) {
 		// the last checkpointed id was either before or on the transaction we are checkpointing
 		// nothing to checkpoint in future commits until more deletes appear
 		uncheckpointed_delete_commit = optional_idx();

@@ -1066,11 +1066,11 @@ ScanOptions::ScanOptions(TransactionData transaction) : transaction(transaction)
 void RowGroup::Scan(CollectionScanState &state, DataChunk &result, TableScanType type) {
 	auto &transaction_manager = DuckTransactionManager::Get(GetCollection().GetAttached());
 
-	transaction_t snapshot_bound;
-	transaction_t transaction_id;
+	SnapshotBound snapshot_bound;
+	TransactionId transaction_id;
 	if (type == TableScanType::TABLE_SCAN_COMMITTED_ROWS) {
-		snapshot_bound = transaction_manager.GetLastCommit().Next();
-		transaction_id = MAX_TRANSACTION_ID;
+		snapshot_bound = SnapshotBound::Through(transaction_manager.GetLastCommit());
+		transaction_id = TransactionId::None();
 	} else {
 		snapshot_bound = transaction_manager.LowestSnapshotBound();
 		transaction_id = transaction_manager.LowestActiveId();
@@ -1292,7 +1292,7 @@ void RowGroup::FinalizeAppend(RowGroupAppendState &state) {
 	}
 }
 
-void RowGroup::CleanupAppend(transaction_t lowest_snapshot_bound, idx_t start, idx_t count) {
+void RowGroup::CleanupAppend(SnapshotBound lowest_snapshot_bound, idx_t start, idx_t count) {
 	auto &vinfo = GetOrCreateVersionInfo();
 	vinfo.CleanupAppend(lowest_snapshot_bound, start, count);
 }
@@ -1485,7 +1485,7 @@ idx_t RowGroup::GetCommittedRowCount() {
 	if (!vinfo) {
 		return count;
 	}
-	ScanOptions options(TransactionData(SnapshotId(0), TRANSACTION_ID_START));
+	ScanOptions options(TransactionData(TransactionId(0), SnapshotBound::AllCommitted()));
 	options.insert_type = InsertedScanType::ALL_ROWS;
 	options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
 	return vinfo->GetRowCount(options, count);
@@ -1918,7 +1918,7 @@ PersistentRowGroupData RowGroup::SerializeRowGroupInfo(idx_t row_group_start) co
 	return result;
 }
 
-void RowGroup::CompressVersionInfo(transaction_t lowest_snapshot_bound) {
+void RowGroup::CompressVersionInfo(SnapshotBound lowest_snapshot_bound) {
 	if (HasUnloadedDeletes()) {
 		// deletes were not loaded - they are still stored in their compact serialized form
 		return;
@@ -2138,7 +2138,7 @@ void VersionDeleteState::Flush() {
 	// it is possible for delete statements to delete the same tuple multiple times when combined with a USING clause
 	// in the current_info->Delete, we check which tuples are actually deleted (excluding duplicate deletions)
 	// this is returned in the actual_delete_count
-	auto actual_delete_count = info.DeleteRows(current_chunk, transaction.view.transaction_id, rows, count);
+	auto actual_delete_count = info.DeleteRows(current_chunk, Stamp(transaction.view.transaction_id), rows, count);
 	delete_count += actual_delete_count;
 	if (transaction.transaction && actual_delete_count > 0) {
 		// now push the delete into the undo buffer, but only if any deletes were actually performed

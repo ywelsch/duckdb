@@ -77,9 +77,9 @@ public:
 	DUCKDB_API bool DropEntry(ClientContext &context, const Identifier &name, bool cascade,
 	                          bool allow_drop_internal = false);
 	//! Verify that the entry referenced by the dependency is still alive
-	DUCKDB_API void VerifyExistenceOfDependency(transaction_t commit_id, CatalogEntry &entry);
+	DUCKDB_API void VerifyExistenceOfDependency(CommitId commit_id, CatalogEntry &entry);
 	//! Verify we can still drop the entry while committing
-	DUCKDB_API void CommitDrop(transaction_t commit_id, transaction_t snapshot_bound, CatalogEntry &entry);
+	DUCKDB_API void CommitDrop(CommitId commit_id, SnapshotBound snapshot_bound, CatalogEntry &entry);
 
 	DUCKDB_API DuckCatalog &GetCatalog();
 

@@ -53,9 +53,9 @@ DuckTransactionManager::DuckTransactionManager(AttachedDatabase &db) : Transacti
 	// it should be much higher than the current start timestamp
 	// if transaction_id < start_timestamp for any set of active transactions
 	// uncommitted data could be read by
-	current_transaction_id = TRANSACTION_ID_START;
-	lowest_active_id = TRANSACTION_ID_START;
-	lowest_snapshot_bound = MAX_TRANSACTION_ID;
+	current_transaction_id = TransactionId::First();
+	lowest_active_id = TransactionId::First();
+	lowest_snapshot_bound = SnapshotBound::IncludingUncommitted();
 	active_checkpoint = 0;
 	if (!db.GetCatalog().IsDuckCatalog()) {
 		// Specifically the StorageManager of the DuckCatalog is relied on, with `db.GetStorageManager`
@@ -82,18 +82,18 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 		start_lock.lock();
 	}
 	lock_guard<mutex> lock(transaction_lock);
-	if (!current_start_timestamp.IsCommitted()) { // LCOV_EXCL_START
+	if (current_start_timestamp.GetIndex() >= TRANSACTION_ID_START_VALUE) { // LCOV_EXCL_START
 		throw InternalException("Cannot start more transactions, ran out of "
 		                        "transaction identifiers!");
 	} // LCOV_EXCL_STOP
 
 	// obtain the start time and transaction ID of this transaction
-	transaction_t start_time = current_start_timestamp;
+	CommitId start_time = current_start_timestamp;
 	current_start_timestamp = current_start_timestamp.Next();
-	transaction_t transaction_id = current_transaction_id;
+	TransactionId transaction_id = current_transaction_id;
 	current_transaction_id = current_transaction_id.Next();
 	if (active_transactions.empty()) {
-		lowest_snapshot_bound = start_time;
+		lowest_snapshot_bound = SnapshotBound::Before(start_time);
 		lowest_active_id = transaction_id;
 	}
 
@@ -248,7 +248,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 	CheckpointOptions options;
-	if (!GetLastCommit().VisibleTo(LowestSnapshotBound())) {
+	if (!GetLastCommit().Below(LowestSnapshotBound())) {
 		// we cannot do a full checkpoint if any transaction needs to read old data
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
 	}
@@ -276,7 +276,7 @@ unique_ptr<StorageLockKey> DuckTransactionManager::TryGetVacuumLock() {
 	return vacuum_lock.TryGetExclusiveLock();
 }
 
-transaction_t DuckTransactionManager::GetCommitTimestamp() {
+CommitId DuckTransactionManager::GetCommitTimestamp() {
 	auto commit_id = current_start_timestamp;
 	current_start_timestamp = current_start_timestamp.Next();
 	return commit_id;
@@ -397,11 +397,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	if (error.HasError()) {
-		DUCKDB_LOG(context, TransactionLogType, db, "Rollback (after failed commit)", info.commit_id);
+		DUCKDB_LOG(context, TransactionLogType, db, "Rollback (after failed commit)", Stamp(info.commit_id));
 
 		// COMMIT not successful: ROLLBACK.
 		checkpoint_decision = CheckpointDecision(error.Message());
-		transaction.commit_id = SnapshotId(0);
+		transaction.commit_id = CommitId(0);
 
 		auto rollback_error = transaction.Rollback();
 		if (rollback_error.HasError()) {
@@ -410,11 +410,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 			    error.Message(), rollback_error.Message());
 		}
 	} else {
-		DUCKDB_LOG(context, TransactionLogType, db, "Commit", info.commit_id);
+		DUCKDB_LOG(context, TransactionLogType, db, "Commit", Stamp(info.commit_id));
 		last_commit = info.commit_id;
 
 		// check if catalog changes were made
-		if (transaction.catalog_version >= SnapshotId::TRANSACTION_ID_START_VALUE) {
+		if (transaction.catalog_version >= TRANSACTION_ID_START_VALUE) {
 			transaction.catalog_version = ++last_committed_version;
 		}
 	}
@@ -479,7 +479,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
 
-	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.transaction_id);
+	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", Stamp(transaction.transaction_id));
 
 	ErrorData error;
 	{
@@ -526,15 +526,16 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 	// Find the transaction in the active transactions,
 	// as well as the lowest start time, transaction id, and active query.
 	idx_t t_index = active_transactions.size();
-	auto lowest_snapshot_bound = TRANSACTION_ID_START;
-	auto lowest_transaction_id = MAX_TRANSACTION_ID;
+	auto lowest_snapshot_bound = SnapshotBound::AllCommitted();
+	auto lowest_transaction_id = TransactionId::None();
 	for (idx_t i = 0; i < active_transactions.size(); i++) {
 		if (active_transactions[i].get() == &transaction) {
 			t_index = i;
 			continue;
 		}
-		lowest_snapshot_bound = SnapshotId::Min(lowest_snapshot_bound, active_transactions[i]->start_time);
-		lowest_transaction_id = SnapshotId::Min(lowest_transaction_id, active_transactions[i]->transaction_id);
+		lowest_snapshot_bound =
+		    SnapshotBound::Min(lowest_snapshot_bound, SnapshotBound::Before(active_transactions[i]->start_time));
+		lowest_transaction_id = TransactionId::Min(lowest_transaction_id, active_transactions[i]->transaction_id);
 	}
 	this->lowest_snapshot_bound = lowest_snapshot_bound;
 	lowest_active_id = lowest_transaction_id;
@@ -544,7 +545,7 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 	auto current_transaction = std::move(active_transactions[t_index]);
 	if (store_transaction) {
 		// If the transaction made any changes, we need to keep it around.
-		if (transaction.commit_id != SnapshotId(0)) {
+		if (transaction.commit_id != CommitId(0)) {
 			// The transaction was committed.
 			// We add it to the list of recently committed transactions.
 			recently_committed_transactions.push_back(std::move(current_transaction));
@@ -567,7 +568,7 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 	idx_t i = 0;
 	for (; i < recently_committed_transactions.size(); i++) {
 		D_ASSERT(recently_committed_transactions[i]);
-		if (!recently_committed_transactions[i]->commit_id.VisibleTo(lowest_snapshot_bound)) {
+		if (!recently_committed_transactions[i]->commit_id.Below(lowest_snapshot_bound)) {
 			// recently_committed_transactions is ordered on commit_id.
 			// Thus, if the current commit_id is greater than
 			// lowest_snapshot_bound, any subsequent commit IDs are also greater.

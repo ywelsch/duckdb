@@ -29,18 +29,17 @@
 namespace duckdb {
 
 TransactionData::TransactionData(DuckTransaction &transaction_p) // NOLINT
-    : transaction(&transaction_p), view(transaction_p.start_time, transaction_p.transaction_id) {
+    : transaction(&transaction_p), view(SnapshotBound::Before(transaction_p.start_time), transaction_p.transaction_id) {
 }
-TransactionData::TransactionData(transaction_t transaction_id_p, transaction_t snapshot_bound_p)
+TransactionData::TransactionData(TransactionId transaction_id_p, SnapshotBound snapshot_bound_p)
     : transaction(nullptr), view(snapshot_bound_p, transaction_id_p) {
 }
 
-DuckTransaction::DuckTransaction(DuckTransactionManager &manager, ClientContext &context_p, transaction_t start_time,
-                                 transaction_t transaction_id, idx_t catalog_version_p)
-    : Transaction(manager, context_p), start_time(start_time), transaction_id(transaction_id), commit_id(0),
+DuckTransaction::DuckTransaction(DuckTransactionManager &manager, ClientContext &context_p, CommitId start_time,
+                                 TransactionId transaction_id, idx_t catalog_version_p)
+    : Transaction(manager, context_p), start_time(start_time), transaction_id(transaction_id), commit_id(CommitId(0)),
       catalog_version(catalog_version_p), awaiting_cleanup(false), undo_buffer(*this, context_p),
       storage(make_uniq<LocalStorage>(context_p, *this)) {
-	D_ASSERT(start_time.IsCommitted() && !transaction_id.IsCommitted());
 }
 
 DuckTransaction::~DuckTransaction() {
@@ -140,7 +139,7 @@ UndoBufferReference DuckTransaction::CreateUpdateInfo(DuckTableEntry &table_entr
 	idx_t alloc_size = UpdateInfo::GetAllocSize(type_size);
 	auto undo_entry = undo_buffer.CreateEntry(UndoFlags::UPDATE_TUPLE, alloc_size);
 	auto &update_info = UpdateInfo::Get(undo_entry);
-	UpdateInfo::Initialize(update_info, table_entry, transaction_id, row_group_start);
+	UpdateInfo::Initialize(update_info, table_entry, Stamp(transaction_id), row_group_start);
 	return undo_entry;
 }
 
@@ -300,7 +299,7 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 	}
 
 	try {
-		undo_buffer.RevertCommit(iterator_state, this->transaction_id);
+		undo_buffer.RevertCommit(iterator_state, Stamp(this->transaction_id));
 		if (!db.IsSystem() && !db.IsTemporary() &&
 		    Settings::Get<DebugForceCommitRevertFailureSetting>(db.GetDatabase())) {
 			throw IOException("Forced RevertCommit failure (debug_force_commit_revert_failure)");
@@ -336,7 +335,7 @@ ErrorData DuckTransaction::Rollback() {
 	}
 }
 
-void DuckTransaction::Cleanup(transaction_t lowest_snapshot_bound) {
+void DuckTransaction::Cleanup(SnapshotBound lowest_snapshot_bound) {
 	undo_buffer.Cleanup(lowest_snapshot_bound);
 }
 
