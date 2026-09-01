@@ -40,18 +40,18 @@ struct TransactionReference {
 class MetaTransaction {
 public:
 	DUCKDB_API MetaTransaction(ClientContext &context, timestamp_t start_timestamp,
-	                           transaction_t global_transaction_id);
+	                           idx_t global_transaction_id);
 	DUCKDB_API ~MetaTransaction();
 
 	ClientContext &context;
 	//! The timestamp when the transaction started
 	timestamp_t start_timestamp;
 	//! The global identifier of the transaction
-	transaction_t global_transaction_id;
+	idx_t global_transaction_id;
 	//! The validity checker of the transaction
 	ValidChecker transaction_validity;
 	//! The active query number
-	atomic<transaction_t> active_query;
+	atomic<idx_t> active_query;
 
 public:
 	DUCKDB_API static MetaTransaction &Get(ClientContext &context);
@@ -69,7 +69,7 @@ public:
 	void Finalize();
 
 	idx_t GetActiveQuery();
-	void SetActiveQuery(transaction_t query_number);
+	void SetActiveQuery(idx_t query_number);
 
 	void SetReadOnly();
 	bool IsReadOnly() const;

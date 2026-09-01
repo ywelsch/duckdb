@@ -199,8 +199,8 @@ idx_t RowVersionManager::DeleteRows(idx_t vector_idx, transaction_t transaction_
 void RowVersionManager::CommitDelete(idx_t vector_idx, transaction_t commit_id, const DeleteInfo &info) {
 	lock_guard<mutex> lock(version_lock);
 	needs_compression_check = true;
-	if (!uncheckpointed_delete_commit.IsValid() || commit_id > uncheckpointed_delete_commit.GetIndex()) {
-		uncheckpointed_delete_commit = commit_id;
+	if (!uncheckpointed_delete_commit.IsValid() || commit_id.GetIndex() > uncheckpointed_delete_commit.GetIndex()) {
+		uncheckpointed_delete_commit = commit_id.GetIndex();
 	}
 	GetVectorInfo(vector_idx).CommitDelete(commit_id, info);
 }
@@ -275,7 +275,7 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 	}
 
 	if (uncheckpointed_delete_commit.IsValid() &&
-	    VisibleToSnapshot(uncheckpointed_delete_commit.GetIndex(), options.snapshot_bound)) {
+	    VisibleToSnapshot(SnapshotId(uncheckpointed_delete_commit.GetIndex()), options.snapshot_bound)) {
 		// the last checkpointed id was either before or on the transaction we are checkpointing
 		// nothing to checkpoint in future commits until more deletes appear
 		uncheckpointed_delete_commit = optional_idx();

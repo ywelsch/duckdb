@@ -149,7 +149,7 @@ private:
 	//! Lock necessary to start transactions only - used by FORCE CHECKPOINT to prevent new transactions from starting
 	mutex start_transaction_lock;
 
-	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START};
+	atomic<idx_t> last_uncommitted_catalog_version = {SnapshotId::TRANSACTION_ID_START_VALUE};
 	idx_t last_committed_version = 0;
 
 	//! Only one cleanup can be active at any time.

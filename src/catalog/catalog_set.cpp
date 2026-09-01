@@ -105,7 +105,7 @@ bool CatalogSet::StartChain(CatalogTransaction transaction, const Identifier &na
 	// first create a dummy deleted entry
 	// so other transactions will see that instead of the entry that is to be added.
 	auto dummy_node = make_uniq<InCatalogEntry>(CatalogType::INVALID, catalog, name);
-	dummy_node->timestamp = 0;
+	dummy_node->timestamp = SnapshotId(0);
 	dummy_node->deleted = true;
 	dummy_node->set = this;
 
@@ -164,7 +164,7 @@ optional_ptr<CatalogEntry> CatalogSet::CreateCommittedEntry(unique_ptr<CatalogEn
 
 	entry->set = this;
 	// Give the entry commit id 0, so it is visible to all transactions
-	entry->timestamp = 0;
+	entry->timestamp = SnapshotId(0);
 	map.AddEntry(std::move(entry));
 
 	return catalog_entry;
@@ -467,7 +467,7 @@ void CatalogSet::VerifyExistenceOfDependency(transaction_t commit_id, CatalogEnt
 	auto transaction_id = MAX_TRANSACTION_ID;
 	D_ASSERT(IsCommitted(commit_id));
 	// This will allow us to see all committed changes made before this COMMIT happened
-	auto snapshot_bound = commit_id + 1;
+	auto snapshot_bound = commit_id.Next();
 	CatalogTransaction commit_transaction(duck_catalog.GetDatabase(), transaction_id, snapshot_bound);
 
 	D_ASSERT(entry.type == CatalogType::DEPENDENCY_ENTRY);

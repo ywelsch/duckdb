@@ -677,7 +677,7 @@ void DependencyManager::ReorderEntries(catalog_entry_vector_t &entries, ClientCo
 
 void DependencyManager::ReorderEntries(catalog_entry_vector_t &entries) {
 	// Read all committed entries. A checkpoint writes internal entries too
-	CatalogTransaction transaction(catalog.GetDatabase(), TRANSACTION_ID_START - 1, TRANSACTION_ID_START - 1);
+	CatalogTransaction transaction(catalog.GetDatabase(), TRANSACTION_ID_START.Prev(), TRANSACTION_ID_START.Prev());
 	ReorderEntries(entries, transaction, true);
 }
 

@@ -1069,7 +1069,7 @@ void RowGroup::Scan(CollectionScanState &state, DataChunk &result, TableScanType
 	transaction_t start_ts;
 	transaction_t transaction_id;
 	if (type == TableScanType::TABLE_SCAN_COMMITTED_ROWS) {
-		start_ts = transaction_manager.GetLastCommit() + 1;
+		start_ts = transaction_manager.GetLastCommit().Next();
 		transaction_id = MAX_TRANSACTION_ID;
 	} else {
 		start_ts = transaction_manager.LowestSnapshotBound();
@@ -1485,7 +1485,7 @@ idx_t RowGroup::GetCommittedRowCount() {
 	if (!vinfo) {
 		return count;
 	}
-	ScanOptions options(TransactionData(0, TRANSACTION_ID_START));
+	ScanOptions options(TransactionData(SnapshotId(0), TRANSACTION_ID_START));
 	options.insert_type = InsertedScanType::ALL_ROWS;
 	options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
 	return vinfo->GetRowCount(options, count);

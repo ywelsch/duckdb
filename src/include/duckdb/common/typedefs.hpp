@@ -52,24 +52,33 @@ struct SnapshotId {
 	static constexpr SnapshotId Min(SnapshotId a, SnapshotId b) {
 		return a.value < b.value ? a : b;
 	}
+	//! The higher of two stamps
+	static constexpr SnapshotId Max(SnapshotId a, SnapshotId b) {
+		return a.value > b.value ? a : b;
+	}
 	//! The next stamp on the timeline - turns an inclusive bound into an exclusive one
 	constexpr SnapshotId Next() const {
 		return SnapshotId(value + 1);
+	}
+	//! The previous stamp on the timeline
+	constexpr SnapshotId Prev() const {
+		return SnapshotId(value - 1);
 	}
 	//! The raw stamp - only for serialization and logging
 	constexpr idx_t GetIndex() const {
 		return value;
 	}
 
-	constexpr bool operator==(SnapshotId other) const {
-		return value == other.value;
-	}
-	constexpr bool operator!=(SnapshotId other) const {
-		return value != other.value;
-	}
-
 	idx_t value = 0;
 };
+
+//! Free functions, not members: a member operator would not convert an atomic<SnapshotId> on the left
+constexpr bool operator==(SnapshotId a, SnapshotId b) {
+	return a.GetIndex() == b.GetIndex();
+}
+constexpr bool operator!=(SnapshotId a, SnapshotId b) {
+	return a.GetIndex() != b.GetIndex();
+}
 
 //! Type used for transaction timestamps
 typedef SnapshotId transaction_t;

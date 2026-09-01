@@ -88,16 +88,16 @@ public:
 	//! as the database manager has to be alive when destroying the catalog set objects.
 	void ResetDatabases();
 
-	transaction_t GetNewQueryNumber() {
+	idx_t GetNewQueryNumber() {
 		return current_query_number++;
 	}
-	transaction_t ActiveQueryNumber() const {
+	idx_t ActiveQueryNumber() const {
 		return current_query_number;
 	}
-	transaction_t GetNewTransactionNumber() {
+	idx_t GetNewTransactionNumber() {
 		return current_transaction_id++;
 	}
-	transaction_t ActiveTransactionNumber() const {
+	idx_t ActiveTransactionNumber() const {
 		return current_transaction_id;
 	}
 	idx_t NextOid() {
@@ -127,9 +127,9 @@ private:
 	//! The next object id handed out by the NextOid method
 	atomic<idx_t> next_oid;
 	//! The current query number
-	atomic<transaction_t> current_query_number;
+	atomic<idx_t> current_query_number;
 	//! The current transaction number
-	atomic<transaction_t> current_transaction_id;
+	atomic<idx_t> current_transaction_id;
 	//! Count of remote catalogs currently attached; used to skip the remote pushdown optimizer when zero
 	atomic<CheckedInteger<idx_t, InternalException>> remote_catalog_count;
 	//! Manager for ensuring we never open the same database file twice in the same program

@@ -211,7 +211,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 	try {
 		// read at the commits seen so far, not at this transaction's older snapshot
 		auto &transaction_manager = DuckTransactionManager::Get(db);
-		TransactionData rewrite_visibility(transaction.transaction_id, transaction_manager.GetLastCommit() + 1);
+		TransactionData rewrite_visibility(transaction.transaction_id, transaction_manager.GetLastCommit().Next());
 		row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
 		                                          rewrite_visibility);
 
@@ -538,7 +538,7 @@ void DataTable::Fetch(DuckTransaction &transaction, DataChunk &result, const vec
 
 void DataTable::FetchCommitted(DataChunk &result, const vector<StorageIndex> &column_ids, const Vector &row_identifiers,
                                idx_t fetch_count, ColumnFetchState &state) {
-	TransactionData commit_transaction(MAX_TRANSACTION_ID, TRANSACTION_ID_START - 1);
+	TransactionData commit_transaction(MAX_TRANSACTION_ID, TRANSACTION_ID_START.Prev());
 	row_groups->Fetch(commit_transaction, result, column_ids, row_identifiers, fetch_count, state);
 }
 

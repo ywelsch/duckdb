@@ -55,7 +55,7 @@ public:
 
 	idx_t GetActiveQuery();
 	void ResetActiveQuery();
-	void SetActiveQuery(transaction_t query_number);
+	void SetActiveQuery(idx_t query_number);
 
 	void SetInvalidationPolicy(TransactionInvalidationPolicy new_invalidation_policy);
 	TransactionInvalidationPolicy GetInvalidationPolicy() {

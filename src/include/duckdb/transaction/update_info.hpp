@@ -61,7 +61,7 @@ struct UpdateInfo {
 	bool AppliesToTransaction(transaction_t snapshot_bound, transaction_t transaction_id) {
 		// these tuples are either committed outside this transaction's snapshot or not committed yet, use
 		// tuples stored in this version
-		if (version_number == TRANSACTION_ID_START - 1) {
+		if (version_number == TRANSACTION_ID_START.Prev()) {
 			// dummy transaction number for the root element - should always match
 			return true;
 		}

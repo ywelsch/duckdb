@@ -66,7 +66,7 @@ void UpdateInfo::Print() {
 string UpdateInfo::ToString() {
 	auto &type = segment->column_data.type;
 	string result = "Update Info [" + type.ToString() + ", Count: " + to_string(N) +
-	                ", Transaction Id: " + to_string(version_number) + "]\n";
+	                ", Transaction Id: " + to_string(version_number.load().GetIndex()) + "]\n";
 	auto tuples = GetTuples();
 	for (idx_t i = 0; i < N; i++) {
 		result += to_string(tuples[i]) + ": " + GetValue(i).ToString() + "\n";
@@ -1502,7 +1502,7 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 		idx_t alloc_size = UpdateInfo::GetAllocSize(type_size, compact_capacity);
 		auto handle = root->allocator.Allocate(alloc_size);
 		auto &update_info = UpdateInfo::Get(handle);
-		UpdateInfo::Initialize(update_info, table_entry, TRANSACTION_ID_START - 1, row_group_start, compact_capacity);
+		UpdateInfo::Initialize(update_info, table_entry, TRANSACTION_ID_START.Prev(), row_group_start, compact_capacity);
 		update_info.column_index = column_index;
 
 		InitializeUpdateInfo(update_info, ids, sel, count, vector_index, vector_offset);

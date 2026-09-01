@@ -612,7 +612,7 @@ bool RowGroupCollection::CanFetch(TransactionData transaction, const row_t row_i
 // Append
 //===--------------------------------------------------------------------===//
 TableAppendState::TableAppendState()
-    : row_group_append_state(*this), total_append_count(0), start_row_group(nullptr), transaction(0, 0),
+    : row_group_append_state(*this), total_append_count(0), start_row_group(nullptr), transaction(SnapshotId(0), SnapshotId(0)),
       hashes(LogicalType::HASH) {
 }
 
@@ -667,7 +667,7 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 }
 
 void RowGroupCollection::InitializeAppend(TableAppendState &state) {
-	TransactionData tdata(0, 0);
+	TransactionData tdata(SnapshotId(0), SnapshotId(0));
 	InitializeAppend(tdata, state);
 }
 
@@ -1029,7 +1029,7 @@ void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableInd
 
 	ColumnFetchState state;
 	state.fetch_type = FetchType::FORCE_FETCH;
-	TransactionData commit_transaction(MAX_TRANSACTION_ID, TRANSACTION_ID_START - 1);
+	TransactionData commit_transaction(MAX_TRANSACTION_ID, TRANSACTION_ID_START.Prev());
 	Fetch(commit_transaction, fetch_chunk, column_ids, row_identifiers, count, state);
 
 	// Used for index value removal.

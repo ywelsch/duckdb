@@ -52,7 +52,7 @@ enum class DeleteIdState : uint8_t { CONSTANT, MASKED, ARRAY };
 
 class ChunkVectorInfo {
 public:
-	explicit ChunkVectorInfo(FixedSizeAllocator &allocator, idx_t start, transaction_t insert_id = 0);
+	explicit ChunkVectorInfo(FixedSizeAllocator &allocator, idx_t start, transaction_t insert_id = SnapshotId(0));
 	ChunkVectorInfo(FixedSizeAllocator &allocator, idx_t start, transaction_t insert_id, transaction_t delete_id);
 	~ChunkVectorInfo();
 
@@ -138,7 +138,7 @@ private:
 	//! visible to all transactions (the value used when read from disk); a non-zero committed id means the
 	//! mask was folded from one committed transaction whose delete is not yet visible to every snapshot.
 	//! Only meaningful when delete_state == DeleteIdState::MASKED.
-	transaction_t mask_delete_id = 0;
+	transaction_t mask_delete_id = SnapshotId(0);
 	//! The current delete-side storage state - the single source of truth for the delete side
 	DeleteIdState delete_state = DeleteIdState::CONSTANT;
 	//! Whether a compression pass could achieve anything for this vector: armed by any id modification,

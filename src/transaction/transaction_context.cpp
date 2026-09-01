@@ -142,7 +142,7 @@ void TransactionContext::ResetActiveQuery() {
 	}
 }
 
-void TransactionContext::SetActiveQuery(transaction_t query_number) {
+void TransactionContext::SetActiveQuery(idx_t query_number) {
 	if (!current_transaction) {
 		throw InternalException("SetActiveQuery called without active transaction");
 	}

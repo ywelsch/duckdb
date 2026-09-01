@@ -48,7 +48,7 @@ bool DuckCleanupInfo::ScheduleCleanup() noexcept {
 DuckTransactionManager::DuckTransactionManager(AttachedDatabase &db) : TransactionManager(db) {
 	// the first timestamp a real transaction can draw: one past the bootstrap stamp, which is also
 	// the bound the system transaction reads at
-	current_start_timestamp = SYSTEM_TRANSACTION_TIMESTAMP + 1;
+	current_start_timestamp = SYSTEM_TRANSACTION_TIMESTAMP.Next();
 	// transaction ID starts very high:
 	// it should be much higher than the current start timestamp
 	// if transaction_id < start_timestamp for any set of active transactions
@@ -82,14 +82,16 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 		start_lock.lock();
 	}
 	lock_guard<mutex> lock(transaction_lock);
-	if (current_start_timestamp >= TRANSACTION_ID_START) { // LCOV_EXCL_START
+	if (!current_start_timestamp.IsCommitted()) { // LCOV_EXCL_START
 		throw InternalException("Cannot start more transactions, ran out of "
 		                        "transaction identifiers!");
 	} // LCOV_EXCL_STOP
 
 	// obtain the start time and transaction ID of this transaction
-	transaction_t start_time = current_start_timestamp++;
-	transaction_t transaction_id = current_transaction_id++;
+	transaction_t start_time = current_start_timestamp;
+	current_start_timestamp = current_start_timestamp.Next();
+	transaction_t transaction_id = current_transaction_id;
+	current_transaction_id = current_transaction_id.Next();
 	if (active_transactions.empty()) {
 		lowest_snapshot_bound = start_time;
 		lowest_active_id = transaction_id;
@@ -174,7 +176,7 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 					if (!other_transactions.empty()) {
 						other_transactions += ", ";
 					}
-					other_transactions += "[" + to_string(active_transaction->transaction_id) + "]";
+					other_transactions += "[" + to_string(active_transaction->transaction_id.GetIndex()) + "]";
 				}
 			}
 			if (!other_transactions.empty()) {
@@ -275,7 +277,9 @@ unique_ptr<StorageLockKey> DuckTransactionManager::TryGetVacuumLock() {
 }
 
 transaction_t DuckTransactionManager::GetCommitTimestamp() {
-	return current_start_timestamp++;
+	auto commit_id = current_start_timestamp;
+	current_start_timestamp = current_start_timestamp.Next();
+	return commit_id;
 }
 
 void DuckTransactionManager::CleanupTransactions() {
@@ -397,7 +401,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 		// COMMIT not successful: ROLLBACK.
 		checkpoint_decision = CheckpointDecision(error.Message());
-		transaction.commit_id = 0;
+		transaction.commit_id = SnapshotId(0);
 
 		auto rollback_error = transaction.Rollback();
 		if (rollback_error.HasError()) {
@@ -410,7 +414,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		last_commit = info.commit_id;
 
 		// check if catalog changes were made
-		if (!IsCommitted(transaction.catalog_version)) {
+		if (transaction.catalog_version >= SnapshotId::TRANSACTION_ID_START_VALUE) {
 			transaction.catalog_version = ++last_committed_version;
 		}
 	}
@@ -529,8 +533,8 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 			t_index = i;
 			continue;
 		}
-		lowest_snapshot_bound = MinValue(lowest_snapshot_bound, active_transactions[i]->start_time);
-		lowest_transaction_id = MinValue(lowest_transaction_id, active_transactions[i]->transaction_id);
+		lowest_snapshot_bound = SnapshotId::Min(lowest_snapshot_bound, active_transactions[i]->start_time);
+		lowest_transaction_id = SnapshotId::Min(lowest_transaction_id, active_transactions[i]->transaction_id);
 	}
 	this->lowest_snapshot_bound = lowest_snapshot_bound;
 	lowest_active_id = lowest_transaction_id;
@@ -540,7 +544,7 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 	auto current_transaction = std::move(active_transactions[t_index]);
 	if (store_transaction) {
 		// If the transaction made any changes, we need to keep it around.
-		if (transaction.commit_id != 0) {
+		if (transaction.commit_id != SnapshotId(0)) {
 			// The transaction was committed.
 			// We add it to the list of recently committed transactions.
 			recently_committed_transactions.push_back(std::move(current_transaction));

@@ -94,7 +94,7 @@ void TransactionIdCurrent(DataChunk &input, ExpressionState &state, Vector &resu
 	auto &context = state.GetContext();
 	auto &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 	auto &transaction = DuckTransaction::Get(context, catalog);
-	auto val = Value::UBIGINT(transaction.start_time);
+	auto val = Value::UBIGINT(transaction.start_time.GetIndex());
 	result.Reference(val, count_t(input.size()));
 }
 

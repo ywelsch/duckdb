@@ -267,7 +267,7 @@ string TransactionLogType::ConstructLogMessage(const AttachedDatabase &db, const
 	child_list_t<Value> child_list = {
 	    {"database", db.name.GetIdentifierName()},
 	    {"type", log_type},
-	    {"transaction_id", transaction_id == MAX_TRANSACTION_ID ? Value() : Value::UBIGINT(transaction_id)},
+	    {"transaction_id", transaction_id == MAX_TRANSACTION_ID ? Value() : Value::UBIGINT(transaction_id.GetIndex())},
 	};
 
 	return Value::STRUCT(std::move(child_list)).ToString();

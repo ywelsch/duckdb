@@ -383,7 +383,7 @@ private:
 	//! Pre-images of the secrets modified by the active transaction, a null entry meaning "did not exist"
 	identifier_map_t<unique_ptr<SecretEntry>> undo_log;
 	//! The transaction the pre-images belong to
-	transaction_t undo_transaction_id = 0;
+	idx_t undo_transaction_id = 0;
 };
 
 //! Fetch the calling connection's secret container. With create=false returns nullptr when there is no context or no

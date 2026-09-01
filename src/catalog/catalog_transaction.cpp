@@ -40,7 +40,7 @@ CatalogTransaction CatalogTransaction::GetSystemCatalogTransaction(ClientContext
 CatalogTransaction CatalogTransaction::GetSystemTransaction(DatabaseInstance &db) {
 	// the bound is one past the bootstrap stamp: the system transaction sees the bootstrap entries
 	// and nothing else, since the timestamp counter starts above them
-	return CatalogTransaction(db, SYSTEM_TRANSACTION_TIMESTAMP, SYSTEM_TRANSACTION_TIMESTAMP + 1);
+	return CatalogTransaction(db, SYSTEM_TRANSACTION_TIMESTAMP, SYSTEM_TRANSACTION_TIMESTAMP.Next());
 }
 
 } // namespace duckdb

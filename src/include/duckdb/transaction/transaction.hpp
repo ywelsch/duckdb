@@ -47,7 +47,7 @@ public:
 	weak_ptr<ClientContext> context;
 	//! The current active query for the transaction. Set to MAXIMUM_QUERY_ID if
 	//! no query is active.
-	atomic<transaction_t> active_query;
+	atomic<idx_t> active_query;
 
 public:
 	DUCKDB_API static Transaction &Get(ClientContext &context, AttachedDatabase &db);

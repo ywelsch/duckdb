@@ -505,7 +505,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 		bool deletes_pending = false;
 		bool deletes_uncommitted = false;
 		bool deletes_equal = true;
-		transaction_t max_delete_id = 0;
+		transaction_t max_delete_id = SnapshotId(0);
 		transaction_t shared_delete_id = NOT_DELETED_ID;
 		{
 			auto segment = allocator.GetHandle(GetDeletedPointer());
@@ -524,7 +524,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 						deletes_uncommitted = true;
 					}
 				} else {
-					max_delete_id = MaxValue(max_delete_id, deleted[i]);
+					max_delete_id = SnapshotId::Max(max_delete_id, deleted[i]);
 				}
 				// track whether every deleted row shares a single id
 				if (shared_delete_id == NOT_DELETED_ID) {
@@ -543,7 +543,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 			pending = true;
 		} else if (!deletes_pending) {
 			// partially deleted, every delete visible to all - compress to a mask (terminal)
-			CompressDeleteToMask(0);
+			CompressDeleteToMask(SnapshotId(0));
 		} else if (deletes_equal && !deletes_uncommitted) {
 			// partially deleted, every delete committed by the same transaction but not yet visible to
 			// all - compress to a mask carrying that single committed id (terminal). Older snapshots still
@@ -572,7 +572,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 		if (can_compress) {
 			allocator.Free(inserted_data);
 			inserted_data = IndexPointer();
-			constant_insert_id = 0;
+			constant_insert_id = SnapshotId(0);
 		} else {
 			// insert ids become visible to all transactions (or are reverted) eventually
 			pending = true;
@@ -643,7 +643,7 @@ bool ChunkVectorInfo::Cleanup(transaction_t lowest_snapshot_bound) const {
 	return true;
 }
 
-bool ChunkVectorInfo::HasDeletes(transaction_t transaction_id) const {
+bool ChunkVectorInfo::HasDeletes(transaction_t snapshot_bound) const {
 	if (HasConstantInsertionId() && !IsCommitted(ConstantInsertId())) {
 		// the vector was inserted by a transaction that has not committed yet
 		// the rows have to be masked as deleted when writing a checkpoint
@@ -652,20 +652,20 @@ bool ChunkVectorInfo::HasDeletes(transaction_t transaction_id) const {
 	if (!AnyDeleted()) {
 		return false;
 	}
-	if (transaction_id == MAX_TRANSACTION_ID) {
+	if (snapshot_bound == MAX_TRANSACTION_ID) {
 		return true;
 	}
 	switch (delete_state) {
 	case DeleteIdState::CONSTANT:
-		return ConstantDeleteId() <= transaction_id;
+		return ConstantDeleteId().VisibleTo(snapshot_bound.Next());
 	case DeleteIdState::MASKED:
 		// AnyDeleted() above guaranteed at least one deleted row; they all share mask_delete_id
-		return mask_delete_id <= transaction_id;
+		return mask_delete_id.VisibleTo(snapshot_bound.Next());
 	case DeleteIdState::ARRAY: {
 		auto segment = allocator.GetHandle(GetDeletedPointer());
 		auto deleted = segment.GetPtr<transaction_t>();
 		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			if (deleted[i] <= transaction_id) {
+			if (deleted[i].VisibleTo(snapshot_bound.Next())) {
 				return true;
 			}
 		}
@@ -739,7 +739,7 @@ string ChunkVectorInfo::ToString(idx_t max_count) const {
 	result += "Vector [Count: " + to_string(max_count);
 	result += ", ";
 	if (HasConstantInsertionId()) {
-		result += "Insert Id: " + to_string(constant_insert_id);
+		result += "Insert Id: " + to_string(constant_insert_id.GetIndex());
 	} else {
 		result += "Insert Ids: [";
 		auto segment = allocator.GetHandle(GetInsertedPointer());
@@ -749,18 +749,18 @@ string ChunkVectorInfo::ToString(idx_t max_count) const {
 			if (idx > 0) {
 				result += ", ";
 			}
-			result += to_string(inserted[idx]);
+			result += to_string(inserted[idx].GetIndex());
 		}
 		result += "]";
 	}
 	switch (delete_state) {
 	case DeleteIdState::CONSTANT:
 		if (ConstantDeleteId() != NOT_DELETED_ID) {
-			result += ", Delete Id: " + to_string(constant_delete_id);
+			result += ", Delete Id: " + to_string(constant_delete_id.GetIndex());
 		}
 		break;
 	case DeleteIdState::MASKED: {
-		result += ", Delete Id: " + to_string(mask_delete_id);
+		result += ", Delete Id: " + to_string(mask_delete_id.GetIndex());
 		result += ", Deleted (mask): [";
 		for (idx_t idx = 0; idx < max_count; idx++) {
 			if (idx > 0) {
@@ -780,7 +780,7 @@ string ChunkVectorInfo::ToString(idx_t max_count) const {
 			if (idx > 0) {
 				result += ", ";
 			}
-			result += to_string(deleted[idx]);
+			result += to_string(deleted[idx].GetIndex());
 		}
 		result += "]";
 		break;
@@ -808,7 +808,7 @@ transaction_t ChunkVectorInfo::ConstantDeleteId() const {
 
 void ChunkVectorInfo::Write(WriteStream &writer, transaction_t snapshot_bound) const {
 	SelectionVector sel(STANDARD_VECTOR_SIZE);
-	transaction_t transaction_id = DConstants::INVALID_INDEX;
+	transaction_t transaction_id = SnapshotId(DConstants::INVALID_INDEX);
 	idx_t count = GetSelVector(TransactionData(transaction_id, snapshot_bound), sel, STANDARD_VECTOR_SIZE);
 	if (count == STANDARD_VECTOR_SIZE) {
 		// nothing is deleted: skip writing anything
@@ -841,7 +841,7 @@ unique_ptr<ChunkVectorInfo> ChunkVectorInfo::Read(FixedSizeAllocator &allocator,
 	case ChunkInfoType::CONSTANT_INFO: {
 		// a fully deleted vector - the constant insert and delete ids of 0 are visible to all transactions
 		auto start = reader.Read<idx_t>();
-		auto result = make_uniq<ChunkVectorInfo>(allocator, start, 0, 0);
+		auto result = make_uniq<ChunkVectorInfo>(allocator, start, SnapshotId(0), SnapshotId(0));
 		// both ids are constant - there is nothing left to compress
 		result->recheck_compression = false;
 		return result;
@@ -864,7 +864,7 @@ unique_ptr<ChunkVectorInfo> ChunkVectorInfo::Read(FixedSizeAllocator &allocator,
 		}
 		result->delete_state = DeleteIdState::MASKED;
 		// on-disk deletes are all committed and visible to every transaction - the shared id is 0
-		result->mask_delete_id = 0;
+		result->mask_delete_id = SnapshotId(0);
 		// every id is already visible to all transactions - nothing left to compress
 		result->recheck_compression = false;
 		return result;
