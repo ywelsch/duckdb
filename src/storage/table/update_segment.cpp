@@ -249,7 +249,7 @@ void UpdateSegment::FetchUpdates(TransactionData transaction, idx_t vector_index
 	// FIXME: normalify if this is not the case... need to pass in count?
 	D_ASSERT(result.GetVectorType() == VectorType::FLAT_VECTOR);
 	auto pin = node.Pin();
-	fetch_update_function(transaction.snapshot_bound, transaction.transaction_id, UpdateInfo::Get(pin), result);
+	fetch_update_function(transaction.view.snapshot_bound, transaction.view.transaction_id, UpdateInfo::Get(pin), result);
 }
 
 UpdateNode::UpdateNode(BufferManager &manager) : allocator(manager) {
@@ -559,7 +559,7 @@ void UpdateSegment::FetchRows(TransactionData transaction, const idx_t *offsets,
 		auto entry = GetUpdateNode(*lock_handle, vector_index);
 		if (entry.IsSet()) {
 			auto pin = entry.Pin();
-			fetch_rows_function(transaction.snapshot_bound, transaction.transaction_id, UpdateInfo::Get(pin), offsets,
+			fetch_rows_function(transaction.view.snapshot_bound, transaction.view.transaction_id, UpdateInfo::Get(pin), offsets,
 			                    sel, idx, vector_count, vector_offset, result, result_offset);
 		}
 		idx += vector_count;
@@ -671,10 +671,10 @@ static void CheckForConflicts(UndoBufferPointer next_ptr, TransactionData transa
 	while (next_ptr.IsSet()) {
 		auto pin = next_ptr.Pin();
 		auto &info = UpdateInfo::Get(pin);
-		if (info.version_number == transaction.transaction_id) {
+		if (info.version_number == transaction.view.transaction_id) {
 			// this UpdateInfo belongs to the current transaction, set it in the node
 			node_ref = std::move(pin);
-		} else if (!info.version_number.load().VisibleTo(transaction.snapshot_bound)) {
+		} else if (!info.version_number.load().VisibleTo(transaction.view.snapshot_bound)) {
 			// potential conflict, check that tuple ids do not conflict
 			// as both ids and info->tuples are sorted, this is similar to a merge join
 			idx_t i = 0, j = 0;
@@ -1334,7 +1334,7 @@ UpdateInfo *CreateEmptyUpdateInfo(TransactionData transaction, DuckTableEntry &t
                                   idx_t count, unsafe_unique_array<char> &data, idx_t row_group_start) {
 	data = make_unsafe_uniq_array_uninitialized<char>(UpdateInfo::GetAllocSize(type_size));
 	auto update_info = reinterpret_cast<UpdateInfo *>(data.get());
-	UpdateInfo::Initialize(*update_info, table_entry, transaction.transaction_id, row_group_start);
+	UpdateInfo::Initialize(*update_info, table_entry, transaction.view.transaction_id, row_group_start);
 	return update_info;
 }
 

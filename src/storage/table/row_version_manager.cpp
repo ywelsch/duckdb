@@ -113,14 +113,14 @@ void RowVersionManager::AppendVersionInfo(TransactionData transaction, idx_t cou
 		if (vector_start == 0 && vector_end == STANDARD_VECTOR_SIZE) {
 			// entire vector is encapsulated by append: store a single constant insert id
 			vector_info[vector_idx] =
-			    make_uniq<ChunkVectorInfo>(allocator, vector_idx * STANDARD_VECTOR_SIZE, transaction.transaction_id);
+			    make_uniq<ChunkVectorInfo>(allocator, vector_idx * STANDARD_VECTOR_SIZE, transaction.view.transaction_id);
 		} else {
 			// part of a vector is encapsulated: append to that part
 			if (!vector_info[vector_idx]) {
 				// first time appending to this vector: create new info
 				vector_info[vector_idx] = make_uniq<ChunkVectorInfo>(allocator, vector_idx * STANDARD_VECTOR_SIZE);
 			}
-			vector_info[vector_idx]->Append(vector_start, vector_end, transaction.transaction_id);
+			vector_info[vector_idx]->Append(vector_start, vector_end, transaction.view.transaction_id);
 		}
 	}
 }

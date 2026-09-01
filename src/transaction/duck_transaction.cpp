@@ -29,11 +29,10 @@
 namespace duckdb {
 
 TransactionData::TransactionData(DuckTransaction &transaction_p) // NOLINT
-    : transaction(&transaction_p), transaction_id(transaction_p.transaction_id),
-      snapshot_bound(transaction_p.start_time) {
+    : transaction(&transaction_p), view(transaction_p.start_time, transaction_p.transaction_id) {
 }
 TransactionData::TransactionData(transaction_t transaction_id_p, transaction_t snapshot_bound_p)
-    : transaction(nullptr), transaction_id(transaction_id_p), snapshot_bound(snapshot_bound_p) {
+    : transaction(nullptr), view(snapshot_bound_p, transaction_id_p) {
 }
 
 DuckTransaction::DuckTransaction(DuckTransactionManager &manager, ClientContext &context_p, transaction_t start_time,

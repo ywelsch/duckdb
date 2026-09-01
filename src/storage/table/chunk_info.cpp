@@ -42,7 +42,7 @@ struct IncludeAllDeletedOperator {
 };
 
 static bool UseVersion(TransactionData transaction, transaction_t id) {
-	return StandardInsertOperator::UseInsertedVersion(transaction.snapshot_bound, transaction.transaction_id, id);
+	return transaction.view.Sees(id);
 }
 
 ChunkVectorInfo::ChunkVectorInfo(FixedSizeAllocator &allocator_p, idx_t start, transaction_t insert_id_p)
@@ -216,21 +216,21 @@ idx_t ChunkVectorInfo::GetSelVector(ScanOptions options, optional_ptr<SelectionV
 	if (options.insert_type == InsertedScanType::STANDARD) {
 		if (options.delete_type == DeletedScanType::STANDARD) {
 			return TemplatedGetSelVector<StandardInsertOperator, StandardDeleteOperator>(
-			    transaction.snapshot_bound, transaction.transaction_id, sel_vector, max_count);
+			    transaction.view.snapshot_bound, transaction.view.transaction_id, sel_vector, max_count);
 		}
 		if (options.delete_type == DeletedScanType::INCLUDE_ALL_DELETED) {
 			return TemplatedGetSelVector<StandardInsertOperator, IncludeAllDeletedOperator>(
-			    transaction.snapshot_bound, transaction.transaction_id, sel_vector, max_count);
+			    transaction.view.snapshot_bound, transaction.view.transaction_id, sel_vector, max_count);
 		}
 		if (options.delete_type == DeletedScanType::OMIT_COMMITTED_DELETES) {
 			return TemplatedGetSelVector<StandardInsertOperator, CommittedDeleteOperator>(
-			    transaction.snapshot_bound, transaction.transaction_id, sel_vector, max_count);
+			    transaction.view.snapshot_bound, transaction.view.transaction_id, sel_vector, max_count);
 		}
 	}
 	if (options.insert_type == InsertedScanType::ALL_ROWS) {
 		if (options.delete_type == DeletedScanType::STANDARD) {
 			return TemplatedGetSelVector<IncludeAllInsertedOperator, StandardDeleteOperator>(
-			    transaction.snapshot_bound, transaction.transaction_id, sel_vector, max_count);
+			    transaction.view.snapshot_bound, transaction.view.transaction_id, sel_vector, max_count);
 		}
 		if (options.delete_type == DeletedScanType::INCLUDE_ALL_DELETED) {
 			// include all rows
@@ -238,7 +238,7 @@ idx_t ChunkVectorInfo::GetSelVector(ScanOptions options, optional_ptr<SelectionV
 		}
 		if (options.delete_type == DeletedScanType::OMIT_COMMITTED_DELETES) {
 			return TemplatedGetSelVector<IncludeAllInsertedOperator, CommittedDeleteOperator>(
-			    transaction.snapshot_bound, transaction.transaction_id, sel_vector, max_count);
+			    transaction.view.snapshot_bound, transaction.view.transaction_id, sel_vector, max_count);
 		}
 	}
 	throw InternalException("Unsupported combination of insert / delete types in ChunkVectorInfo::GetSelVector");
