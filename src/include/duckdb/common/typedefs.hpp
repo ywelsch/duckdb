@@ -28,8 +28,51 @@ typedef const data_t *const_data_ptr_t;
 
 //! Type used for the selection vector
 typedef uint32_t sel_t;
+//! A point on the transaction timeline. Stamps below TRANSACTION_ID_START are commit ids, and the
+//! snapshot bounds derived from them; stamps at or above it are ids of transactions that have not
+//! committed. Deliberately offers no ordering operators: every comparison goes through a named
+//! method that says which question is being asked.
+struct SnapshotId {
+	//! 2^62 - the split between commit ids below and transaction ids above
+	static constexpr idx_t TRANSACTION_ID_START_VALUE = 4611686018427388000ULL;
+
+	SnapshotId() = default;
+	explicit constexpr SnapshotId(idx_t value_p) : value(value_p) {
+	}
+
+	//! Whether the transaction that stamped this has committed
+	constexpr bool IsCommitted() const {
+		return value < TRANSACTION_ID_START_VALUE;
+	}
+	//! Whether this stamp is visible to a snapshot bounded by `bound`
+	constexpr bool VisibleTo(SnapshotId bound) const {
+		return value < bound.value;
+	}
+	//! The lower of two stamps - for folding a horizon over the active transactions
+	static constexpr SnapshotId Min(SnapshotId a, SnapshotId b) {
+		return a.value < b.value ? a : b;
+	}
+	//! The next stamp on the timeline - turns an inclusive bound into an exclusive one
+	constexpr SnapshotId Next() const {
+		return SnapshotId(value + 1);
+	}
+	//! The raw stamp - only for serialization and logging
+	constexpr idx_t GetIndex() const {
+		return value;
+	}
+
+	constexpr bool operator==(SnapshotId other) const {
+		return value == other.value;
+	}
+	constexpr bool operator!=(SnapshotId other) const {
+		return value != other.value;
+	}
+
+	idx_t value = 0;
+};
+
 //! Type used for transaction timestamps
-typedef idx_t transaction_t;
+typedef SnapshotId transaction_t;
 
 //! Type used to identify connections
 typedef idx_t connection_t;
