@@ -139,7 +139,7 @@ CommitState::CommitState(DuckTransaction &transaction_p, transaction_t commit_id
     : transaction(transaction_p), commit_id(commit_id),
       index_data_remover(transaction, *transaction.context.lock(),
                          GetIndexRemovalType(transaction_state, commit_mode)) {
-	D_ASSERT(commit_mode != CommitMode::COMMIT || IsCommitted(commit_id));
+	D_ASSERT(commit_mode != CommitMode::COMMIT || commit_id.IsCommitted());
 }
 
 IndexRemovalType CommitState::GetIndexRemovalType(ActiveTransactionState transaction_state, CommitMode commit_mode) {

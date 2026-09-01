@@ -30,8 +30,9 @@ typedef const data_t *const_data_ptr_t;
 typedef uint32_t sel_t;
 //! A point on the transaction timeline. Stamps below TRANSACTION_ID_START are commit ids, and the
 //! snapshot bounds derived from them; stamps at or above it are ids of transactions that have not
-//! committed. Deliberately offers no ordering operators: every comparison goes through a named
-//! method that says which question is being asked.
+//! committed, so a stamp says by itself whether the transaction that wrote it committed. Catalog
+//! versions borrow the same split. Deliberately offers no ordering operators: every comparison goes
+//! through a named method that says which question is being asked.
 struct SnapshotId {
 	//! 2^62 - the split between commit ids below and transaction ids above
 	static constexpr idx_t TRANSACTION_ID_START_VALUE = 4611686018427388000ULL;
@@ -44,7 +45,9 @@ struct SnapshotId {
 	constexpr bool IsCommitted() const {
 		return value < TRANSACTION_ID_START_VALUE;
 	}
-	//! Whether this stamp is visible to a snapshot bounded by `bound`
+	//! Whether this stamp is visible to a snapshot bounded by `bound`: stamps below the bound are
+	//! visible, stamps at or above it are not. Not every bound is a transaction's start time -
+	//! callers also derive one from a commit id, or from the last commit.
 	constexpr bool VisibleTo(SnapshotId bound) const {
 		return value < bound.value;
 	}

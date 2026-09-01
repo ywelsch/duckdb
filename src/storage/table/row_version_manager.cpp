@@ -275,7 +275,7 @@ vector<MetaBlockPointer> RowVersionManager::Checkpoint(RowGroupWriter &writer) {
 	}
 
 	if (uncheckpointed_delete_commit.IsValid() &&
-	    VisibleToSnapshot(SnapshotId(uncheckpointed_delete_commit.GetIndex()), options.snapshot_bound)) {
+	    SnapshotId(uncheckpointed_delete_commit.GetIndex()).VisibleTo(options.snapshot_bound)) {
 		// the last checkpointed id was either before or on the transaction we are checkpointing
 		// nothing to checkpoint in future commits until more deletes appear
 		uncheckpointed_delete_commit = optional_idx();

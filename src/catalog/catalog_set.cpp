@@ -465,7 +465,7 @@ void CatalogSet::VerifyExistenceOfDependency(transaction_t commit_id, CatalogEnt
 
 	// Make sure that we don't see any uncommitted changes
 	auto transaction_id = MAX_TRANSACTION_ID;
-	D_ASSERT(IsCommitted(commit_id));
+	D_ASSERT(commit_id.IsCommitted());
 	// This will allow us to see all committed changes made before this COMMIT happened
 	auto snapshot_bound = commit_id.Next();
 	CatalogTransaction commit_transaction(duck_catalog.GetDatabase(), transaction_id, snapshot_bound);
@@ -483,7 +483,7 @@ void CatalogSet::CommitDrop(transaction_t commit_id, transaction_t snapshot_boun
 	entry.OnDrop();
 	// Make sure that we don't see any uncommitted changes
 	auto transaction_id = MAX_TRANSACTION_ID;
-	D_ASSERT(IsCommitted(commit_id));
+	D_ASSERT(commit_id.IsCommitted());
 	// This will allow us to see all committed changes made before this COMMIT happened
 	auto commit_snapshot_bound = commit_id;
 	CatalogTransaction commit_transaction(duck_catalog.GetDatabase(), transaction_id, commit_snapshot_bound);
@@ -512,12 +512,12 @@ void CatalogSet::CleanupEntry(CatalogEntry &catalog_entry) {
 bool CatalogSet::CreatedByOtherActiveTransaction(CatalogTransaction transaction, transaction_t timestamp) {
 	// True if this transaction is not committed yet and the entry was made by another active (not committed)
 	// transaction
-	return !IsCommitted(timestamp) && timestamp != transaction.transaction_id;
+	return !timestamp.IsCommitted() && timestamp != transaction.transaction_id;
 }
 
 bool CatalogSet::CommittedAfterStarting(CatalogTransaction transaction, transaction_t timestamp) {
 	// the entry is committed but not usable by this transaction, so it is not our source of truth
-	return IsCommitted(timestamp) && !UseTimestamp(transaction, timestamp);
+	return timestamp.IsCommitted() && !UseTimestamp(transaction, timestamp);
 }
 
 bool CatalogSet::HasConflict(CatalogTransaction transaction, transaction_t timestamp) {
@@ -532,7 +532,7 @@ bool CatalogSet::UseTimestamp(CatalogTransaction transaction, transaction_t time
 		return true;
 	}
 	// otherwise it is usable exactly when the transaction's snapshot contains it
-	return VisibleToSnapshot(timestamp, transaction.snapshot_bound);
+	return timestamp.VisibleTo(transaction.snapshot_bound);
 }
 
 CatalogEntry &CatalogSet::GetEntryForTransaction(CatalogTransaction transaction, CatalogEntry &current) {
@@ -556,7 +556,7 @@ CatalogEntry &CatalogSet::GetEntryForTransaction(CatalogTransaction transaction,
 CatalogEntry &CatalogSet::GetCommittedEntry(CatalogEntry &current) {
 	reference<CatalogEntry> entry(current);
 	while (entry.get().HasChild()) {
-		if (IsCommitted(entry.get().timestamp)) {
+		if (entry.get().timestamp.load().IsCommitted()) {
 			// this entry is committed: use it
 			break;
 		}

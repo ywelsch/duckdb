@@ -577,7 +577,7 @@ void DependencyManager::VerifyCommitDrop(CatalogTransaction transaction, transac
 	auto info = GetLookupProperties(object);
 	ScanDependents(transaction, info, [&](DependencyEntry &dep) {
 		auto dep_committed_at = dep.timestamp.load();
-		if (!VisibleToSnapshot(dep_committed_at, snapshot_bound)) {
+		if (!dep_committed_at.VisibleTo(snapshot_bound)) {
 			// In the event of a CASCADE, the dependency drop has not committed yet
 			// so we would be halted by the existence of a dependency we are already dropping unless we check the
 			// timestamp
@@ -595,7 +595,7 @@ void DependencyManager::VerifyCommitDrop(CatalogTransaction transaction, transac
 			return;
 		}
 		D_ASSERT(dep.Subject().flags.IsOwnership());
-		if (!VisibleToSnapshot(dep_committed_at, snapshot_bound)) {
+		if (!dep_committed_at.VisibleTo(snapshot_bound)) {
 			// Same as above, objects that are owned by the object that is being dropped will be dropped as part of this
 			// transaction. Only objects that were introduced by other transactions, that this transaction could not
 			// see, should cause this error:

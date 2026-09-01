@@ -12,7 +12,7 @@ namespace duckdb {
 
 struct StandardInsertOperator {
 	static bool UseInsertedVersion(transaction_t snapshot_bound, transaction_t transaction_id, transaction_t id) {
-		return VisibleToSnapshot(id, snapshot_bound) || id == transaction_id;
+		return id.VisibleTo(snapshot_bound) || id == transaction_id;
 	}
 };
 
@@ -31,7 +31,7 @@ struct StandardDeleteOperator {
 struct CommittedDeleteOperator {
 	static bool IsDeleted(transaction_t snapshot_bound, transaction_t transaction_id, transaction_t id) {
 		// check if this row was deleted before the given bound
-		return VisibleToSnapshot(id, snapshot_bound);
+		return id.VisibleTo(snapshot_bound);
 	}
 };
 
@@ -335,7 +335,7 @@ void ChunkVectorInfo::FreeDeleteData() {
 void ChunkVectorInfo::CompressDeleteToMask(transaction_t mask_id) {
 	D_ASSERT(delete_state == DeleteIdState::ARRAY);
 	// the mask can only carry a single committed id shared by every deleted row
-	D_ASSERT(IsCommitted(mask_id));
+	D_ASSERT(mask_id.IsCommitted());
 	// start all-valid (== all deleted), then mark the alive rows invalid
 	deleted_mask.Initialize(STANDARD_VECTOR_SIZE);
 	{
@@ -516,10 +516,10 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 					rows_alive = true;
 					continue;
 				}
-				if (!VisibleToSnapshot(deleted[i], lowest_snapshot_bound)) {
+				if (!deleted[i].VisibleTo(lowest_snapshot_bound)) {
 					// deleted, but the delete is not yet visible to all transactions
 					deletes_pending = true;
-					if (!IsCommitted(deleted[i])) {
+					if (!deleted[i].IsCommitted()) {
 						// the delete is not even committed yet - the array must be kept
 						deletes_uncommitted = true;
 					}
@@ -562,7 +562,7 @@ VersionCompressionResult ChunkVectorInfo::CompressVersionIds(transaction_t lowes
 			auto segment = allocator.GetHandle(GetInsertedPointer());
 			auto inserted = segment.GetPtr<transaction_t>();
 			for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-				if (!VisibleToSnapshot(inserted[i], lowest_snapshot_bound)) {
+				if (!inserted[i].VisibleTo(lowest_snapshot_bound)) {
 					// the insert is not yet visible to all transactions
 					can_compress = false;
 					break;
@@ -632,19 +632,19 @@ bool ChunkVectorInfo::Cleanup(transaction_t lowest_snapshot_bound) const {
 
 		// from 1: index 0 holds the first append, which carries the lowest insert id
 		for (idx_t idx = 1; idx < STANDARD_VECTOR_SIZE; idx++) {
-			if (!VisibleToSnapshot(inserted[idx], lowest_snapshot_bound)) {
+			if (!inserted[idx].VisibleTo(lowest_snapshot_bound)) {
 				// not yet visible to every current and future snapshot - cannot compress
 				return false;
 			}
 		}
-	} else if (!VisibleToSnapshot(ConstantInsertId(), lowest_snapshot_bound)) {
+	} else if (!ConstantInsertId().VisibleTo(lowest_snapshot_bound)) {
 		return false;
 	}
 	return true;
 }
 
 bool ChunkVectorInfo::HasDeletes(transaction_t snapshot_bound) const {
-	if (HasConstantInsertionId() && !IsCommitted(ConstantInsertId())) {
+	if (HasConstantInsertionId() && !ConstantInsertId().IsCommitted()) {
 		// the vector was inserted by a transaction that has not committed yet
 		// the rows have to be masked as deleted when writing a checkpoint
 		return true;
@@ -678,30 +678,30 @@ bool ChunkVectorInfo::HasDeletes(transaction_t snapshot_bound) const {
 
 bool ChunkVectorInfo::HasUncommittedChanges() const {
 	if (HasConstantInsertionId()) {
-		if (!IsCommitted(ConstantInsertId())) {
+		if (!ConstantInsertId().IsCommitted()) {
 			return true;
 		}
 	} else {
 		auto insert_segment = allocator.GetHandle(GetInsertedPointer());
 		auto inserted = insert_segment.GetPtr<transaction_t>();
 		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			if (!IsCommitted(inserted[i])) {
+			if (!inserted[i].IsCommitted()) {
 				return true;
 			}
 		}
 	}
 	switch (delete_state) {
 	case DeleteIdState::CONSTANT:
-		return ConstantDeleteId() != NOT_DELETED_ID && !IsCommitted(ConstantDeleteId());
+		return ConstantDeleteId() != NOT_DELETED_ID && !ConstantDeleteId().IsCommitted();
 	case DeleteIdState::MASKED:
 		// the mask is only ever folded from committed deletes, so mask_delete_id is always committed
-		D_ASSERT(IsCommitted(mask_delete_id));
+		D_ASSERT(mask_delete_id.IsCommitted());
 		return false;
 	case DeleteIdState::ARRAY: {
 		auto delete_segment = allocator.GetHandle(GetDeletedPointer());
 		auto deleted = delete_segment.GetPtr<transaction_t>();
 		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			if (deleted[i] != NOT_DELETED_ID && !IsCommitted(deleted[i])) {
+			if (deleted[i] != NOT_DELETED_ID && !deleted[i].IsCommitted()) {
 				return true;
 			}
 		}

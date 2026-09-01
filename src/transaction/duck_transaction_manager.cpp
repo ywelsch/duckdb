@@ -248,7 +248,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 	CheckpointOptions options;
-	if (!VisibleToSnapshot(GetLastCommit(), LowestSnapshotBound())) {
+	if (!GetLastCommit().VisibleTo(LowestSnapshotBound())) {
 		// we cannot do a full checkpoint if any transaction needs to read old data
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
 	}
@@ -567,7 +567,7 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 	idx_t i = 0;
 	for (; i < recently_committed_transactions.size(); i++) {
 		D_ASSERT(recently_committed_transactions[i]);
-		if (!VisibleToSnapshot(recently_committed_transactions[i]->commit_id, lowest_snapshot_bound)) {
+		if (!recently_committed_transactions[i]->commit_id.VisibleTo(lowest_snapshot_bound)) {
 			// recently_committed_transactions is ordered on commit_id.
 			// Thus, if the current commit_id is greater than
 			// lowest_snapshot_bound, any subsequent commit IDs are also greater.

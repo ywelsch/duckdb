@@ -65,7 +65,7 @@ struct UpdateInfo {
 			// dummy transaction number for the root element - should always match
 			return true;
 		}
-		return !VisibleToSnapshot(version_number, snapshot_bound) && version_number != transaction_id;
+		return !version_number.load().VisibleTo(snapshot_bound) && version_number != transaction_id;
 	}
 
 	//! Loop over the update chain and execute the specified callback on all UpdateInfo's that are relevant for that

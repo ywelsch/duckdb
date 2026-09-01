@@ -28,17 +28,4 @@ struct TransactionData {
 	}
 };
 
-//! Commit ids fall below TRANSACTION_ID_START and transaction ids above it, so a stamp says by
-//! itself whether the transaction that wrote it committed. Catalog versions use the same split.
-inline bool IsCommitted(transaction_t timestamp) {
-	return timestamp.IsCommitted();
-}
-
-//! All stamps < snapshot_bound are visible to the snapshot; all stamps >= it are invisible. Not
-//! every bound is a transaction's start time: callers also derive one from a commit id, or from
-//! the last commit.
-inline bool VisibleToSnapshot(transaction_t timestamp, transaction_t snapshot_bound) {
-	return timestamp.VisibleTo(snapshot_bound);
-}
-
 } // namespace duckdb
