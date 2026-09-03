@@ -32,6 +32,11 @@ public:
 	ColumnData &column_data;
 
 public:
+	//! The size of a single value of the column type (as used for update info allocations)
+	idx_t GetTypeSize() const {
+		return type_size;
+	}
+
 	bool HasUpdates() const;
 	bool HasUncommittedUpdates(idx_t vector_index);
 	bool HasUpdates(idx_t vector_index) const;

@@ -10,11 +10,13 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/update_segment.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/transaction/cleanup_state.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/delete_info.hpp"
 #include "duckdb/transaction/rollback_state.hpp"
+#include "duckdb/transaction/update_info.hpp"
 #include "duckdb/transaction/wal_write_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 
@@ -133,9 +135,21 @@ UndoBufferProperties UndoBuffer::GetProperties() {
 	IteratorState iterator_state;
 	IterateEntries(iterator_state, [&](UndoFlags entry_type, data_ptr_t data) {
 		switch (entry_type) {
-		case UndoFlags::UPDATE_TUPLE:
+		case UndoFlags::UPDATE_TUPLE: {
 			properties.has_updates = true;
+			// the undo buffer allocates an UpdateInfo sized for a full vector, regardless of how many tuples of the
+			// vector were actually modified - but only the modified tuples (row identifier + value) are written to the
+			// WAL. Count the size that will be written to the WAL instead of the size of the allocation.
+			auto &info = *reinterpret_cast<UpdateInfo *>(data);
+			if (info.segment) {
+				auto type_size = info.segment->GetTypeSize();
+				auto alloc_size = UpdateInfo::GetAllocSize(type_size, info.max);
+				D_ASSERT(properties.estimated_size >= alloc_size);
+				properties.estimated_size -= MinValue<idx_t>(alloc_size, properties.estimated_size);
+				properties.estimated_size += idx_t(info.N) * (sizeof(row_t) + type_size);
+			}
 			break;
+		}
 		case UndoFlags::DELETE_TUPLE: {
 			auto info = reinterpret_cast<DeleteInfo *>(data);
 			if (info->is_consecutive) {
