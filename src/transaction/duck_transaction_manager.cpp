@@ -54,7 +54,6 @@ DuckTransactionManager::DuckTransactionManager(AttachedDatabase &db) : Transacti
 	// if transaction_id < start_timestamp for any set of active transactions
 	// uncommitted data could be read by
 	current_transaction_id = TRANSACTION_ID_START;
-	lowest_active_id = TRANSACTION_ID_START;
 	lowest_visibility_bound = VisibilityBound::IncludingUncommitted();
 	active_checkpoint = 0;
 	if (!db.GetCatalog().IsDuckCatalog()) {
@@ -94,7 +93,6 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	SnapshotView view(transaction_id, VisibilityBound::Before(start_time));
 	if (active_transactions.empty()) {
 		lowest_visibility_bound = view.visibility_bound;
-		lowest_active_id = transaction_id;
 	}
 
 	// create the actual transaction
@@ -554,17 +552,14 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 
 VisibilityBound DuckTransactionManager::UpdateLowestVisibilityBound(optional_ptr<DuckTransaction> exclude) noexcept {
 	auto computed_lowest_visibility_bound = VisibilityBound::AllCommitted();
-	auto lowest_transaction_id = MAX_TRANSACTION_ID;
 	for (auto &active_transaction : active_transactions) {
 		if (exclude && active_transaction.get() == exclude.get()) {
 			continue;
 		}
 		computed_lowest_visibility_bound =
 		    VisibilityBound::Min(computed_lowest_visibility_bound, active_transaction->view.visibility_bound);
-		lowest_transaction_id = MinValue(lowest_transaction_id, active_transaction->view.transaction_id);
 	}
 	lowest_visibility_bound = computed_lowest_visibility_bound;
-	lowest_active_id = lowest_transaction_id;
 	return computed_lowest_visibility_bound;
 }
 
