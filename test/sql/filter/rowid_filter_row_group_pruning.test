@@ -1,0 +1,120 @@
+# name: test/sql/filter/rowid_filter_row_group_pruning.test
+# description: Row id filters skip whole row groups without initializing their columns
+# group: [filter]
+
+require json
+
+require vector_size 2048
+
+statement ok
+CREATE TABLE t AS SELECT i AS a, i * 2 AS b, 'val_' || i AS c FROM range(1228800) r(i);
+
+# 10 row groups of 122880 rows
+query I
+SELECT count(DISTINCT row_group_id) FROM pragma_storage_info('t');
+----
+10
+
+# correctness of row id filters across row group boundaries
+query I
+SELECT a FROM t WHERE rowid IN (5, 122879, 122880, 1228799) ORDER BY a;
+----
+5
+122879
+122880
+1228799
+
+query I
+SELECT count(*) FROM t WHERE rowid = 122880;
+----
+1
+
+query I
+SELECT count(*) FROM t WHERE rowid BETWEEN 600000 AND 600099;
+----
+100
+
+query I
+SELECT min(a) || '-' || max(a) FROM t WHERE rowid >= 1228790;
+----
+1228790-1228799
+
+# a plain LIMIT above late_materialization_max_rows is rewritten into a row id semi join
+query II
+EXPLAIN SELECT * FROM t LIMIT 1000;
+----
+physical_plan	<REGEX>:.*SEMI.*rowid.*
+
+# a direct row id range filter only scans the row group that contains the range
+statement ok
+PRAGMA enable_profiling = 'json';
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/rowid_pruning.json';
+
+statement ok
+PRAGMA custom_profiling_settings = '{"CUMULATIVE_ROWS_SCANNED": "true", "CUMULATIVE_ROW_GROUPS_SCANNED": "true"}';
+
+query I
+SELECT count(*) FROM t WHERE rowid BETWEEN 600000 AND 600099;
+----
+100
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT CASE WHEN cumulative_rows_scanned <= 122880 THEN 'true' ELSE 'rows scanned: ' || cumulative_rows_scanned END
+FROM '__TEST_DIR__/rowid_pruning.json';
+----
+true
+
+# the late materialized LIMIT only scans the first row group on the probe side
+statement ok
+PRAGMA enable_profiling = 'json';
+
+statement ok
+SELECT * FROM t LIMIT 1000;
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT CASE WHEN cumulative_rows_scanned <= 2 * 122880 THEN 'true' ELSE 'rows scanned: ' || cumulative_rows_scanned END
+FROM '__TEST_DIR__/rowid_pruning.json';
+----
+true
+
+# the same holds for a small LIMIT with an OFFSET, which is also late materialized
+statement ok
+PRAGMA enable_profiling = 'json';
+
+query I
+SELECT count(*) FROM (SELECT * FROM t LIMIT 100 OFFSET 700000);
+----
+100
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT CASE WHEN cumulative_rows_scanned < 1000000 THEN 'true' ELSE 'rows scanned: ' || cumulative_rows_scanned END
+FROM '__TEST_DIR__/rowid_pruning.json';
+----
+true
+
+# row id filters still work after deletes
+statement ok
+DELETE FROM t WHERE a < 5 OR a BETWEEN 600000 AND 600049;
+
+query I
+SELECT a FROM t WHERE rowid BETWEEN 3 AND 7 ORDER BY a;
+----
+5
+6
+7
+
+query I
+SELECT count(*) FROM t WHERE rowid BETWEEN 600000 AND 600099;
+----
+50
