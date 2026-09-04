@@ -111,6 +111,14 @@ private:
 	//! Remove the given transaction from the list of active transactions
 	unique_ptr<DuckCleanupInfo> RemoveTransaction(DuckTransaction &transaction, bool store_transaction,
 	                                              unique_ptr<DuckCleanupInfo> cleanup_info) noexcept;
+	//! Recompute lowest_visibility_bound and lowest_active_id over the active transactions, leaving
+	//! out `exclude`, and return the bound. Caller holds the transaction lock
+	VisibilityBound UpdateLowestVisibilityBound(optional_ptr<DuckTransaction> exclude) noexcept;
+	//! Move the committed transactions that no active or future snapshot can still see into the
+	//! cleanup info. Caller holds the transaction lock; must not allocate (see CreateCleanupInfo)
+	void SweepCommittedTransactions(VisibilityBound lowest_visibility_bound, DuckCleanupInfo &cleanup_info) noexcept;
+	//! Hand a cleanup to the background cleanup thread, if it has anything to do
+	void QueueCleanup(unique_ptr<DuckCleanupInfo> cleanup_info);
 
 	//! Whether or not we can checkpoint
 	CheckpointDecision CanCheckpoint(DuckTransaction &transaction, unique_ptr<StorageLockKey> &checkpoint_lock,
