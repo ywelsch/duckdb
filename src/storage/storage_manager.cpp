@@ -263,7 +263,7 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 	auto &transaction_manager = DuckTransactionManager::Get(db);
 	transaction_manager.WaitForDurability();
 	if (options.type == CheckpointType::FULL_CHECKPOINT &&
-	    !VisibleToSnapshot(transaction_manager.GetLastCommit(), transaction_manager.LowestActiveStart())) {
+	    transaction_manager.GetLastCommit() >= transaction_manager.LowestVisibilityBound()) {
 		// an active bounded snapshot still needs state a full checkpoint would vacuum away
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
 	}
@@ -274,10 +274,12 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 		// to the next WAL.
 		active_checkpoint.GetCheckpointTransaction(options);
 	} else {
-		options.transaction_id = transaction_manager.GetLastCommit();
+		options.checkpoint_id = transaction_manager.NextCheckpointId();
+		options.visibility_bound = VisibilityBound::Through(transaction_manager.GetLastCommit());
 	}
 
-	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Start Checkpoint", options.transaction_id);
+	D_ASSERT(options.checkpoint_id.IsValid());
+	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Start Checkpoint", options.checkpoint_id.GetIndex());
 	if (!wal) {
 		return false;
 	}
