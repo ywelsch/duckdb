@@ -90,13 +90,15 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	// obtain the start time and transaction ID of this transaction
 	transaction_t start_time = current_start_timestamp++;
 	transaction_t transaction_id = current_transaction_id++;
+	// the transaction sees its own writes, and every commit before its start time
+	SnapshotView view(transaction_id, VisibilityBound::Before(start_time));
 	if (active_transactions.empty()) {
-		lowest_visibility_bound = VisibilityBound::Before(start_time);
+		lowest_visibility_bound = view.visibility_bound;
 		lowest_active_id = transaction_id;
 	}
 
 	// create the actual transaction
-	auto transaction = make_uniq<DuckTransaction>(*this, context, start_time, transaction_id, last_committed_version);
+	auto transaction = make_uniq<DuckTransaction>(*this, context, start_time, view, last_committed_version);
 	auto &transaction_ref = *transaction;
 
 	// store it in the set of active transactions
@@ -174,7 +176,7 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 					if (!other_transactions.empty()) {
 						other_transactions += ", ";
 					}
-					other_transactions += "[" + to_string(active_transaction->transaction_id) + "]";
+					other_transactions += "[" + to_string(active_transaction->GetTransactionId()) + "]";
 				}
 			}
 			if (!other_transactions.empty()) {
@@ -475,7 +477,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
 
-	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.transaction_id);
+	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.GetTransactionId());
 
 	ErrorData error;
 	{
@@ -529,9 +531,9 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 			t_index = i;
 			continue;
 		}
-		computed_lowest_visibility_bound = VisibilityBound::Min(
-		    computed_lowest_visibility_bound, VisibilityBound::Before(active_transactions[i]->start_time));
-		lowest_transaction_id = MinValue(lowest_transaction_id, active_transactions[i]->transaction_id);
+		computed_lowest_visibility_bound =
+		    VisibilityBound::Min(computed_lowest_visibility_bound, active_transactions[i]->view.visibility_bound);
+		lowest_transaction_id = MinValue(lowest_transaction_id, active_transactions[i]->view.transaction_id);
 	}
 	lowest_visibility_bound = computed_lowest_visibility_bound;
 	lowest_active_id = lowest_transaction_id;
