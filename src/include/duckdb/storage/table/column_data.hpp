@@ -55,6 +55,8 @@ struct ColumnCheckpointInfo {
 public:
 	PartialBlockManager &GetPartialBlockManager();
 	CompressionType GetCompressionType();
+	//! What the checkpoint sees: updates committed below this bound are written, newer versions are carried over
+	VisibilityBound GetVisibilityBound() const;
 
 private:
 	RowGroupWriteInfo &info;
@@ -129,12 +131,15 @@ public:
 
 	//! Whether or not the column has any updates
 	bool HasUpdates() const;
-	bool HasChanges(idx_t start_row, idx_t end_row) const;
-	//! Whether or not the column has changes at this level
+	//! Whether a checkpoint has to write this level: transient segments, updates committed since the last
+	//! checkpoint, or inexact statistics it can recompute
 	bool HasChanges() const;
 
 	//! Whether or not the column has ANY changes, including in child columns
 	virtual bool HasAnyChanges() const;
+	//! Whether the statistics, at any level, may cover values no longer in the column: updates widen them whether
+	//! they commit or not, only a checkpoint rewrite recomputes them
+	virtual bool HasInexactStatistics() const;
 	//! Whether or not we can scan an entire vector
 	virtual ScanVectorType GetVectorScanType(ColumnScanState &state, idx_t scan_count, Vector &result);
 
@@ -149,7 +154,9 @@ public:
 	virtual idx_t Scan(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
 	                   idx_t scan_count);
 
-	virtual void ScanCommittedRange(idx_t row_group_start, idx_t offset_in_row_group, idx_t count, Vector &result);
+	//! Scan a range of the column as it is visible to the given bound, without a transaction
+	virtual void ScanCommittedRange(idx_t row_group_start, idx_t offset_in_row_group, idx_t count, Vector &result,
+	                                VisibilityBound visibility_bound);
 	virtual idx_t ScanCount(ColumnScanState &state, Vector &result, idx_t count, idx_t result_offset = 0);
 
 	//! Select
@@ -201,7 +208,14 @@ public:
 	virtual unique_ptr<ColumnCheckpointState> Checkpoint(const RowGroup &row_group, ColumnCheckpointInfo &info,
 	                                                     const BaseStatistics &stats);
 
-	virtual void CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count, Vector &scan_vector) const;
+	virtual void CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count, Vector &scan_vector,
+	                            VisibilityBound visibility_bound) const;
+	//! After a checkpoint wrote this column as of the bound into target (this column itself if nothing was
+	//! rewritten): mark the written updates, and hand the segment over if anything still needs it
+	void CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBound visibility_bound,
+	                                    BaseStatistics &target_stats);
+	//! Drops the update segment if it is the given one and UpdateSegment::CanBeDropped
+	void DropUpdatesIfUnneeded(UpdateSegment &segment);
 
 	virtual bool IsPersistent();
 	vector<DataPointer> GetDataPointers();
@@ -260,6 +274,8 @@ protected:
 	idx_t FetchUpdateData(ColumnScanState &state, row_t *row_ids, Vector &base_vector, idx_t row_group_start);
 
 	idx_t GetVectorCount(idx_t vector_index) const;
+	//! The update segment, if any - the segment can be dropped concurrently, so callers hold a reference
+	shared_ptr<UpdateSegment> GetUpdates() const;
 
 	static bool IsDirectNullCheckFilter(const TableFilter &filter);
 	//! Checks the filter against the statistics of one segment
@@ -277,12 +293,14 @@ protected:
 	ColumnSegmentTree data;
 	//! The lock for the updates
 	mutable mutex update_lock;
-	//! The updates for this column segment
-	unique_ptr<UpdateSegment> updates;
+	//! The updates for this column segment - shared with the column a checkpoint rewrote it into, if any
+	shared_ptr<UpdateSegment> updates;
 	//! The lock for the stats
 	mutable mutex stats_lock;
 	//! Total transient allocation size
 	atomic<idx_t> allocation_size;
+	//! See HasInexactStatistics
+	atomic<bool> stats_inexact;
 	//! The stats of the root segment
 	unique_ptr<SegmentStatistics> stats;
 

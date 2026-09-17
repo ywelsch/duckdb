@@ -60,7 +60,7 @@ FilterPropagateResult ColumnData::CheckValidityZonemap(ColumnScanState &state, T
 ColumnData::ColumnData(BlockManager &block_manager, DataTableInfo &info, idx_t column_index, LogicalType type_p,
                        ColumnDataType data_type_p, optional_ptr<ColumnData> parent_p)
     : count(0), block_manager(block_manager), info(info), column_index(column_index), type(std::move(type_p)),
-      allocation_size(0),
+      allocation_size(0), stats_inexact(false),
       data_type(data_type_p == ColumnDataType::CHECKPOINT_TARGET ? ColumnDataType::MAIN_TABLE : data_type_p),
       parent(parent_p) {
 	if (!parent) {
@@ -92,35 +92,84 @@ bool ColumnData::HasUpdates() const {
 	return updates.get();
 }
 
-bool ColumnData::HasChanges(idx_t start_row, idx_t end_row) const {
+shared_ptr<UpdateSegment> ColumnData::GetUpdates() const {
+	lock_guard<mutex> update_guard(update_lock);
+	return updates;
+}
+
+void ColumnData::CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBound visibility_bound,
+                                                BaseStatistics &target_stats) {
+	lock_guard<mutex> update_guard(update_lock);
 	if (!updates) {
-		return false;
+		return;
 	}
-	if (updates->HasUpdates(start_row, end_row)) {
-		return true;
+	if (&target != this) {
+		// the target owns the segment before its updates are marked as written: its base data is as of the bound
+		lock_guard<mutex> target_guard(target.update_lock);
+		target.updates = updates;
+		updates->SetOwner(target);
 	}
-	return false;
+	updates->MarkCheckpointed(visibility_bound);
+	if (updates->CanBeDropped()) {
+		// the old column keeps the segment for scans still running on it
+		if (&target == this) {
+			updates.reset();
+		} else {
+			lock_guard<mutex> target_guard(target.update_lock);
+			target.updates.reset();
+		}
+		return;
+	}
+	// the carried statistics may cover values no longer in the column
+	target.stats_inexact = true;
+	target_stats.Merge(*updates->GetStatistics());
+}
+
+void ColumnData::DropUpdatesIfUnneeded(UpdateSegment &segment) {
+	lock_guard<mutex> update_guard(update_lock);
+	if (updates.get() != &segment) {
+		return;
+	}
+	// re-check under the lock
+	if (!updates->CanBeDropped()) {
+		return;
+	}
+	updates.reset();
 }
 
 bool ColumnData::HasChanges() const {
+	auto updates_ref = GetUpdates();
+	bool has_unserialized_updates = updates_ref && updates_ref->HasUnserializedChanges();
 	for (auto &segment_node : data.SegmentNodes()) {
 		auto &segment = segment_node.GetNode();
 		if (segment.GetSegmentType() == ColumnSegmentType::TRANSIENT) {
 			// transient segment: always need to write to disk
 			return true;
 		}
-		// persistent segment; check if there were any updates or deletions in this segment
+		if (!has_unserialized_updates) {
+			continue;
+		}
+		// persistent segment; check if there were any updates in this segment
 		idx_t start_row_idx = segment_node.GetRowStart();
 		idx_t end_row_idx = start_row_idx + segment.count;
-		if (HasChanges(start_row_idx, end_row_idx)) {
+		if (updates_ref->HasUpdates(start_row_idx, end_row_idx)) {
 			return true;
 		}
+	}
+	if (stats_inexact && (!updates_ref || updates_ref->CanBeDropped())) {
+		// a rewrite recomputes the statistics - but only once the segment can go with it, or its statistics would be
+		// merged right back
+		return true;
 	}
 	return false;
 }
 
 bool ColumnData::HasAnyChanges() const {
 	return HasChanges();
+}
+
+bool ColumnData::HasInexactStatistics() const {
+	return stats_inexact || HasUpdates();
 }
 
 idx_t ColumnData::GetMaxEntry() {
@@ -324,10 +373,16 @@ void ColumnData::UpdateInternal(TransactionData transaction, DuckTableEntry &tab
                                 idx_t row_group_start) {
 	lock_guard<mutex> update_guard(update_lock);
 	if (!updates) {
-		updates = make_uniq<UpdateSegment>(*this);
+		updates = make_shared_ptr<UpdateSegment>(*this);
 	}
 	updates->Update(transaction, table_entry, column_index, update_vector, row_ids, update_count, base_vector,
 	                row_group_start);
+	if (!updates->HasUpdates()) {
+		// a no-op update: keep no empty segment
+		updates.reset();
+		return;
+	}
+	stats_inexact = true;
 }
 
 idx_t ColumnData::ScanVector(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
@@ -361,15 +416,16 @@ idx_t ColumnData::GetVectorCount(idx_t vector_index) const {
 	return MinValue<idx_t>(STANDARD_VECTOR_SIZE, count - current_row);
 }
 
-void ColumnData::ScanCommittedRange(idx_t row_group_start, idx_t offset_in_row_group, idx_t s_count, Vector &result) {
+void ColumnData::ScanCommittedRange(idx_t row_group_start, idx_t offset_in_row_group, idx_t s_count, Vector &result,
+                                    VisibilityBound visibility_bound) {
 	ColumnScanState child_state(nullptr);
 	InitializeScanWithOffset(child_state, offset_in_row_group);
-	bool has_updates = HasUpdates();
+	auto updates_ref = GetUpdates();
 	ScanVector(child_state, result, s_count, ScanVectorType::SCAN_FLAT_VECTOR);
-	if (has_updates) {
+	if (updates_ref) {
 		D_ASSERT(result.GetVectorType() == VectorType::FLAT_VECTOR);
 		result.Flatten();
-		updates->FetchCommittedRange(offset_in_row_group, s_count, result);
+		updates_ref->FetchCommittedRange(offset_in_row_group, s_count, result, visibility_bound);
 	}
 }
 
@@ -866,8 +922,8 @@ unique_ptr<ColumnCheckpointState> ColumnData::CreateCheckpointState(const RowGro
 	return make_uniq<ColumnCheckpointState>(row_group, *this, partial_block_manager);
 }
 
-void ColumnData::CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count,
-                                Vector &scan_vector) const {
+void ColumnData::CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count, Vector &scan_vector,
+                                VisibilityBound visibility_bound) const {
 	if (state.scan_options && state.scan_options->force_fetch_row) {
 		for (idx_t i = 0; i < count; i++) {
 			ColumnFetchState fetch_state;
@@ -878,9 +934,10 @@ void ColumnData::CheckpointScan(ColumnSegment &segment, ColumnScanState &state, 
 		segment.Scan(state, count, scan_vector, 0, ScanVectorType::SCAN_FLAT_VECTOR);
 	}
 
-	if (updates) {
+	auto updates_ref = GetUpdates();
+	if (updates_ref) {
 		D_ASSERT(scan_vector.GetVectorType() == VectorType::FLAT_VECTOR);
-		updates->FetchCommittedRange(state.offset_in_column, count, scan_vector);
+		updates_ref->FetchCommittedRange(state.offset_in_column, count, scan_vector, visibility_bound);
 	}
 }
 

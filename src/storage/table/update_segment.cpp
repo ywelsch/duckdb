@@ -22,9 +22,19 @@ static UpdateSegment::statistics_update_function_t GetStatisticsUpdateFunction(P
 static UpdateSegment::fetch_rows_function_t GetFetchRowsFunction(PhysicalType type);
 static UpdateSegment::get_effective_updates_t GetEffectiveUpdatesFunction(PhysicalType type);
 
-UpdateSegment::UpdateSegment(ColumnData &column_data)
-    : column_data(column_data), stats(column_data.type), heap(BufferAllocator::Get(column_data.GetDatabase())) {
-	auto physical_type = column_data.type.InternalType();
+UpdateSegment::UpdateSegment(ColumnData &column_data_p)
+    : type(column_data_p.type), buffer_manager(column_data_p.block_manager.buffer_manager),
+      uncheckpointed_update_commit(0), chain_count(0), owner(column_data_p.weak_from_this()), stats(column_data_p.type),
+      heap(BufferAllocator::Get(column_data_p.GetDatabase())) {
+	auto physical_type = type.InternalType();
+
+	// for the WAL writer: the segment can outlive the column data it was created for
+	reference<const ColumnData> current_column = column_data_p;
+	while (current_column.get().HasParent()) {
+		nested_column_path.push_back(current_column.get().column_index);
+		current_column = current_column.get().Parent();
+	}
+	std::reverse(nested_column_path.begin(), nested_column_path.end());
 
 	this->type_size = GetTypeIdSize(physical_type);
 
@@ -46,7 +56,7 @@ UpdateSegment::~UpdateSegment() {
 // Update Info Helpers
 //===--------------------------------------------------------------------===//
 Value UpdateInfo::GetValue(idx_t index) {
-	auto &type = segment->column_data.type;
+	auto &type = segment->GetType();
 
 	auto tuple_data = GetValues();
 	switch (type.id()) {
@@ -64,7 +74,7 @@ void UpdateInfo::Print() {
 }
 
 string UpdateInfo::ToString() {
-	auto &type = segment->column_data.type;
+	auto &type = segment->GetType();
 	string result = "Update Info [" + type.ToString() + ", Count: " + to_string(N) +
 	                ", Transaction Id: " + to_string(version_number.load()) + "]\n";
 	auto tuples = GetTuples();
@@ -339,9 +349,12 @@ static void MergeUpdateInfoRangeValidity(UpdateInfo &current, idx_t start, idx_t
 	}
 }
 
-static void FetchCommittedRangeValidity(UpdateInfo &info, idx_t start, idx_t end, idx_t result_offset, Vector &result) {
+static void FetchCommittedRangeValidity(UpdateInfo &info, const SnapshotView &view, idx_t start, idx_t end,
+                                        idx_t result_offset, Vector &result) {
 	auto &result_mask = FlatVector::ValidityMutable(result);
-	MergeUpdateInfoRangeValidity(info, start, end, result_offset, result_mask);
+	UpdateInfo::UpdatesForTransaction(info, view, [&](UpdateInfo &current) {
+		MergeUpdateInfoRangeValidity(current, start, end, result_offset, result_mask);
+	});
 }
 
 template <class T>
@@ -361,10 +374,12 @@ static void MergeUpdateInfoRange(UpdateInfo &current, idx_t start, idx_t end, id
 }
 
 template <class T>
-static void TemplatedFetchCommittedRange(UpdateInfo &info, idx_t start, idx_t end, idx_t result_offset,
-                                         Vector &result) {
+static void TemplatedFetchCommittedRange(UpdateInfo &info, const SnapshotView &view, idx_t start, idx_t end,
+                                         idx_t result_offset, Vector &result) {
 	auto result_data = FlatVector::GetDataMutable<T>(result);
-	MergeUpdateInfoRange<T>(info, start, end, result_offset, result_data);
+	UpdateInfo::UpdatesForTransaction(info, view, [&](UpdateInfo &current) {
+		MergeUpdateInfoRange<T>(current, start, end, result_offset, result_data);
+	});
 }
 
 static UpdateSegment::fetch_committed_range_function_t GetFetchCommittedRangeFunction(PhysicalType type) {
@@ -405,13 +420,12 @@ static UpdateSegment::fetch_committed_range_function_t GetFetchCommittedRangeFun
 	}
 }
 
-void UpdateSegment::FetchCommittedRange(idx_t start_row, idx_t count, Vector &result) {
+void UpdateSegment::FetchCommittedRange(idx_t start_row, idx_t count, Vector &result,
+                                        VisibilityBound visibility_bound) {
 	D_ASSERT(count > 0);
 	if (!root) {
 		return;
 	}
-	D_ASSERT(start_row <= column_data.count);
-	D_ASSERT(start_row + count <= column_data.count);
 	D_ASSERT(result.GetVectorType() == VectorType::FLAT_VECTOR);
 
 	idx_t end_row = start_row + count;
@@ -419,6 +433,8 @@ void UpdateSegment::FetchCommittedRange(idx_t start_row, idx_t count, Vector &re
 	idx_t end_vector = (end_row - 1) / STANDARD_VECTOR_SIZE;
 	D_ASSERT(start_vector <= end_vector);
 
+	// no version carries the caller's id: the bound alone decides visibility
+	SnapshotView view(MAX_TRANSACTION_ID, visibility_bound);
 	auto lock_handle = lock.GetSharedLock();
 	for (idx_t vector_idx = start_vector; vector_idx <= end_vector; vector_idx++) {
 		auto entry = GetUpdateNode(*lock_handle, vector_idx);
@@ -432,7 +448,7 @@ void UpdateSegment::FetchCommittedRange(idx_t start_row, idx_t count, Vector &re
 		D_ASSERT(start_in_vector < end_in_vector);
 		D_ASSERT(end_in_vector > 0 && end_in_vector <= STANDARD_VECTOR_SIZE);
 		idx_t result_offset = ((vector_idx * STANDARD_VECTOR_SIZE) + start_in_vector) - start_row;
-		fetch_committed_range(UpdateInfo::Get(pin), start_in_vector, end_in_vector, result_offset, result);
+		fetch_committed_range(UpdateInfo::Get(pin), view, start_in_vector, end_in_vector, result_offset, result);
 	}
 }
 
@@ -537,17 +553,11 @@ void UpdateSegment::FetchRows(TransactionData transaction, const idx_t *offsets,
 	auto lock_handle = lock.GetSharedLock();
 	for (idx_t idx = 0; idx < fetch_count;) {
 		const idx_t offset = offsets[sel.get_index(idx)];
-		if (offset > column_data.count) {
-			throw InternalException("UpdateSegment::FetchRows out of range");
-		}
 		const idx_t vector_index = offset / STANDARD_VECTOR_SIZE;
 		const idx_t vector_offset = vector_index * STANDARD_VECTOR_SIZE;
 		idx_t vector_count = 1;
 		while (idx + vector_count < fetch_count) {
 			const idx_t next_offset = offsets[sel.get_index(idx + vector_count)];
-			if (next_offset > column_data.count) {
-				throw InternalException("UpdateSegment::FetchRows out of range");
-			}
 			if (next_offset / STANDARD_VECTOR_SIZE != vector_index) {
 				break;
 			}
@@ -623,26 +633,32 @@ static UpdateSegment::rollback_update_function_t GetRollbackUpdateFunction(Physi
 }
 
 void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
-	// obtain an exclusive lock
-	auto lock_handle = lock.GetExclusiveLock();
+	{
+		auto lock_handle = lock.GetExclusiveLock();
 
-	// move the data from the UpdateInfo back into the base info
-	auto entry = GetUpdateNode(*lock_handle, info.vector_index);
-	if (!entry.IsSet()) {
-		return;
+		// move the data from the UpdateInfo back into the base info
+		auto entry = GetUpdateNode(*lock_handle, info.vector_index);
+		if (!entry.IsSet()) {
+			return;
+		}
+		auto pin = entry.Pin();
+		rollback_update_function(UpdateInfo::Get(pin), info);
+
+		// clean up the update chain
+		CleanupUpdateInternal(*lock_handle, info);
 	}
-	auto pin = entry.Pin();
-	rollback_update_function(UpdateInfo::Get(pin), info);
-
-	// clean up the update chain
-	CleanupUpdateInternal(*lock_handle, info);
+	TryDropFromOwner();
 }
 
 //===--------------------------------------------------------------------===//
 // Cleanup Update
 //===--------------------------------------------------------------------===//
 void UpdateSegment::CleanupUpdateInternal(const StorageLockKey &lock, UpdateInfo &info) {
-	if (info.HasPrev()) {
+	if (!info.HasPrev()) {
+		// not linked (failed before linking, or already unlinked)
+		return;
+	}
+	{
 		auto pin = info.prev.Pin();
 		auto &prev_info = UpdateInfo::Get(pin);
 		prev_info.next = info.next;
@@ -653,12 +669,18 @@ void UpdateSegment::CleanupUpdateInternal(const StorageLockKey &lock, UpdateInfo
 		auto &next_info = UpdateInfo::Get(next_pin);
 		next_info.prev = info.prev;
 	}
+	info.prev = UndoBufferPointer();
+	info.next = UndoBufferPointer();
+	D_ASSERT(chain_count > 0);
+	chain_count--;
 }
 
 void UpdateSegment::CleanupUpdate(UpdateInfo &info) {
-	// obtain an exclusive lock
-	auto lock_handle = lock.GetExclusiveLock();
-	CleanupUpdateInternal(*lock_handle, info);
+	{
+		auto lock_handle = lock.GetExclusiveLock();
+		CleanupUpdateInternal(*lock_handle, info);
+	}
+	TryDropFromOwner();
 }
 
 //===--------------------------------------------------------------------===//
@@ -1339,7 +1361,7 @@ UpdateInfo *CreateEmptyUpdateInfo(TransactionData transaction, DuckTableEntry &t
 void UpdateSegment::InitializeUpdateInfo(idx_t vector_idx) {
 	// create the versions for this segment, if there are none yet
 	if (!root) {
-		root = make_uniq<UpdateNode>(column_data.block_manager.buffer_manager);
+		root = make_uniq<UpdateNode>(buffer_manager);
 	}
 	if (vector_idx < root->info.size()) {
 		return;
@@ -1481,6 +1503,10 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 			}
 			node->prev = root_pointer;
 			base_info.next = transaction.transaction ? node_ref.GetBufferPointer() : UndoBufferPointer();
+			if (transaction.transaction) {
+				// non-transactional updates have no undo entry that would unlink the node later
+				chain_count++;
+			}
 		} else {
 			// we already had updates made to this transaction
 			node = &UpdateInfo::Get(node_ref);
@@ -1524,6 +1550,9 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 
 		update_info.next = transaction.transaction ? node_ref.GetBufferPointer() : UndoBufferPointer();
 		update_info.prev = UndoBufferPointer();
+		if (transaction.transaction) {
+			chain_count++;
+		}
 		transaction_node->next = UndoBufferPointer();
 		transaction_node->prev = handle.GetBufferPointer();
 		transaction_node->column_index = column_index;
@@ -1572,6 +1601,52 @@ bool UpdateSegment::HasUpdates(idx_t start_row_index, idx_t end_row_index) {
 		}
 	}
 	return false;
+}
+
+//===--------------------------------------------------------------------===//
+// Checkpoint interaction
+//===--------------------------------------------------------------------===//
+bool UpdateSegment::HasUnserializedChanges() const {
+	return uncheckpointed_update_commit.load() != 0;
+}
+
+void UpdateSegment::MarkCommitted(transaction_t commit_id) {
+	// commits are serialized under the transaction lock, so commit ids only grow
+	uncheckpointed_update_commit = commit_id;
+}
+
+void UpdateSegment::MarkCheckpointed(VisibilityBound visibility_bound) {
+	// a concurrent commit at or above the bound keeps its id
+	auto current = uncheckpointed_update_commit.load();
+	while (current != 0 && current < visibility_bound &&
+	       !uncheckpointed_update_commit.compare_exchange_weak(current, 0)) {
+	}
+}
+
+bool UpdateSegment::CanBeDropped() const {
+	return !HasUnserializedChanges() && chain_count.load() == 0;
+}
+
+void UpdateSegment::SetOwner(ColumnData &owner_p) {
+	auto write_lock = lock.GetExclusiveLock();
+	owner = owner_p.weak_from_this();
+}
+
+void UpdateSegment::TryDropFromOwner() {
+	if (!CanBeDropped()) {
+		return;
+	}
+	shared_ptr<ColumnData> owner_ptr;
+	{
+		auto read_lock = lock.GetSharedLock();
+		owner_ptr = owner.lock();
+	}
+	if (!owner_ptr) {
+		return;
+	}
+	// the owner may hold the last reference to this segment
+	auto self = shared_from_this();
+	owner_ptr->DropUpdatesIfUnneeded(*this);
 }
 
 } // namespace duckdb

@@ -11,6 +11,8 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/statistics/segment_statistics.hpp"
 #include "duckdb/common/types/string_heap.hpp"
+#include "duckdb/common/atomic.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/transaction/undo_buffer_allocator.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 
@@ -24,22 +26,42 @@ struct UpdateInfo;
 struct UpdateNode;
 struct UndoBufferAllocator;
 
-class UpdateSegment {
+//! The UpdateSegment holds the updated values of one column of one row group: the root UpdateInfo of a vector holds
+//! the newest values, the chain behind it the previous values (undo information), newest to oldest. Values are
+//! absolute, not deltas, so a checkpoint that rewrites the column shares the segment with the new column until
+//! nothing needs it anymore (see ColumnData::CarryUpdatesToCheckpointTarget and TryDropFromOwner).
+class UpdateSegment : public enable_shared_from_this<UpdateSegment> {
 public:
 	explicit UpdateSegment(ColumnData &column_data);
 	~UpdateSegment();
 
-	ColumnData &column_data;
-
 public:
+	const LogicalType &GetType() const {
+		return type;
+	}
+	//! The column indexes from the top-level column down to this column, excluding the top-level column
+	const vector<column_t> &GetNestedColumnPath() const {
+		return nested_column_path;
+	}
+
 	bool HasUpdates() const;
 	bool HasUncommittedUpdates(idx_t vector_index);
 	bool HasUpdates(idx_t vector_index) const;
 	bool HasUpdates(idx_t start_row_idx, idx_t end_row_idx);
+	//! Whether a committed update on this segment is not yet written to disk
+	bool HasUnserializedChanges() const;
+	//! Whether nothing needs the segment anymore: no version chains and no unserialized updates
+	bool CanBeDropped() const;
+	void MarkCommitted(transaction_t commit_id);
+	void MarkCheckpointed(VisibilityBound visibility_bound);
+	//! The column whose base data is up to date with MarkCheckpointed - set before marking
+	void SetOwner(ColumnData &owner);
 
 	void FetchUpdates(TransactionData transaction, idx_t vector_index, Vector &result);
+	//! Fetch the newest version of the updated values of a vector, regardless of visibility
 	void FetchCommitted(idx_t vector_index, Vector &result);
-	void FetchCommittedRange(idx_t start_row, idx_t count, Vector &result);
+	//! Fetch the updated values in [start_row, start_row + count) as visible to the given bound
+	void FetchCommittedRange(idx_t start_row, idx_t count, Vector &result, VisibilityBound visibility_bound);
 	void Update(TransactionData transaction, DuckTableEntry &table_entry, idx_t column_index, Vector &update,
 	            row_t *ids, idx_t count, Vector &base_data, idx_t row_group_start);
 	void FetchRows(TransactionData transaction, const idx_t *offsets, const SelectionVector &sel, idx_t count,
@@ -55,6 +77,18 @@ public:
 	}
 
 private:
+	//! The type of the column
+	LogicalType type;
+	//! The nested column path of the column (see GetNestedColumnPath)
+	vector<column_t> nested_column_path;
+	//! The buffer manager the root node allocates from
+	BufferManager &buffer_manager;
+	//! The highest commit id of an update on this segment that no checkpoint has written to disk yet, or 0
+	atomic<transaction_t> uncheckpointed_update_commit;
+	//! The number of undo nodes linked into the version chains of this segment
+	atomic<idx_t> chain_count;
+	//! The column whose base data is up to date with uncheckpointed_update_commit (guarded by "lock")
+	weak_ptr<ColumnData> owner;
 	//! The lock for the update segment
 	mutable StorageLock lock;
 	//! The root node (if any)
@@ -76,8 +110,8 @@ public:
 	                                        const SelectionVector &sel, idx_t row_group_start);
 	typedef void (*fetch_update_function_t)(const SnapshotView &view, UpdateInfo &info, Vector &result);
 	typedef void (*fetch_committed_function_t)(UpdateInfo &info, Vector &result);
-	typedef void (*fetch_committed_range_function_t)(UpdateInfo &info, idx_t start, idx_t end, idx_t result_offset,
-	                                                 Vector &result);
+	typedef void (*fetch_committed_range_function_t)(UpdateInfo &info, const SnapshotView &view, idx_t start, idx_t end,
+	                                                 idx_t result_offset, Vector &result);
 	typedef void (*fetch_rows_function_t)(const SnapshotView &view, UpdateInfo &info, const idx_t *offsets,
 	                                      const SelectionVector &sel, idx_t fetch_offset, idx_t count,
 	                                      idx_t vector_offset, Vector &result, idx_t result_offset);
@@ -104,6 +138,8 @@ private:
 	void InitializeUpdateInfo(UpdateInfo &info, row_t *ids, const SelectionVector &sel, idx_t count, idx_t vector_index,
 	                          idx_t vector_offset);
 	void ReallocateRootInfoIfNeeded(UpdateInfo &current_info, idx_t update_count, idx_t vector_index);
+	//! Drops the segment from its owner if CanBeDropped - may destroy this segment
+	void TryDropFromOwner();
 };
 
 struct UpdateNode {

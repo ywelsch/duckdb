@@ -553,6 +553,10 @@ bool GeoColumnData::HasAnyChanges() const {
 	return base_column->HasAnyChanges();
 }
 
+bool GeoColumnData::HasInexactStatistics() const {
+	return base_column->HasInexactStatistics();
+}
+
 PersistentColumnData GeoColumnData::Serialize() {
 	// Serialize the inner column
 	auto inner_data = base_column->Serialize();

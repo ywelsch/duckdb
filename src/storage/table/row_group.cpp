@@ -1360,7 +1360,11 @@ void RowGroup::Update(TransactionData transaction, DuckTableEntry &table_entry, 
 		} else {
 			col_data.Update(transaction, table_entry, column.index, update_chunk.data[i], ids, count, row_group_start);
 		}
-		MergeStatistics(column.index, *col_data.GetUpdateStatistics());
+		// a no-op update leaves no update segment (and no statistics) behind
+		auto update_stats = col_data.GetUpdateStatistics();
+		if (update_stats) {
+			MergeStatistics(column.index, *update_stats);
+		}
 	}
 }
 
@@ -1383,7 +1387,10 @@ void RowGroup::UpdateColumn(TransactionData transaction, DuckTableEntry &table_e
 		col_data.UpdateColumn(transaction, table_entry, column_path, updates.data[0], ids, count, depth,
 		                      row_group_start);
 	}
-	MergeStatistics(primary_column_idx, *col_data.GetUpdateStatistics());
+	auto update_stats = col_data.GetUpdateStatistics();
+	if (update_stats) {
+		MergeStatistics(primary_column_idx, *update_stats);
+	}
 }
 
 unique_ptr<BaseStatistics> RowGroup::GetStatistics(idx_t column_idx) const {
@@ -1445,6 +1452,10 @@ PartialBlockManager &ColumnCheckpointInfo::GetPartialBlockManager() {
 
 CompressionType ColumnCheckpointInfo::GetCompressionType() {
 	return info.compression_types[column_idx];
+}
+
+VisibilityBound ColumnCheckpointInfo::GetVisibilityBound() const {
+	return info.options.visibility_bound;
 }
 
 shared_ptr<ColumnData> RowGroup::CheckpointColumn(const RowGroup &row_group, idx_t column_idx, RowGroupWriteInfo &info,
@@ -1943,6 +1954,14 @@ bool RowGroup::HasChanges() const {
 	return false;
 }
 
+bool RowGroup::HasInexactStatistics(idx_t column_idx) const {
+	if (column_idx >= columns.size() || !ColumnIsLoaded(column_idx)) {
+		// unloaded columns have no in-memory changes
+		return false;
+	}
+	return columns[column_idx]->HasInexactStatistics();
+}
+
 bool RowGroup::IsPersistent() const {
 	for (auto &column : columns) {
 		if (!column->IsPersistent()) {
@@ -2049,8 +2068,8 @@ struct DuckDBPartitionRowGroup : public PartitionRowGroup {
 		return row_group->GetStatistics(storage_index);
 	}
 
-	bool MinMaxIsExact(const StorageIndex &) override {
-		return is_exact;
+	bool MinMaxIsExact(const StorageIndex &storage_index) override {
+		return is_exact && !row_group->HasInexactStatistics(storage_index.GetPrimaryIndex());
 	}
 
 	bool HasPendingWrites() override {

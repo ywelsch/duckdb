@@ -146,7 +146,10 @@ public:
 	void CommitDrop();
 
 	void InitializeEmpty(const vector<LogicalType> &types, ColumnDataType data_type);
+	//! Whether a checkpoint has to write this row group: unserialized deletes or column changes
 	bool HasChanges() const;
+	//! See ColumnData::HasInexactStatistics
+	bool HasInexactStatistics(idx_t column_idx) const;
 
 	//! Initialize a scan over this row_group
 	bool InitializeScan(CollectionScanState &state, SegmentNode<RowGroup> &node);

@@ -1470,10 +1470,13 @@ void DataTable::VerifyUpdateConstraints(ConstraintState &state, ClientContext &c
 
 unique_ptr<TableUpdateState> DataTable::InitializeUpdate(TableCatalogEntry &table, ClientContext &context,
                                                          const vector<unique_ptr<BoundConstraint>> &bound_constraints) {
+	auto &transaction = DuckTransaction::Get(context, db);
 	// Bind all indexes.
 	info->BindIndexes(context);
 	auto result = make_uniq<TableUpdateState>();
 	result->constraint_state = InitializeConstraintState(table, bound_constraints);
+	// not while the table is being checkpointed (as for deletes)
+	result->checkpoint_lock = transaction.SharedLockTable(*info);
 	return result;
 }
 
@@ -1548,6 +1551,8 @@ void DataTable::UpdateColumn(DuckTableEntry &table, ClientContext &context, Vect
 
 	// now perform the actual update
 	auto &transaction = DuckTransaction::Get(context, db);
+	// not while the table is being checkpointed (see InitializeUpdate)
+	auto table_lock = transaction.SharedLockTable(*info);
 
 	updates.Flatten();
 	row_ids.Flatten();

@@ -513,6 +513,18 @@ bool StructColumnData::HasAnyChanges() const {
 	return false;
 }
 
+bool StructColumnData::HasInexactStatistics() const {
+	if (validity->HasInexactStatistics()) {
+		return true;
+	}
+	for (auto &child_col : sub_columns) {
+		if (child_col->HasInexactStatistics()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 PersistentColumnData StructColumnData::Serialize() {
 	PersistentColumnData persistent_data(type);
 	persistent_data.child_columns.push_back(validity->Serialize());

@@ -350,12 +350,15 @@ void DuckTransaction::Cleanup(VisibilityBound lowest_visibility_bound) {
 void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	if (!checkpoint_lock) {
 		bool require_write_lock = false;
-		require_write_lock = require_write_lock || type.UpdateData();
 		require_write_lock = require_write_lock || type.AlterTable();
 		require_write_lock = require_write_lock || type.CreateCatalogEntry();
 		require_write_lock = require_write_lock || type.DropCatalogEntry();
 		require_write_lock = require_write_lock || type.Sequence();
 		require_write_lock = require_write_lock || type.CreateIndex();
+		if (type.UpdateData() && GetTransactionManager().GetDB().GetStorageManager().InMemory()) {
+			// in-memory checkpoints have no visibility bound and cannot run concurrently with updates
+			require_write_lock = true;
+		}
 
 		if (require_write_lock) {
 			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
@@ -366,6 +369,8 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		bool require_vacuum_lock = false;
 		require_vacuum_lock = require_vacuum_lock || type.InsertData();
 		require_vacuum_lock = require_vacuum_lock || type.DeleteData();
+		// in-place updates by row id: fine under a concurrent checkpoint, not under a vacuum
+		require_vacuum_lock = require_vacuum_lock || type.UpdateData();
 
 		if (require_vacuum_lock) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
