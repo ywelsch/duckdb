@@ -16,7 +16,6 @@
 #include "duckdb/common/enums/active_transaction_state.hpp"
 
 namespace duckdb {
-class CheckpointLock;
 class CommitDropState;
 class DuckTableEntry;
 class RowGroupCollection;
@@ -107,9 +106,6 @@ public:
 
 	unique_ptr<StorageLockKey> TryGetCheckpointLock();
 
-	//! Get a shared lock on a table
-	shared_ptr<CheckpointLock> SharedLockTable(DataTableInfo &info);
-
 	void SetIsCheckpointTransaction() {
 		is_checkpoint_transaction = true;
 	}
@@ -128,14 +124,6 @@ private:
 	mutex sequence_lock;
 	//! Map of all sequences that were used during the transaction and the value they had in this transaction
 	reference_map_t<SequenceCatalogEntry, reference<SequenceValue>> sequence_usage;
-	//! Lock for the active_locks map
-	mutex active_locks_lock;
-	struct ActiveTableLock {
-		mutex checkpoint_lock_mutex; // protects access to the checkpoint_lock field in this class
-		weak_ptr<CheckpointLock> checkpoint_lock;
-	};
-	//! Active locks on tables
-	reference_map_t<DataTableInfo, unique_ptr<ActiveTableLock>> active_locks;
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
 	bool is_checkpoint_transaction = false;
 };

@@ -60,7 +60,7 @@ FilterPropagateResult ColumnData::CheckValidityZonemap(ColumnScanState &state, T
 ColumnData::ColumnData(BlockManager &block_manager, DataTableInfo &info, idx_t column_index, LogicalType type_p,
                        ColumnDataType data_type_p, optional_ptr<ColumnData> parent_p)
     : count(0), block_manager(block_manager), info(info), column_index(column_index), type(std::move(type_p)),
-      allocation_size(0), stats_inexact(false),
+      update_slot(make_shared_ptr<UpdateSlot>()), allocation_size(0), stats_inexact(false),
       data_type(data_type_p == ColumnDataType::CHECKPOINT_TARGET ? ColumnDataType::MAIN_TABLE : data_type_p),
       parent(parent_p) {
 	if (!parent) {
@@ -69,6 +69,12 @@ ColumnData::ColumnData(BlockManager &block_manager, DataTableInfo &info, idx_t c
 }
 
 ColumnData::~ColumnData() {
+	lock_guard<mutex> guard(update_slot->lock);
+	auto &updates = update_slot->updates;
+	if (--update_slot->column_count == 1 && updates && updates->CanBeDropped()) {
+		// the last column holding the slot has every committed update in its base data
+		updates.reset();
+	}
 }
 
 void ColumnData::SetDataType(ColumnDataType data_type_p) {
@@ -88,35 +94,34 @@ StorageManager &ColumnData::GetStorageManager() const {
 }
 
 bool ColumnData::HasUpdates() const {
-	lock_guard<mutex> update_guard(update_lock);
-	return updates.get();
+	lock_guard<mutex> guard(update_slot->lock);
+	return update_slot->updates.get();
 }
 
 shared_ptr<UpdateSegment> ColumnData::GetUpdates() const {
-	lock_guard<mutex> update_guard(update_lock);
-	return updates;
+	lock_guard<mutex> guard(update_slot->lock);
+	return update_slot->updates;
 }
 
 void ColumnData::CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBound visibility_bound,
                                                 BaseStatistics &target_stats) {
-	lock_guard<mutex> update_guard(update_lock);
+	lock_guard<mutex> guard(update_slot->lock);
+	if (&target != this) {
+		// nobody but the checkpoint can reach the target yet
+		D_ASSERT(!target.update_slot->updates && target.update_slot->column_count == 1);
+		target.update_slot = update_slot;
+		update_slot->column_count++;
+	}
+	auto &updates = update_slot->updates;
 	if (!updates) {
 		return;
 	}
-	if (&target != this) {
-		// the target owns the segment before its updates are marked as written: its base data is as of the bound
-		lock_guard<mutex> target_guard(target.update_lock);
-		target.updates = updates;
-		updates->SetOwner(target);
-	}
 	updates->MarkCheckpointed(visibility_bound);
 	if (updates->CanBeDropped()) {
-		// the old column keeps the segment for scans still running on it
-		if (&target == this) {
+		// every value in the segment is in the target's base data. The segment only stays for columns that still
+		// read their older base data through it
+		if (update_slot->column_count == 1) {
 			updates.reset();
-		} else {
-			lock_guard<mutex> target_guard(target.update_lock);
-			target.updates.reset();
 		}
 		return;
 	}
@@ -125,16 +130,21 @@ void ColumnData::CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBo
 	target_stats.Merge(*updates->GetStatistics());
 }
 
-void ColumnData::DropUpdatesIfUnneeded(UpdateSegment &segment) {
-	lock_guard<mutex> update_guard(update_lock);
-	if (updates.get() != &segment) {
-		return;
+void ColumnData::SetSuccessor(const shared_ptr<ColumnData> &successor_p) {
+	lock_guard<mutex> l(stats_lock);
+	successor = successor_p;
+}
+
+void ColumnData::MarkStatsInexact() {
+	stats_inexact = true;
+	shared_ptr<ColumnData> next;
+	{
+		lock_guard<mutex> l(stats_lock);
+		next = successor.lock();
 	}
-	// re-check under the lock
-	if (!updates->CanBeDropped()) {
-		return;
+	if (next) {
+		next->MarkStatsInexact();
 	}
-	updates.reset();
 }
 
 bool ColumnData::HasChanges() const {
@@ -169,7 +179,12 @@ bool ColumnData::HasAnyChanges() const {
 }
 
 bool ColumnData::HasInexactStatistics() const {
-	return stats_inexact || HasUpdates();
+	if (stats_inexact) {
+		return true;
+	}
+	// a segment whose values are all in the base data does not widen the statistics
+	auto updates = GetUpdates();
+	return updates && !updates->CanBeDropped();
 }
 
 idx_t ColumnData::GetMaxEntry() {
@@ -342,13 +357,13 @@ void ColumnData::FilterVector(ColumnScanState &state, Vector &result, idx_t targ
 }
 
 unique_ptr<BaseStatistics> ColumnData::GetUpdateStatistics() {
-	lock_guard<mutex> update_guard(update_lock);
+	auto updates = GetUpdates();
 	return updates ? updates->GetStatistics() : nullptr;
 }
 
 void ColumnData::FetchUpdates(TransactionData transaction, idx_t vector_index, Vector &result, idx_t scan_count,
                               UpdateScanType update_type) {
-	lock_guard<mutex> update_guard(update_lock);
+	auto updates = GetUpdates();
 	if (!updates) {
 		return;
 	}
@@ -360,7 +375,7 @@ void ColumnData::FetchUpdates(TransactionData transaction, idx_t vector_index, V
 }
 
 void ColumnData::FetchUpdateRow(TransactionData transaction, row_t row_id, Vector &result, idx_t result_idx) {
-	lock_guard<mutex> update_guard(update_lock);
+	auto updates = GetUpdates();
 	if (!updates) {
 		return;
 	}
@@ -371,9 +386,10 @@ void ColumnData::FetchUpdateRow(TransactionData transaction, row_t row_id, Vecto
 void ColumnData::UpdateInternal(TransactionData transaction, DuckTableEntry &table_entry, idx_t column_index,
                                 Vector &update_vector, row_t *row_ids, idx_t update_count, Vector &base_vector,
                                 idx_t row_group_start) {
-	lock_guard<mutex> update_guard(update_lock);
+	lock_guard<mutex> guard(update_slot->lock);
+	auto &updates = update_slot->updates;
 	if (!updates) {
-		updates = make_shared_ptr<UpdateSegment>(*this);
+		updates = make_shared_ptr<UpdateSegment>(*this, update_slot);
 	}
 	updates->Update(transaction, table_entry, column_index, update_vector, row_ids, update_count, base_vector,
 	                row_group_start);
@@ -382,7 +398,7 @@ void ColumnData::UpdateInternal(TransactionData transaction, DuckTableEntry &tab
 		updates.reset();
 		return;
 	}
-	stats_inexact = true;
+	MarkStatsInexact();
 }
 
 idx_t ColumnData::ScanVector(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
@@ -606,8 +622,17 @@ void ColumnData::MergeStatistics(const BaseStatistics &other) {
 	if (!stats) {
 		throw InternalException("ColumnData::MergeStatistics called on a column without stats");
 	}
-	lock_guard<mutex> l(stats_lock);
-	return stats->statistics.Merge(other);
+	shared_ptr<ColumnData> next;
+	{
+		lock_guard<mutex> l(stats_lock);
+		stats->statistics.Merge(other);
+		next = successor.lock();
+	}
+	if (next) {
+		// an update through a superseded column: the successor's zone map has to cover the new values too
+		next->stats_inexact = true;
+		next->MergeStatistics(other);
+	}
 }
 
 void ColumnData::MergeIntoStatistics(BaseStatistics &other) {
@@ -811,11 +836,9 @@ void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetc
 		const idx_t index_in_segment = offset - segment_start;
 		current_segment->GetNode().FetchRow(state, NumericCast<row_t>(index_in_segment), result, result_offset + idx);
 	}
-	{
-		const lock_guard<mutex> update_guard(update_lock);
-		if (updates) {
-			updates->FetchRows(transaction, offsets, sel, fetch_count, result, result_offset);
-		}
+	auto updates = GetUpdates();
+	if (updates) {
+		updates->FetchRows(transaction, offsets, sel, fetch_count, result, result_offset);
 	}
 }
 

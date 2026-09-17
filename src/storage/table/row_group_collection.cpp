@@ -236,7 +236,7 @@ void RowGroupCollection::SetRowGroupAppendMode(RowGroupAppendMode mode) {
 		// if we cannot append to existing (checkpointed) row groups we need to promote SUGGEST_NEW to REQUIRE_NEW
 		mode = RowGroupAppendMode::REQUIRE_NEW;
 	}
-	if (mode > row_group_append_mode) {
+	if (mode > row_group_append_mode.load()) {
 		// We never downgrade the mode, i.e. if REQUIRE_NEW was already set then we do not set it back to SUGGEST_NEW
 		row_group_append_mode = mode;
 	}
@@ -1710,10 +1710,26 @@ unique_ptr<CheckpointTask> RowGroupCollection::GetCheckpointTask(CollectionCheck
 	return make_uniq<CheckpointTask>(checkpoint_state, segment_idx);
 }
 
-void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &global_stats) {
+void RowGroupCollection::MergeCheckpointStats(TableStatistics &checkpoint_stats) {
+	auto lock = stats.GetLock();
+	auto checkpoint_lock = checkpoint_stats.GetLock();
+	for (idx_t column_idx = 0; column_idx < types.size(); column_idx++) {
+		auto &column_stats = checkpoint_stats.GetStats(*checkpoint_lock, column_idx);
+		stats.MergeStats(*lock, column_idx, column_stats.Statistics(), StatsMergeType::EXPAND_BOUNDS);
+	}
+}
+
+void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &global_stats, mutex &append_lock) {
 	auto row_groups = GetRowGroups();
 
 	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups);
+	// row groups appended after the checkpoint started are not written: they start at the first index past the
+	// row groups that existed then, and are taken over as they are when the rewritten row groups are installed
+	auto row_group_count = writer.GetRowGroupCount();
+	idx_t first_appended_idx = checkpoint_state.SegmentCount();
+	if (row_group_count.IsValid()) {
+		first_appended_idx = MinValue<idx_t>(first_appended_idx, row_group_count.GetIndex());
+	}
 
 	VacuumState vacuum_state;
 	InitializeVacuumState(checkpoint_state, vacuum_state, writer.GetRowGroupCount());
@@ -1799,7 +1815,19 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 				auto row_group_writer = checkpoint_state.writer.GetRowGroupWriter(row_group);
 				row_group.CheckpointDeletes(*row_group_writer);
 			}
-			writer.WriteUnchangedTable(metadata_pointer, metadata_pointers, total_rows.load(), next_row_id.load());
+			// the totals as of the checkpoint: rows appended since are in the WAL, not in this checkpoint
+			idx_t checkpoint_total_rows = 0;
+			idx_t checkpoint_next_row_id = 0;
+			auto base_row_id = row_groups->GetBaseRowId();
+			for (idx_t segment_idx = 0; segment_idx < checkpoint_state.SegmentCount(); segment_idx++) {
+				auto entry = checkpoint_state.GetSegment(segment_idx);
+				idx_t count = entry->GetNode().count;
+				checkpoint_total_rows += count;
+				checkpoint_next_row_id =
+				    MaxValue<idx_t>(checkpoint_next_row_id, entry->GetRowStart() + count - base_row_id);
+			}
+			writer.WriteUnchangedTable(metadata_pointer, metadata_pointers, checkpoint_total_rows,
+			                           checkpoint_next_row_id);
 			// copy over existing stats into the global stats
 			CopyStats(global_stats);
 			return;
@@ -1818,7 +1846,7 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 	auto base_row_id = row_groups->GetBaseRowId();
 	auto can_persist_rowid_gaps = writer.CanPersistRowIdGaps();
 	unordered_set<idx_t> columns_with_incomplete_stats;
-	for (idx_t segment_idx = 0; segment_idx < checkpoint_state.SegmentCount(); segment_idx++) {
+	for (idx_t segment_idx = 0; segment_idx < first_appended_idx; segment_idx++) {
 		auto entry = checkpoint_state.GetSegment(segment_idx);
 		if (!entry) {
 			// row group was vacuumed/dropped - skip
@@ -2061,7 +2089,27 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 	// this cannot be done after other threads start scanning the row groups
 	// so this HAS to happen before we call "SetRowGroups" to update the row groups
 	writer.FlushPartialBlocks();
-	// override the row group segment tree
+	// take over the row groups appended while the checkpoint was running, then override the row group segment tree.
+	// The append lock keeps appends and reverts out while the live tail is read and the totals are set
+	lock_guard<mutex> append_guard(append_lock);
+	{
+		auto live_row_groups = GetRowGroups();
+		auto live_lock = live_row_groups->Lock();
+		auto new_lock = new_row_groups->Lock();
+		idx_t live_count = live_row_groups->GetSegmentCount(live_lock);
+		for (idx_t segment_idx = first_appended_idx; segment_idx < live_count; segment_idx++) {
+			auto entry = live_row_groups->GetSegmentByIndex(live_lock, UnsafeNumericCast<int64_t>(segment_idx));
+			auto row_start = entry->GetRowStart();
+			// appended row groups start past the checkpointed ones, whose row ids a concurrent checkpoint keeps
+			D_ASSERT(row_start >= base_row_id + new_next_row_id);
+			new_total_rows += entry->GetNode().count;
+			new_row_groups->AppendSegment(new_lock, entry->ReferenceNode(), row_start);
+		}
+		if (live_count > first_appended_idx) {
+			// the appends kept next_row_id up to date; a revert may have lowered it below the last row group's end
+			new_next_row_id = next_row_id.load();
+		}
+	}
 	total_rows = new_total_rows;
 	next_row_id = new_next_row_id;
 	D_ASSERT(next_row_id.load() >= total_rows.load());

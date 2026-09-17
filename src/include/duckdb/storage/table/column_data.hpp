@@ -41,6 +41,8 @@ struct RowGroupWriteInfo;
 struct TableScanOptions;
 struct TransactionData;
 struct PersistentColumnData;
+class UpdateSegment;
+struct UpdateSlot;
 class ValidityColumnData;
 struct ColumnDataFinalizeAppendState;
 struct SuballocationBlock;
@@ -211,11 +213,12 @@ public:
 	virtual void CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count, Vector &scan_vector,
 	                            VisibilityBound visibility_bound) const;
 	//! After a checkpoint wrote this column as of the bound into target (this column itself if nothing was
-	//! rewritten): mark the written updates, and hand the segment over if anything still needs it
+	//! rewritten): share the update slot with the target, mark the written updates, drop the segment if possible
 	void CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBound visibility_bound,
 	                                    BaseStatistics &target_stats);
-	//! Drops the update segment if it is the given one and UpdateSegment::CanBeDropped
-	void DropUpdatesIfUnneeded(UpdateSegment &segment);
+	//! The column a checkpoint rewrote this one into: statistics merged into this column are forwarded to it, as
+	//! updates can still arrive through this column after the rewrite
+	void SetSuccessor(const shared_ptr<ColumnData> &successor);
 
 	virtual bool IsPersistent();
 	vector<DataPointer> GetDataPointers();
@@ -276,6 +279,8 @@ protected:
 	idx_t GetVectorCount(idx_t vector_index) const;
 	//! The update segment, if any - the segment can be dropped concurrently, so callers hold a reference
 	shared_ptr<UpdateSegment> GetUpdates() const;
+	//! Marks the statistics of this column and its successors as inexact
+	void MarkStatsInexact();
 
 	static bool IsDirectNullCheckFilter(const TableFilter &filter);
 	//! Checks the filter against the statistics of one segment
@@ -291,10 +296,10 @@ private:
 protected:
 	//! The segments holding the data of this column segment
 	ColumnSegmentTree data;
-	//! The lock for the updates
-	mutable mutex update_lock;
-	//! The updates for this column segment - shared with the column a checkpoint rewrote it into, if any
-	shared_ptr<UpdateSegment> updates;
+	//! The updates for this column segment - shared with the columns a checkpoint rewrote it into, if any
+	shared_ptr<UpdateSlot> update_slot;
+	//! See SetSuccessor (guarded by stats_lock)
+	weak_ptr<ColumnData> successor;
 	//! The lock for the stats
 	mutable mutex stats_lock;
 	//! Total transient allocation size

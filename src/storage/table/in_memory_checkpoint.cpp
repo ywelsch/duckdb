@@ -7,6 +7,8 @@
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/storage/table/column_segment.hpp"
 
 namespace duckdb {
@@ -22,6 +24,12 @@ InMemoryCheckpointer::InMemoryCheckpointer(QueryContext context, AttachedDatabas
 }
 
 void InMemoryCheckpointer::CreateCheckpoint() {
+	// register the checkpoint like an on-disk one: appends that run alongside it start new row groups, and the
+	// checkpoint transaction's snapshot bounds what is written (there is no WAL, so nothing is written to it)
+	auto &transaction_manager = DuckTransactionManager::Get(db);
+	ActiveCheckpointWrapper active_checkpoint(context, db, transaction_manager);
+	storage_manager.WALStartCheckpoint(MetaBlockPointer(), options, active_checkpoint);
+
 	vector<reference<SchemaCatalogEntry>> schemas;
 	// we scan the set of committed schemas
 	auto &catalog = Catalog::GetCatalog(db).Cast<DuckCatalog>();
@@ -48,6 +56,7 @@ void InMemoryCheckpointer::CreateCheckpoint() {
 		}
 	}
 	storage_manager.SetWALSize(0);
+	active_checkpoint.Commit();
 }
 
 MetadataWriter &InMemoryCheckpointer::GetMetadataWriter() {

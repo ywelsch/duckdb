@@ -301,6 +301,9 @@ private:
 
 private:
 	mutable mutex row_group_lock;
+	//! The row group a checkpoint rewrote this one into (guarded by row_group_lock). Version info created or loaded
+	//! through this row group afterwards is resolved through the successor, so that both see the same deletes
+	weak_ptr<RowGroup> successor;
 	vector<MetaBlockPointer> column_pointers;
 	//! Whether or not each column is loaded (mutable because `const` can lazy load)
 	mutable unique_ptr<atomic<bool>[]> is_loaded;

@@ -1148,6 +1148,12 @@ optional_ptr<RowVersionManager> RowGroup::GetVersionInfo() {
 	if (!HasUnloadedDeletes()) {
 		return version_info;
 	}
+	auto next = successor.lock();
+	if (next) {
+		SetVersionInfo(next->GetOrCreateVersionInfoPtr());
+		deletes_is_loaded = true;
+		return version_info;
+	}
 	D_ASSERT(!deletes_pointers.empty());
 	auto root_delete = deletes_pointers[0];
 	auto loaded_info = RowVersionManager::Deserialize(root_delete, GetBlockManager().GetMetadataManager());
@@ -1165,9 +1171,15 @@ shared_ptr<RowVersionManager> RowGroup::GetOrCreateVersionInfoInternal() {
 	// version info does not exist - need to create it
 	lock_guard<mutex> lock(row_group_lock);
 	if (!owned_version_info) {
-		auto &buffer_manager = GetBlockManager().GetBufferManager();
-		auto new_info = make_shared_ptr<RowVersionManager>(buffer_manager);
-		SetVersionInfo(std::move(new_info));
+		auto next = successor.lock();
+		if (next) {
+			SetVersionInfo(next->GetOrCreateVersionInfoPtr());
+			deletes_is_loaded = true;
+		} else {
+			auto &buffer_manager = GetBlockManager().GetBufferManager();
+			auto new_info = make_shared_ptr<RowVersionManager>(buffer_manager);
+			SetVersionInfo(std::move(new_info));
+		}
 	}
 	return owned_version_info;
 }
@@ -1465,6 +1477,9 @@ shared_ptr<ColumnData> RowGroup::CheckpointColumn(const RowGroup &row_group, idx
 	auto checkpoint_state = column.Checkpoint(row_group, checkpoint_info);
 
 	auto result_col = checkpoint_state->GetFinalResult();
+	if (result_col.get() != &column) {
+		column.SetSuccessor(result_col);
+	}
 	// FIXME: we should get rid of the checkpoint state statistics - and instead use the stats in the ColumnData
 	// directly
 	auto stats = checkpoint_state->GetStatistics();
@@ -1690,10 +1705,15 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	auto result_row_group = make_shared_ptr<RowGroup>(GetCollection(), this->count);
 	result_row_group->columns.resize(GetColumnCount());
 	result_row_group->column_pointers.resize(GetColumnCount());
-	result_row_group->deletes_pointers = deletes_pointers;
-	result_row_group->deletes_is_loaded = deletes_is_loaded.load();
-	result_row_group->owned_version_info = owned_version_info;
-	result_row_group->version_info = version_info.load();
+	{
+		// version info created or loaded from now on goes through the successor (see GetVersionInfo)
+		lock_guard<mutex> lock(row_group_lock);
+		successor = result_row_group;
+		result_row_group->deletes_pointers = deletes_pointers;
+		result_row_group->deletes_is_loaded = deletes_is_loaded.load();
+		result_row_group->owned_version_info = owned_version_info;
+		result_row_group->version_info = version_info.load();
+	}
 	if (is_loaded) {
 		result_row_group->is_loaded = unique_ptr<atomic<bool>[]>(new atomic<bool>[GetColumnCount()]);
 		for (idx_t c = 0; c < GetColumnCount(); c++) {

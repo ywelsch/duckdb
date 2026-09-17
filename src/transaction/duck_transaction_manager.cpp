@@ -111,6 +111,9 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 }
 
 void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
+	// a commit that holds the transaction lock while appending (no WAL) finishes before the checkpoint is active,
+	// so that every append that runs alongside the checkpoint starts a new row group
+	lock_guard<mutex> t_lock(transaction_lock);
 	active_checkpoint = checkpoint_id;
 }
 

@@ -1057,7 +1057,6 @@ void DataTable::AppendLock(DuckTransaction &transaction, TableAppendState &state
 		                           "a different transaction",
 		                           GetTableName(), TableModification());
 	}
-	state.table_lock = transaction.SharedLockTable(*info);
 	state.row_start = NumericCast<row_t>(row_groups->GetNextRowId());
 	state.current_row = state.row_start;
 	auto &transaction_manager = transaction.GetTransactionManager();
@@ -1221,7 +1220,6 @@ void DataTable::RevertAppendInternal(idx_t start_row) {
 
 void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_t count) {
 	lock_guard<mutex> lock(append_lock);
-	auto table_lock = transaction.SharedLockTable(*info);
 
 	// revert any appends to indexes
 	if (!info->indexes.Empty()) {
@@ -1310,7 +1308,6 @@ void DataTable::VerifyDeleteConstraints(optional_ptr<LocalTableStorage> storage,
 
 unique_ptr<TableDeleteState> DataTable::InitializeDelete(TableCatalogEntry &table, ClientContext &context,
                                                          const vector<unique_ptr<BoundConstraint>> &bound_constraints) {
-	auto &transaction = DuckTransaction::Get(context, db);
 	// Bind all indexes.
 	info->BindIndexes(context);
 
@@ -1327,7 +1324,6 @@ unique_ptr<TableDeleteState> DataTable::InitializeDelete(TableCatalogEntry &tabl
 		result->verify_chunk.Initialize(Allocator::Get(context), types);
 		result->constraint_state = make_uniq<ConstraintState>(table, bound_constraints);
 	}
-	result->checkpoint_lock = transaction.SharedLockTable(*info);
 	return result;
 }
 
@@ -1470,13 +1466,10 @@ void DataTable::VerifyUpdateConstraints(ConstraintState &state, ClientContext &c
 
 unique_ptr<TableUpdateState> DataTable::InitializeUpdate(TableCatalogEntry &table, ClientContext &context,
                                                          const vector<unique_ptr<BoundConstraint>> &bound_constraints) {
-	auto &transaction = DuckTransaction::Get(context, db);
 	// Bind all indexes.
 	info->BindIndexes(context);
 	auto result = make_uniq<TableUpdateState>();
 	result->constraint_state = InitializeConstraintState(table, bound_constraints);
-	// not while the table is being checkpointed (as for deletes)
-	result->checkpoint_lock = transaction.SharedLockTable(*info);
 	return result;
 }
 
@@ -1551,8 +1544,6 @@ void DataTable::UpdateColumn(DuckTableEntry &table, ClientContext &context, Vect
 
 	// now perform the actual update
 	auto &transaction = DuckTransaction::Get(context, db);
-	// not while the table is being checkpointed (see InitializeUpdate)
-	auto table_lock = transaction.SharedLockTable(*info);
 
 	updates.Flatten();
 	row_ids.Flatten();
@@ -1589,7 +1580,7 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	writer.SetRowGroupCount(info->CheckpointRowGroupCount(writer.GetCheckpointOptions()));
 	// checkpoint each individual row group
 	TableStatistics global_stats;
-	row_groups->Checkpoint(writer, global_stats);
+	row_groups->Checkpoint(writer, global_stats, append_lock);
 	row_groups->SetRowGroupAppendMode(RowGroupAppendMode::SUGGEST_NEW);
 	if (writer.GetRebuildIndexes()) {
 		MetricsTimer timer;
@@ -1607,7 +1598,12 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	//   table pointer
 	//   index data
 	writer.FinalizeTable(global_stats, *info, *row_groups, serializer);
-	row_groups->SetStats(global_stats);
+	if (writer.GetCheckpointOptions().type == CheckpointType::CONCURRENT_CHECKPOINT) {
+		// inserts and updates that ran concurrently already widened the table statistics: keep them
+		row_groups->MergeCheckpointStats(global_stats);
+	} else {
+		row_groups->SetStats(global_stats);
+	}
 }
 
 void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state) {

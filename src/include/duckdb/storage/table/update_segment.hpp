@@ -26,13 +26,25 @@ struct UpdateInfo;
 struct UpdateNode;
 struct UndoBufferAllocator;
 
+class UpdateSegment;
+
+//! The update segment of a column. A checkpoint that rewrites a column shares the slot with the new column, so that
+//! updates through either column land in the same segment, and the segment is dropped only when every column that
+//! held the slot but one is gone (a superseded column keeps reading its own, older base data)
+struct UpdateSlot {
+	mutex lock;
+	shared_ptr<UpdateSegment> updates;
+	//! The number of columns holding this slot
+	idx_t column_count = 1;
+};
+
 //! The UpdateSegment holds the updated values of one column of one row group: the root UpdateInfo of a vector holds
 //! the newest values, the chain behind it the previous values (undo information), newest to oldest. Values are
-//! absolute, not deltas, so a checkpoint that rewrites the column shares the segment with the new column until
-//! nothing needs it anymore (see ColumnData::CarryUpdatesToCheckpointTarget and TryDropFromOwner).
+//! absolute, not deltas, so a checkpoint that rewrites the column can share the segment with the new column (see
+//! ColumnData::CarryUpdatesToCheckpointTarget).
 class UpdateSegment : public enable_shared_from_this<UpdateSegment> {
 public:
-	explicit UpdateSegment(ColumnData &column_data);
+	UpdateSegment(ColumnData &column_data, weak_ptr<UpdateSlot> slot);
 	~UpdateSegment();
 
 public:
@@ -54,8 +66,6 @@ public:
 	bool CanBeDropped() const;
 	void MarkCommitted(transaction_t commit_id);
 	void MarkCheckpointed(VisibilityBound visibility_bound);
-	//! The column whose base data is up to date with MarkCheckpointed - set before marking
-	void SetOwner(ColumnData &owner);
 
 	void FetchUpdates(TransactionData transaction, idx_t vector_index, Vector &result);
 	//! Fetch the newest version of the updated values of a vector, regardless of visibility
@@ -87,8 +97,8 @@ private:
 	atomic<transaction_t> uncheckpointed_update_commit;
 	//! The number of undo nodes linked into the version chains of this segment
 	atomic<idx_t> chain_count;
-	//! The column whose base data is up to date with uncheckpointed_update_commit (guarded by "lock")
-	weak_ptr<ColumnData> owner;
+	//! The slot holding this segment
+	weak_ptr<UpdateSlot> slot;
 	//! The lock for the update segment
 	mutable StorageLock lock;
 	//! The root node (if any)
@@ -138,8 +148,8 @@ private:
 	void InitializeUpdateInfo(UpdateInfo &info, row_t *ids, const SelectionVector &sel, idx_t count, idx_t vector_index,
 	                          idx_t vector_offset);
 	void ReallocateRootInfoIfNeeded(UpdateInfo &current_info, idx_t update_count, idx_t vector_index);
-	//! Drops the segment from its owner if CanBeDropped - may destroy this segment
-	void TryDropFromOwner();
+	//! Drops the segment from its slot if nothing needs it anymore - the caller keeps the segment alive
+	void TryDropFromSlot();
 };
 
 struct UpdateNode {

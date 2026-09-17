@@ -355,10 +355,6 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		require_write_lock = require_write_lock || type.DropCatalogEntry();
 		require_write_lock = require_write_lock || type.Sequence();
 		require_write_lock = require_write_lock || type.CreateIndex();
-		if (type.UpdateData() && GetTransactionManager().GetDB().GetStorageManager().InMemory()) {
-			// in-memory checkpoints have no visibility bound and cannot run concurrently with updates
-			require_write_lock = true;
-		}
 
 		if (require_write_lock) {
 			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
@@ -384,28 +380,6 @@ unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock() {
 	} else {
 		return GetTransactionManager().TryUpgradeCheckpointLock(*checkpoint_lock);
 	}
-}
-
-shared_ptr<CheckpointLock> DuckTransaction::SharedLockTable(DataTableInfo &info) {
-	unique_lock<mutex> transaction_lock(active_locks_lock);
-	auto entry = active_locks.find(info);
-	if (entry == active_locks.end()) {
-		entry = active_locks.insert(entry, make_pair(std::ref(info), make_uniq<ActiveTableLock>()));
-	}
-	auto &active_table_lock = *entry->second;
-	transaction_lock.unlock(); // release transaction-level lock before acquiring table-level lock
-	lock_guard<mutex> table_lock(active_table_lock.checkpoint_lock_mutex);
-	auto checkpoint_lock = active_table_lock.checkpoint_lock.lock();
-	// check if it is expired (or has never been acquired yet)
-	if (checkpoint_lock) {
-		// not expired - return it
-		return checkpoint_lock;
-	}
-	// no existing lock - obtain it
-	checkpoint_lock = make_shared_ptr<CheckpointLock>(info.GetSharedLock());
-	// store it for future reference
-	active_table_lock.checkpoint_lock = checkpoint_lock;
-	return checkpoint_lock;
 }
 
 } // namespace duckdb

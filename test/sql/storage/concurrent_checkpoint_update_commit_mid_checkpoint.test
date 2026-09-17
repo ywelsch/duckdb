@@ -28,9 +28,14 @@ SELECT COUNT(*) FROM pragma_storage_info('test') WHERE has_updates
 statement ok
 SET debug_checkpoint_scan_sleep_ms=2000
 
+# a committed update makes the checkpoint rewrite the row group the concurrent transaction updates
+statement ok
+UPDATE test SET s = 'pre' WHERE i = 49999
+
 # ---------------------------------------------------------------------------------------------------------------------
 # thread 1 updates before the checkpoint starts and commits while the checkpoint is paused
 # ---------------------------------------------------------------------------------------------------------------------
+# every thread executes every sleep: the sleeps are the schedule
 concurrentloop threadid 0 2
 
 onlyif threadid=1
@@ -97,6 +102,9 @@ SELECT SUM(i), COUNT(*) FILTER (WHERE s = 'mid') FROM test
 # ---------------------------------------------------------------------------------------------------------------------
 statement ok
 SET debug_checkpoint_scan_sleep_ms=2000
+
+statement ok
+UPDATE test SET s = 'pre2' WHERE i = 49998
 
 concurrentloop threadid 0 2
 

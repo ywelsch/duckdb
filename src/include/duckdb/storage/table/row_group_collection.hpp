@@ -145,7 +145,11 @@ public:
 	void UpdateColumn(TransactionData transaction, DuckTableEntry &table_entry, Vector &row_ids,
 	                  const vector<column_t> &column_path, DataChunk &updates);
 
-	void Checkpoint(TableDataWriter &writer, TableStatistics &global_stats);
+	//! Writes the row groups and installs the rewritten ones. Appends run concurrently and only touch row groups
+	//! created after the checkpoint started; the install takes the append lock to take those over consistently
+	void Checkpoint(TableDataWriter &writer, TableStatistics &global_stats, mutex &append_lock);
+	//! Widens the table statistics with the statistics a checkpoint computed
+	void MergeCheckpointStats(TableStatistics &checkpoint_stats);
 
 	//! Decides how vacuum handles this table's indexes.
 	VacuumIndexStrategy
@@ -255,7 +259,7 @@ private:
 	//! Other metadata pointers
 	vector<MetaBlockPointer> metadata_pointers;
 	//! Controls whether the next append creates a new row group or reuses the existing one
-	RowGroupAppendMode row_group_append_mode;
+	atomic<RowGroupAppendMode> row_group_append_mode;
 	//! Whether or not we can append to a checkpointed row group
 	bool can_append_to_checkpointed_row_group = true;
 };

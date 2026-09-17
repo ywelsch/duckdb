@@ -22,9 +22,9 @@ static UpdateSegment::statistics_update_function_t GetStatisticsUpdateFunction(P
 static UpdateSegment::fetch_rows_function_t GetFetchRowsFunction(PhysicalType type);
 static UpdateSegment::get_effective_updates_t GetEffectiveUpdatesFunction(PhysicalType type);
 
-UpdateSegment::UpdateSegment(ColumnData &column_data_p)
+UpdateSegment::UpdateSegment(ColumnData &column_data_p, weak_ptr<UpdateSlot> slot_p)
     : type(column_data_p.type), buffer_manager(column_data_p.block_manager.buffer_manager),
-      uncheckpointed_update_commit(0), chain_count(0), owner(column_data_p.weak_from_this()), stats(column_data_p.type),
+      uncheckpointed_update_commit(0), chain_count(0), slot(std::move(slot_p)), stats(column_data_p.type),
       heap(BufferAllocator::Get(column_data_p.GetDatabase())) {
 	auto physical_type = type.InternalType();
 
@@ -633,6 +633,8 @@ static UpdateSegment::rollback_update_function_t GetRollbackUpdateFunction(Physi
 }
 
 void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
+	// unlinking the node may let another thread drop the segment
+	auto self = shared_from_this();
 	{
 		auto lock_handle = lock.GetExclusiveLock();
 
@@ -647,7 +649,7 @@ void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
 		// clean up the update chain
 		CleanupUpdateInternal(*lock_handle, info);
 	}
-	TryDropFromOwner();
+	TryDropFromSlot();
 }
 
 //===--------------------------------------------------------------------===//
@@ -676,11 +678,13 @@ void UpdateSegment::CleanupUpdateInternal(const StorageLockKey &lock, UpdateInfo
 }
 
 void UpdateSegment::CleanupUpdate(UpdateInfo &info) {
+	// unlinking the node may let another thread drop the segment
+	auto self = shared_from_this();
 	{
 		auto lock_handle = lock.GetExclusiveLock();
 		CleanupUpdateInternal(*lock_handle, info);
 	}
-	TryDropFromOwner();
+	TryDropFromSlot();
 }
 
 //===--------------------------------------------------------------------===//
@@ -1627,26 +1631,19 @@ bool UpdateSegment::CanBeDropped() const {
 	return !HasUnserializedChanges() && chain_count.load() == 0;
 }
 
-void UpdateSegment::SetOwner(ColumnData &owner_p) {
-	auto write_lock = lock.GetExclusiveLock();
-	owner = owner_p.weak_from_this();
-}
-
-void UpdateSegment::TryDropFromOwner() {
+void UpdateSegment::TryDropFromSlot() {
 	if (!CanBeDropped()) {
 		return;
 	}
-	shared_ptr<ColumnData> owner_ptr;
-	{
-		auto read_lock = lock.GetSharedLock();
-		owner_ptr = owner.lock();
-	}
-	if (!owner_ptr) {
+	auto slot_ptr = slot.lock();
+	if (!slot_ptr) {
 		return;
 	}
-	// the owner may hold the last reference to this segment
-	auto self = shared_from_this();
-	owner_ptr->DropUpdatesIfUnneeded(*this);
+	lock_guard<mutex> guard(slot_ptr->lock);
+	if (slot_ptr->updates.get() != this || slot_ptr->column_count != 1 || !CanBeDropped()) {
+		return;
+	}
+	slot_ptr->updates.reset();
 }
 
 } // namespace duckdb
