@@ -126,8 +126,12 @@ void ColumnData::CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBo
 		}
 		return;
 	}
-	// the carried statistics may cover values no longer in the column
+	// the target's statistics are as of the checkpoint, but older transactions still read the values the segment
+	// keeps for them (including base values of rows since updated to NULL): keep this column's bounds
 	target.stats_inexact = true;
+	if (stats) {
+		MergeIntoStatistics(target_stats);
+	}
 	target_stats.Merge(*updates->GetStatistics());
 }
 
