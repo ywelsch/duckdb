@@ -28,8 +28,11 @@ void TableStatistics::Initialize(const vector<LogicalType> &types, PersistentTab
 void TableStatistics::InitializeEmpty(const TableStatistics &other) {
 	D_ASSERT(Empty());
 	D_ASSERT(!table_sample);
+	D_ASSERT(other.stats_lock);
 
 	stats_lock = make_shared_ptr<mutex>();
+	// the other statistics can be live table statistics that concurrent appends merge into
+	lock_guard<mutex> other_lock(*other.stats_lock);
 	if (other.table_sample) {
 		D_ASSERT(other.table_sample->type == SampleType::RESERVOIR_SAMPLE);
 		auto &res = other.table_sample->Cast<ReservoirSample>();
