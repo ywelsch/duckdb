@@ -813,6 +813,9 @@ bool VariantColumnData::HasAnyChanges() const {
 }
 
 bool VariantColumnData::HasInexactStatistics() const {
+	if (ColumnData::HasInexactStatistics()) {
+		return true;
+	}
 	if (validity->HasInexactStatistics()) {
 		return true;
 	}

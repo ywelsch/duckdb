@@ -514,6 +514,9 @@ bool StructColumnData::HasAnyChanges() const {
 }
 
 bool StructColumnData::HasInexactStatistics() const {
+	if (ColumnData::HasInexactStatistics()) {
+		return true;
+	}
 	if (validity->HasInexactStatistics()) {
 		return true;
 	}

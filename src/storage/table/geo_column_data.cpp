@@ -554,7 +554,7 @@ bool GeoColumnData::HasAnyChanges() const {
 }
 
 bool GeoColumnData::HasInexactStatistics() const {
-	return base_column->HasInexactStatistics();
+	return ColumnData::HasInexactStatistics() || base_column->HasInexactStatistics();
 }
 
 PersistentColumnData GeoColumnData::Serialize() {

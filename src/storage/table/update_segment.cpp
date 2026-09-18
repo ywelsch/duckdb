@@ -638,13 +638,13 @@ void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
 	{
 		auto lock_handle = lock.GetExclusiveLock();
 
-		// move the data from the UpdateInfo back into the base info
+		// move the data from the UpdateInfo back into the base info - a node that was never linked (the update
+		// failed before that) has not changed it
 		auto entry = GetUpdateNode(*lock_handle, info.vector_index);
-		if (!entry.IsSet()) {
-			return;
+		if (entry.IsSet() && info.HasPrev()) {
+			auto pin = entry.Pin();
+			rollback_update_function(UpdateInfo::Get(pin), info);
 		}
-		auto pin = entry.Pin();
-		rollback_update_function(UpdateInfo::Get(pin), info);
 
 		// clean up the update chain
 		CleanupUpdateInternal(*lock_handle, info);
@@ -656,23 +656,22 @@ void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
 // Cleanup Update
 //===--------------------------------------------------------------------===//
 void UpdateSegment::CleanupUpdateInternal(const StorageLockKey &lock, UpdateInfo &info) {
-	if (!info.HasPrev()) {
-		// not linked (failed before linking, or already unlinked)
-		return;
+	if (info.HasPrev()) {
+		{
+			auto pin = info.prev.Pin();
+			auto &prev_info = UpdateInfo::Get(pin);
+			prev_info.next = info.next;
+		}
+		if (info.HasNext()) {
+			auto next = info.next;
+			auto next_pin = next.Pin();
+			auto &next_info = UpdateInfo::Get(next_pin);
+			next_info.prev = info.prev;
+		}
+		info.prev = UndoBufferPointer();
+		info.next = UndoBufferPointer();
 	}
-	{
-		auto pin = info.prev.Pin();
-		auto &prev_info = UpdateInfo::Get(pin);
-		prev_info.next = info.next;
-	}
-	if (info.HasNext()) {
-		auto next = info.next;
-		auto next_pin = next.Pin();
-		auto &next_info = UpdateInfo::Get(next_pin);
-		next_info.prev = info.prev;
-	}
-	info.prev = UndoBufferPointer();
-	info.next = UndoBufferPointer();
+	// linked or not, the undo entry no longer refers to this segment
 	D_ASSERT(chain_count > 0);
 	chain_count--;
 }
@@ -1494,6 +1493,11 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 				                             row_group_start);
 			}
 			node->segment = this;
+			if (transaction.transaction) {
+				// the undo entry refers to this segment from now on, linked or not: count it before anything below
+				// can throw (non-transactional updates have no undo entry)
+				chain_count++;
+			}
 			node->vector_index = vector_index;
 			node->N = 0;
 			node->column_index = column_index;
@@ -1507,10 +1511,6 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 			}
 			node->prev = root_pointer;
 			base_info.next = transaction.transaction ? node_ref.GetBufferPointer() : UndoBufferPointer();
-			if (transaction.transaction) {
-				// non-transactional updates have no undo entry that would unlink the node later
-				chain_count++;
-			}
 		} else {
 			// we already had updates made to this transaction
 			node = &UpdateInfo::Get(node_ref);
@@ -1548,15 +1548,16 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 		}
 
 		InitializeUpdateInfo(*transaction_node, ids, sel, count, vector_index, vector_offset);
+		if (transaction.transaction) {
+			// the undo entry refers to this segment from now on: count it before anything below can throw
+			chain_count++;
+		}
 
 		// we write the updates in the update node data, and write the updates in the info
 		initialize_update_function(*transaction_node, base_data, update_info, update_format, sel);
 
 		update_info.next = transaction.transaction ? node_ref.GetBufferPointer() : UndoBufferPointer();
 		update_info.prev = UndoBufferPointer();
-		if (transaction.transaction) {
-			chain_count++;
-		}
 		transaction_node->next = UndoBufferPointer();
 		transaction_node->prev = handle.GetBufferPointer();
 		transaction_node->column_index = column_index;

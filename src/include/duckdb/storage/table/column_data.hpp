@@ -216,9 +216,6 @@ public:
 	//! rewritten): share the update slot with the target, mark the written updates, drop the segment if possible
 	void CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBound visibility_bound,
 	                                    BaseStatistics &target_stats);
-	//! The column a checkpoint rewrote this one into: statistics merged into this column are forwarded to it, as
-	//! updates can still arrive through this column after the rewrite
-	void SetSuccessor(const shared_ptr<ColumnData> &successor);
 
 	virtual bool IsPersistent();
 	vector<DataPointer> GetDataPointers();
@@ -279,8 +276,6 @@ protected:
 	idx_t GetVectorCount(idx_t vector_index) const;
 	//! The update segment, if any - the segment can be dropped concurrently, so callers hold a reference
 	shared_ptr<UpdateSegment> GetUpdates() const;
-	//! Marks the statistics of this column and its successors as inexact
-	void MarkStatsInexact();
 
 	static bool IsDirectNullCheckFilter(const TableFilter &filter);
 	//! Checks the filter against the statistics of one segment
@@ -298,8 +293,6 @@ protected:
 	ColumnSegmentTree data;
 	//! The updates for this column segment - shared with the columns a checkpoint rewrote it into, if any
 	shared_ptr<UpdateSlot> update_slot;
-	//! See SetSuccessor (guarded by stats_lock)
-	weak_ptr<ColumnData> successor;
 	//! The lock for the stats
 	mutable mutex stats_lock;
 	//! Total transient allocation size

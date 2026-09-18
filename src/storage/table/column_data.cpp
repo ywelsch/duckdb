@@ -116,6 +116,7 @@ void ColumnData::CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBo
 	if (!updates) {
 		return;
 	}
+	// marked before the checkpoint is durable: a checkpoint that fails afterwards invalidates the database
 	updates->MarkCheckpointed(visibility_bound);
 	if (updates->CanBeDropped()) {
 		// every value in the segment is in the target's base data. The segment only stays for columns that still
@@ -128,23 +129,6 @@ void ColumnData::CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBo
 	// the carried statistics may cover values no longer in the column
 	target.stats_inexact = true;
 	target_stats.Merge(*updates->GetStatistics());
-}
-
-void ColumnData::SetSuccessor(const shared_ptr<ColumnData> &successor_p) {
-	lock_guard<mutex> l(stats_lock);
-	successor = successor_p;
-}
-
-void ColumnData::MarkStatsInexact() {
-	stats_inexact = true;
-	shared_ptr<ColumnData> next;
-	{
-		lock_guard<mutex> l(stats_lock);
-		next = successor.lock();
-	}
-	if (next) {
-		next->MarkStatsInexact();
-	}
 }
 
 bool ColumnData::HasChanges() const {
@@ -398,7 +382,7 @@ void ColumnData::UpdateInternal(TransactionData transaction, DuckTableEntry &tab
 		updates.reset();
 		return;
 	}
-	MarkStatsInexact();
+	stats_inexact = true;
 }
 
 idx_t ColumnData::ScanVector(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
@@ -583,19 +567,36 @@ FilterPropagateResult ColumnData::CheckZonemap(optional_ptr<ClientContext> conte
 	if (!stats) {
 		throw InternalException("ColumnData::CheckZonemap called on a column without stats");
 	}
-	lock_guard<mutex> l(stats_lock);
-	if (index.IsPushdownExtract()) {
-		auto child_stats = stats->statistics.PushdownExtract(index.GetChildIndex(0));
-		if (!child_stats) {
-			return FilterPropagateResult::NO_PRUNING_POSSIBLE;
-		}
-		auto &expr_filter = ExpressionFilter::GetExpressionFilter(filter, "ColumnData::CheckZonemap");
-		return context ? expr_filter.CheckStatistics(*context, *child_stats)
-		               : expr_filter.CheckStatistics(*child_stats);
-	}
 	auto &expr_filter = ExpressionFilter::GetExpressionFilter(filter, "ColumnData::CheckZonemap");
-	return context ? expr_filter.CheckStatistics(*context, stats->statistics)
-	               : expr_filter.CheckStatistics(stats->statistics);
+	auto check = [&](const BaseStatistics &check_stats) {
+		if (index.IsPushdownExtract()) {
+			auto child_stats = check_stats.PushdownExtract(index.GetChildIndex(0));
+			if (!child_stats) {
+				return FilterPropagateResult::NO_PRUNING_POSSIBLE;
+			}
+			return context ? expr_filter.CheckStatistics(*context, *child_stats)
+			               : expr_filter.CheckStatistics(*child_stats);
+		}
+		return context ? expr_filter.CheckStatistics(*context, check_stats) : expr_filter.CheckStatistics(check_stats);
+	};
+	FilterPropagateResult prune_result;
+	{
+		lock_guard<mutex> l(stats_lock);
+		prune_result = check(stats->statistics);
+	}
+	if (prune_result == FilterPropagateResult::NO_PRUNING_POSSIBLE) {
+		return prune_result;
+	}
+	// the update segment may be shared with the column a checkpoint rewrote this one from: updates made through
+	// that column are in the segment, not in these statistics
+	auto update_stats = GetUpdateStatistics();
+	if (!update_stats) {
+		return prune_result;
+	}
+	if (check(*update_stats) != prune_result) {
+		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
+	}
+	return prune_result;
 }
 
 const BaseStatistics &ColumnData::GetStatisticsRef() const {
@@ -622,17 +623,8 @@ void ColumnData::MergeStatistics(const BaseStatistics &other) {
 	if (!stats) {
 		throw InternalException("ColumnData::MergeStatistics called on a column without stats");
 	}
-	shared_ptr<ColumnData> next;
-	{
-		lock_guard<mutex> l(stats_lock);
-		stats->statistics.Merge(other);
-		next = successor.lock();
-	}
-	if (next) {
-		// an update through a superseded column: the successor's zone map has to cover the new values too
-		next->stats_inexact = true;
-		next->MergeStatistics(other);
-	}
+	lock_guard<mutex> l(stats_lock);
+	return stats->statistics.Merge(other);
 }
 
 void ColumnData::MergeIntoStatistics(BaseStatistics &other) {

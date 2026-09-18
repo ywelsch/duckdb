@@ -236,9 +236,9 @@ void RowGroupCollection::SetRowGroupAppendMode(RowGroupAppendMode mode) {
 		// if we cannot append to existing (checkpointed) row groups we need to promote SUGGEST_NEW to REQUIRE_NEW
 		mode = RowGroupAppendMode::REQUIRE_NEW;
 	}
-	if (mode > row_group_append_mode.load()) {
-		// We never downgrade the mode, i.e. if REQUIRE_NEW was already set then we do not set it back to SUGGEST_NEW
-		row_group_append_mode = mode;
+	// We never downgrade the mode, i.e. if REQUIRE_NEW was already set then we do not set it back to SUGGEST_NEW
+	auto current = row_group_append_mode.load();
+	while (mode > current && !row_group_append_mode.compare_exchange_weak(current, mode)) {
 	}
 }
 
@@ -1089,10 +1089,9 @@ void RowGroupCollection::UpdateColumn(TransactionData transaction, DuckTableEntr
 //===--------------------------------------------------------------------===//
 struct CollectionCheckpointState {
 	CollectionCheckpointState(RowGroupCollection &collection, TableDataWriter &writer, TableStatistics &global_stats,
-	                          RowGroupSegmentTree &row_groups)
+	                          RowGroupSegmentTree &row_groups, idx_t segment_count)
 	    : collection(collection), writer(writer), executor(writer.CreateTaskExecutor()), global_stats(global_stats),
 	      row_groups(row_groups) {
-		auto segment_count = row_groups.GetSegmentCount();
 		writers.resize(segment_count);
 		write_data.resize(segment_count);
 		dropped_segments = make_uniq_array<bool>(segment_count);
@@ -1720,12 +1719,23 @@ void RowGroupCollection::MergeCheckpointStats(TableStatistics &checkpoint_stats)
 }
 
 void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &global_stats, mutex &append_lock) {
-	auto row_groups = GetRowGroups();
+	shared_ptr<RowGroupSegmentTree> row_groups;
+	optional_idx row_group_count;
+	idx_t segment_count;
+	{
+		// an append records the row group count and creates its row group under the append lock: read the count
+		// and the number of row groups together, so that every row group past the count is one appended
+		// concurrently (the tree itself is live - appends keep adding to it)
+		lock_guard<mutex> append_guard(append_lock);
+		row_groups = GetRowGroups();
+		segment_count = row_groups->GetSegmentCount();
+		row_group_count = info->CheckpointRowGroupCount(writer.GetCheckpointOptions());
+		writer.SetRowGroupCount(row_group_count);
+	}
 
-	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups);
+	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups, segment_count);
 	// row groups appended after the checkpoint started are not written: they start at the first index past the
 	// row groups that existed then, and are taken over as they are when the rewritten row groups are installed
-	auto row_group_count = writer.GetRowGroupCount();
 	idx_t first_appended_idx = checkpoint_state.SegmentCount();
 	if (row_group_count.IsValid()) {
 		first_appended_idx = MinValue<idx_t>(first_appended_idx, row_group_count.GetIndex());

@@ -95,7 +95,7 @@ private:
 	BufferManager &buffer_manager;
 	//! The highest commit id of an update on this segment that no checkpoint has written to disk yet, or 0
 	atomic<transaction_t> uncheckpointed_update_commit;
-	//! The number of undo nodes linked into the version chains of this segment
+	//! The number of undo entries referring to this segment (they keep it alive through CanBeDropped)
 	atomic<idx_t> chain_count;
 	//! The slot holding this segment
 	weak_ptr<UpdateSlot> slot;

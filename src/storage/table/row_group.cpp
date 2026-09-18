@@ -1477,9 +1477,6 @@ shared_ptr<ColumnData> RowGroup::CheckpointColumn(const RowGroup &row_group, idx
 	auto checkpoint_state = column.Checkpoint(row_group, checkpoint_info);
 
 	auto result_col = checkpoint_state->GetFinalResult();
-	if (result_col.get() != &column) {
-		column.SetSuccessor(result_col);
-	}
 	// FIXME: we should get rid of the checkpoint state statistics - and instead use the stats in the ColumnData
 	// directly
 	auto stats = checkpoint_state->GetStatistics();
