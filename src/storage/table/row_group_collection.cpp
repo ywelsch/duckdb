@@ -1796,8 +1796,9 @@ void RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &gl
 				         RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA);
 				vector<MetaBlockPointer> extra_metadata_block_pointers = row_group.GetExtraMetadataBlockPointers();
 				metadata_manager.ClearModifiedBlocks(extra_metadata_block_pointers);
-				auto row_group_writer = checkpoint_state.writer.GetRowGroupWriter(row_group);
-				row_group.CheckpointDeletes(*row_group_writer);
+				// the reused metadata references the delete blocks of the last checkpoint: a delete committed
+				// meanwhile lies above the bound and is written by the next checkpoint
+				metadata_manager.ClearModifiedBlocks(row_group.GetPersistedDeletePointers());
 			}
 			writer.WriteUnchangedTable(metadata_pointer, metadata_pointers, total_rows.load(), next_row_id.load());
 			// copy over existing stats into the global stats

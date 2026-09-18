@@ -343,8 +343,8 @@ bool RowVersionManager::HasUncommittedChanges() {
 }
 
 vector<MetaBlockPointer> RowVersionManager::GetStoragePointers() {
+	// the blocks the last checkpoint wrote; a delete committed since does not change them until the next checkpoint
 	lock_guard<mutex> lock(version_lock);
-	D_ASSERT(!uncheckpointed_delete_commit.IsValid());
 	return storage_pointers;
 }
 
