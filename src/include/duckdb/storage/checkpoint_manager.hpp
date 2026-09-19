@@ -52,6 +52,9 @@ public:
 
 	~ActiveCheckpointWrapper();
 
+	//! Registers the checkpoint (id, visibility bound, active checkpoint), via a checkpoint transaction if there is a
+	//! context
+	void Begin(CheckpointOptions &options);
 	//! Begin the transaction within the newly created connection.
 	void GetCheckpointTransaction(CheckpointOptions &options);
 	void Commit();

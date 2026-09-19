@@ -76,6 +76,17 @@ void ActiveCheckpointWrapper::GetCheckpointTransaction(CheckpointOptions &option
 	transaction_manager.SetActiveCheckpoint(options.checkpoint_id.GetIndex());
 }
 
+void ActiveCheckpointWrapper::Begin(CheckpointOptions &options) {
+	if (HasCheckpointContext()) {
+		// the start time of the checkpoint transaction defines the visibility for checkpointing
+		GetCheckpointTransaction(options);
+		return;
+	}
+	options.checkpoint_id = transaction_manager.NextCheckpointId();
+	options.visibility_bound = VisibilityBound::Through(transaction_manager.GetLastCommit());
+	transaction_manager.SetActiveCheckpoint(options.checkpoint_id.GetIndex());
+}
+
 void ActiveCheckpointWrapper::Commit() {
 	transaction_manager.ResetActiveCheckpoint();
 	if (!checkpoint_transaction) {
@@ -705,7 +716,6 @@ void SingleFileCheckpointWriter::WriteTable(TableCatalogEntry &table, Serializer
 	// FIXME: If we do not have a context, however, the unbound indexes have to be serialized to disk.
 
 	// Write the table data
-	auto table_lock = table.GetStorage().GetCheckpointLock();
 	auto writer = GetTableDataWriter(table);
 	if (writer) {
 		writer->WriteTableData(serializer);
