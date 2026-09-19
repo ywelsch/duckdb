@@ -74,6 +74,8 @@ public:
 	ErrorData PreFlushOptimisticBlocks(AttachedDatabase &db) noexcept;
 	ErrorData WriteToWAL(ClientContext &context, AttachedDatabase &db,
 	                     unique_ptr<StorageCommitState> &commit_state) noexcept;
+	//! Appends the local storage to the tables, for a commit without a WAL (WriteToWAL does it otherwise)
+	ErrorData FlushLocalStorage() noexcept;
 	//! Commit the current transaction with the given commit identifier. Returns an error message if the transaction
 	//! commit failed, or an empty string if the commit was successful
 	ErrorData Commit(AttachedDatabase &db, CommitInfo &commit_info,

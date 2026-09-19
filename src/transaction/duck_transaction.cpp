@@ -266,6 +266,16 @@ ErrorData DuckTransaction::WriteToWAL(ClientContext &context, AttachedDatabase &
 	return error_data;
 }
 
+ErrorData DuckTransaction::FlushLocalStorage() noexcept {
+	// the append that WriteToWAL does for a commit with a WAL
+	try {
+		storage->Commit(nullptr);
+	} catch (std::exception &ex) {
+		return ErrorData(ex);
+	}
+	return ErrorData();
+}
+
 ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
                                   unique_ptr<StorageCommitState> commit_state) noexcept {
 	this->commit_id = commit_info.commit_id;
