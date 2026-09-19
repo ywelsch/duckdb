@@ -90,9 +90,10 @@ public:
 	bool WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointOptions &options,
 	                        ActiveCheckpointWrapper &active_checkpoint);
 	//! Finishes a checkpoint
-	void WALFinishCheckpoint(unique_lock<mutex> &wal_lock);
-	// Get the WAL lock
-	unique_lock<mutex> GetWALLock();
+	void WALFinishCheckpoint(unique_lock<mutex> &commit_lock);
+	//! The commit lock: every commit with changes holds it across its flush and its commit or revert, a checkpoint
+	//! holds it while it starts and while it finishes, so that a commit is entirely before or after either
+	unique_lock<mutex> GetCommitLock();
 
 	//! Returns the database file path
 	string GetDBPath() const {
@@ -174,8 +175,8 @@ protected:
 	string wal_path;
 	//! The WriteAheadLog of the storage manager
 	unique_ptr<WriteAheadLog> wal;
-	//! Mutex used to control writes to the WAL
-	mutex wal_lock;
+	//! See GetCommitLock
+	mutex commit_lock;
 	//! Whether or not the database is opened in read-only mode
 	bool read_only;
 	//! When loading a database, we do not yet set the wal-field. Therefore, GetWriteAheadLog must
