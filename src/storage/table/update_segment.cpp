@@ -800,13 +800,12 @@ string_t GetUpdateNullPadding() {
 template <class T>
 static void InitializeUpdateData(UpdateInfo &base_info, Vector &base_data, UpdateInfo &update_info,
                                  UnifiedVectorFormat &update, const SelectionVector &sel) {
+	// base_info is the undo entry of the transaction and receives the old values, update_info the root and receives
+	// the new values - both hold the same tuples
+	D_ASSERT(base_info.N == update_info.N);
 	auto update_data = update.GetData<T>(update);
+	auto &update_validity = update.validity;
 	auto tuple_data = update_info.GetData<T>();
-
-	for (idx_t i = 0; i < update_info.N; i++) {
-		auto idx = update.sel->get_index(sel.get_index(i));
-		tuple_data[i] = update_data[idx];
-	}
 
 	auto base_array_data = FlatVector::GetData<T>(base_data);
 	auto &base_validity = FlatVector::ValidityMutable(base_data);
@@ -816,9 +815,12 @@ static void InitializeUpdateData(UpdateInfo &base_info, Vector &base_data, Updat
 		auto base_idx = base_tuples[i];
 		if (!base_validity.RowIsValid(base_idx)) {
 			base_tuple_data[i] = GetUpdateNullPadding<T>();
-			continue;
+		} else {
+			base_tuple_data[i] = UpdateSelectElement::Operation<T>(*base_info.segment, base_array_data[base_idx]);
 		}
-		base_tuple_data[i] = UpdateSelectElement::Operation<T>(*base_info.segment, base_array_data[base_idx]);
+		auto idx = update.sel->get_index(sel.get_index(i));
+		// a row updated to NULL keeps its current value (see TemplatedGetEffectiveUpdates)
+		tuple_data[i] = update_validity.RowIsValid(idx) ? update_data[idx] : base_tuple_data[i];
 	}
 }
 
@@ -917,7 +919,8 @@ template <class T, class V, class OP = ExtractStandardEntry>
 static void MergeUpdateLoopInternal(UpdateInfo &base_info, V *base_table_data, UpdateInfo &update_info,
                                     const SelectionVector &update_vector_sel, const V *update_vector_data, row_t *ids,
                                     idx_t count, const SelectionVector &sel, idx_t row_group_start,
-                                    const ValidityMask *base_table_validity = nullptr) {
+                                    const ValidityMask *base_table_validity = nullptr,
+                                    const ValidityMask *update_validity = nullptr) {
 	auto base_id = row_group_start + base_info.vector_index * STANDARD_VECTOR_SIZE;
 #ifdef DEBUG
 	// all of these should be sorted, otherwise the below algorithm does not work
@@ -1000,9 +1003,23 @@ static void MergeUpdateLoopInternal(UpdateInfo &base_info, V *base_table_data, U
 
 	// now we merge the new values into the base_info
 	result_offset = 0;
+	auto updated_to_null = [&](idx_t aidx) {
+		return update_validity && !update_validity->RowIsValid(update_vector_sel.get_index(aidx));
+	};
+	idx_t undo_offset = 0;
 	auto pick_new = [&](idx_t id, idx_t aidx, idx_t count) {
-		result_values[result_offset] =
-		    OP::template Extract<T, V>(update_vector_data, update_vector_sel.get_index(aidx));
+		if (updated_to_null(aidx)) {
+			// a row updated to NULL pins its current value (see TemplatedGetEffectiveUpdates): the row is not in
+			// base_info, so the value is the base value that the merge above placed in update_info
+			while (update_tuples[undo_offset] < id) {
+				undo_offset++;
+			}
+			D_ASSERT(undo_offset < update_info.N && update_tuples[undo_offset] == id);
+			result_values[result_offset] = update_info_data[undo_offset];
+		} else {
+			result_values[result_offset] =
+			    OP::template Extract<T, V>(update_vector_data, update_vector_sel.get_index(aidx));
+		}
 		result_ids[result_offset] = UnsafeNumericCast<sel_t>(id);
 		result_offset++;
 	};
@@ -1013,7 +1030,12 @@ static void MergeUpdateLoopInternal(UpdateInfo &base_info, V *base_table_data, U
 	};
 	// now we perform a merge of the new ids with the old ids
 	auto merge = [&](idx_t id, idx_t aidx, idx_t bidx, idx_t count) {
-		pick_new(id, aidx, count);
+		if (updated_to_null(aidx)) {
+			// the row keeps its current value
+			pick_old(id, bidx, count);
+		} else {
+			pick_new(id, aidx, count);
+		}
 	};
 	MergeLoop(ids, base_tuples, count, base_info.N, base_id, merge, pick_new, pick_old, sel);
 
@@ -1039,7 +1061,7 @@ static void MergeUpdateLoop(UpdateInfo &base_info, Vector &base_data, UpdateInfo
 	auto update_vector_data = update.GetData<T>(update);
 	auto &base_validity = FlatVector::Validity(base_data);
 	MergeUpdateLoopInternal<T, T>(base_info, base_table_data, update_info, *update.sel, update_vector_data, ids, count,
-	                              sel, row_group_start, &base_validity);
+	                              sel, row_group_start, &base_validity, &update.validity);
 }
 
 static UpdateSegment::merge_update_function_t GetMergeUpdateFunction(PhysicalType type) {
@@ -1114,29 +1136,26 @@ idx_t TemplatedUpdateNumericStatistics(UpdateSegment *segment, SegmentStatistics
 	auto update_data = update.GetData<T>(update);
 	auto &mask = update.validity;
 
+	// rows updated to NULL stay in the selection: they pin the current value (see TemplatedGetEffectiveUpdates)
+	sel.Initialize(nullptr);
 	if (mask.CannotHaveNull()) {
 		stats.statistics.SetHasNoNullFast();
 		for (idx_t i = 0; i < count; i++) {
 			auto idx = update.sel->get_index(i);
 			stats.statistics.UpdateNumericStats<T>(update_data[idx]);
 		}
-		sel.Initialize(nullptr);
 		return count;
-	} else {
-		idx_t not_null_count = 0;
-		sel.Initialize(STANDARD_VECTOR_SIZE);
-		for (idx_t i = 0; i < count; i++) {
-			auto idx = update.sel->get_index(i);
-			if (mask.RowIsValid(idx)) {
-				stats.statistics.SetHasNoNullFast();
-				sel.set_index(not_null_count++, i);
-				stats.statistics.UpdateNumericStats<T>(update_data[idx]);
-			} else {
-				stats.statistics.SetHasNullFast();
-			}
-		}
-		return not_null_count;
 	}
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = update.sel->get_index(i);
+		if (mask.RowIsValid(idx)) {
+			stats.statistics.SetHasNoNullFast();
+			stats.statistics.UpdateNumericStats<T>(update_data[idx]);
+		} else {
+			stats.statistics.SetHasNullFast();
+		}
+	}
+	return count;
 }
 
 idx_t UpdateStringStatistics(UpdateSegment *segment, SegmentStatistics &stats, UnifiedVectorFormat &update, idx_t count,
@@ -1145,7 +1164,8 @@ idx_t UpdateStringStatistics(UpdateSegment *segment, SegmentStatistics &stats, U
 	auto &mask = update.validity;
 
 	StatsWriter<string_t> stats_writer(stats.statistics.GetType());
-	idx_t not_null_count = 0;
+	// rows updated to NULL stay in the selection: they pin the current value (see TemplatedGetEffectiveUpdates)
+	sel.Initialize(nullptr);
 	if (mask.CannotHaveNull()) {
 		stats.statistics.SetHasNoNullFast();
 		for (idx_t i = 0; i < count; i++) {
@@ -1153,27 +1173,20 @@ idx_t UpdateStringStatistics(UpdateSegment *segment, SegmentStatistics &stats, U
 			auto &str = update_data[idx];
 			stats_writer.Update(str);
 		}
-		sel.Initialize(nullptr);
-		not_null_count = count;
 	} else {
-		sel.Initialize(STANDARD_VECTOR_SIZE);
 		for (idx_t i = 0; i < count; i++) {
 			auto idx = update.sel->get_index(i);
 			if (mask.RowIsValid(idx)) {
 				stats.statistics.SetHasNoNullFast();
-				sel.set_index(not_null_count++, i);
 				auto &str = update_data[idx];
 				stats_writer.Update(str);
 			} else {
 				stats.statistics.SetHasNullFast();
 			}
 		}
-		if (not_null_count == count) {
-			sel.Initialize(nullptr);
-		}
 	}
 	stats_writer.Merge(stats.statistics);
-	return not_null_count;
+	return count;
 }
 
 UpdateSegment::statistics_update_function_t GetStatisticsUpdateFunction(PhysicalType type) {
@@ -1254,9 +1267,14 @@ idx_t TemplatedGetEffectiveUpdates(UnifiedVectorFormat &update, row_t *ids, idx_
 		auto sel_idx = sel.get_index(i);
 		auto update_idx = update.sel->get_index(sel_idx);
 		auto original_idx = UnsafeNumericCast<idx_t>(ids[sel_idx]) - id_offset;
-		// NULL values in the updates should have been filtered out before
-		D_ASSERT(update.validity.RowIsValid(update_idx));
-		if (original_validity.RowIsValid(original_idx) && data[update_idx] == original_data[original_idx]) {
+		if (!update.validity.RowIsValid(update_idx)) {
+			// a row updated to NULL pins its current value in the update segment: a checkpoint that rewrites the
+			// column concurrently does not preserve the value below a NULL, but older transactions still read it
+			if (!original_validity.RowIsValid(original_idx)) {
+				// no value to pin
+				continue;
+			}
+		} else if (original_validity.RowIsValid(original_idx) && data[update_idx] == original_data[original_idx]) {
 			// data is equivalent - skip
 			continue;
 		}
@@ -1428,9 +1446,12 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 		// for strings - we need to push all strings we are going to place here into the string heap of the segment
 		update_p.Flatten();
 		auto update_data = FlatVector::GetDataMutable<string_t>(update_p);
+		auto &update_validity = FlatVector::Validity(update_p);
 		for (idx_t i = 0; i < count; i++) {
 			auto idx = sel.get_index(i);
-			update_data[idx] = GetStringHeap().AddBlob(update_data[idx]);
+			if (update_validity.RowIsValid(idx)) {
+				update_data[idx] = GetStringHeap().AddBlob(update_data[idx]);
+			}
 		}
 		update_p.ToUnifiedFormat(update_format);
 	}
