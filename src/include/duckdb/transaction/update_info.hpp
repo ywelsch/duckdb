@@ -68,22 +68,44 @@ struct UpdateInfo {
 		return !view.Sees(version_number.load());
 	}
 
-	//! Loop over the update chain and execute the specified callback on all UpdateInfo's that are relevant for that
-	//! transaction in-order of newest to oldest
-	template <class T>
-	static void UpdatesForTransaction(UpdateInfo &current, const SnapshotView &view, T &&callback) {
-		if (current.AppliesToTransaction(view)) {
+	//! Like AppliesToTransaction for a reader without a transaction, whose visibility is the bound alone
+	bool AppliesToBound(VisibilityBound visibility_bound) {
+		if (version_number == MAX_COMMIT_ID) {
+			return true;
+		}
+		return !(version_number.load() < visibility_bound);
+	}
+
+	//! Loop over the update chain, newest to oldest, and execute the callback on every UpdateInfo that applies
+	template <class APPLIES, class T>
+	static void UpdatesApplying(UpdateInfo &current, APPLIES &&applies, T &&callback) {
+		if (applies(current)) {
 			callback(current);
 		}
 		auto update_ptr = current.next;
 		while (update_ptr.IsSet()) {
 			auto pin = update_ptr.Pin();
 			auto &info = Get(pin);
-			if (info.AppliesToTransaction(view)) {
+			if (applies(info)) {
 				callback(info);
 			}
 			update_ptr = info.next;
 		}
+	}
+
+	//! Loop over the update chain and execute the specified callback on all UpdateInfo's that are relevant for that
+	//! transaction in-order of newest to oldest
+	template <class T>
+	static void UpdatesForTransaction(UpdateInfo &current, const SnapshotView &view, T &&callback) {
+		UpdatesApplying(
+		    current, [&](UpdateInfo &info) { return info.AppliesToTransaction(view); }, callback);
+	}
+
+	//! The same for a reader without a transaction, e.g. a checkpoint, that sees everything below the bound
+	template <class T>
+	static void UpdatesForBound(UpdateInfo &current, VisibilityBound visibility_bound, T &&callback) {
+		UpdatesApplying(
+		    current, [&](UpdateInfo &info) { return info.AppliesToBound(visibility_bound); }, callback);
 	}
 
 	Value GetValue(idx_t index);
