@@ -24,14 +24,21 @@ struct UpdateInfo;
 struct UpdateNode;
 struct UndoBufferAllocator;
 
+//! The updated values of one column of one row group: a vector's root holds the newest values, its chain the older
 class UpdateSegment {
 public:
 	explicit UpdateSegment(ColumnData &column_data);
 	~UpdateSegment();
 
-	ColumnData &column_data;
-
 public:
+	const LogicalType &GetType() const {
+		return type;
+	}
+	//! The column indexes from below the top-level column down to this column
+	const vector<column_t> &GetNestedColumnPath() const {
+		return nested_column_path;
+	}
+
 	bool HasUpdates() const;
 	bool HasUncommittedUpdates(idx_t vector_index);
 	bool HasUpdates(idx_t vector_index) const;
@@ -56,6 +63,12 @@ public:
 	}
 
 private:
+	//! The type of the column
+	LogicalType type;
+	//! See GetNestedColumnPath
+	vector<column_t> nested_column_path;
+	//! The buffer manager the root node allocates from
+	BufferManager &buffer_manager;
 	//! The lock for the update segment
 	mutable StorageLock lock;
 	//! The root node (if any)

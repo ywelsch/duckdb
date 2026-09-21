@@ -265,6 +265,8 @@ protected:
 	idx_t FetchUpdateData(ColumnScanState &state, row_t *row_ids, Vector &base_vector, idx_t row_group_start);
 
 	idx_t GetVectorCount(idx_t vector_index) const;
+	//! The update segment, if any; callers hold the returned reference
+	shared_ptr<UpdateSegment> GetUpdates() const;
 
 	static bool IsDirectNullCheckFilter(const TableFilter &filter);
 	//! Checks the filter against the statistics of one segment
@@ -283,7 +285,7 @@ protected:
 	//! The lock for the updates
 	mutable mutex update_lock;
 	//! The updates for this column segment
-	unique_ptr<UpdateSegment> updates;
+	shared_ptr<UpdateSegment> updates;
 	//! The lock for the stats
 	mutable mutex stats_lock;
 	//! Total transient allocation size
