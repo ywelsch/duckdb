@@ -25,6 +25,11 @@ struct SnapshotView {
 	    : transaction_id(transaction_id_p), visibility_bound(visibility_bound_p) {
 	}
 
+	//! The view of a reader without a transaction, such as a checkpoint: it sees what is committed below the bound
+	static SnapshotView WithoutTransaction(VisibilityBound visibility_bound) {
+		return SnapshotView(MAX_TRANSACTION_ID, visibility_bound);
+	}
+
 	//! The reading transaction, so that its own writes are visible to it
 	transaction_t transaction_id;
 	//! Exclusive: timestamps below it are visible
