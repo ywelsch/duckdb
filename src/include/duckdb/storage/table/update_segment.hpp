@@ -11,6 +11,8 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/statistics/segment_statistics.hpp"
 #include "duckdb/common/types/string_heap.hpp"
+#include "duckdb/common/atomic.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/transaction/undo_buffer_allocator.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 
@@ -24,10 +26,20 @@ struct UpdateInfo;
 struct UpdateNode;
 struct UndoBufferAllocator;
 
+class UpdateSegment;
+
+//! A column's update segment, shared with the columns a checkpoint rewrote it into (see CarryUpdatesToCheckpointTarget)
+struct UpdateSlot {
+	mutex lock;
+	shared_ptr<UpdateSegment> updates;
+	//! The number of columns holding this slot
+	idx_t column_count = 1;
+};
+
 //! The updated values of one column of one row group: a vector's root holds the newest values, its chain the older
-class UpdateSegment {
+class UpdateSegment : public enable_shared_from_this<UpdateSegment> {
 public:
-	explicit UpdateSegment(ColumnData &column_data);
+	UpdateSegment(ColumnData &column_data, weak_ptr<UpdateSlot> slot);
 	~UpdateSegment();
 
 public:
@@ -43,6 +55,12 @@ public:
 	bool HasUncommittedUpdates(idx_t vector_index);
 	bool HasUpdates(idx_t vector_index) const;
 	bool HasUpdates(idx_t start_row_idx, idx_t end_row_idx);
+	//! Whether a committed update on this segment has not been written by a checkpoint yet
+	bool HasUnserializedChanges() const;
+	//! Whether nothing needs the segment anymore: no version chains and no unserialized updates
+	bool CanBeDropped() const;
+	void MarkCommitted(transaction_t commit_id);
+	void MarkCheckpointed(VisibilityBound visibility_bound);
 
 	void FetchUpdates(TransactionData transaction, idx_t vector_index, Vector &result);
 	void FetchCommitted(idx_t vector_index, Vector &result);
@@ -69,6 +87,12 @@ private:
 	vector<column_t> nested_column_path;
 	//! The buffer manager the root node allocates from
 	BufferManager &buffer_manager;
+	//! The newest commit id of an update on this segment that no checkpoint has written yet, or 0
+	atomic<transaction_t> uncheckpointed_update_commit;
+	//! The number of undo entries referring to this segment
+	atomic<idx_t> chain_count;
+	//! The slot holding this segment
+	weak_ptr<UpdateSlot> slot;
 	//! The lock for the update segment
 	mutable StorageLock lock;
 	//! The root node (if any)
@@ -118,6 +142,8 @@ private:
 	void InitializeUpdateInfo(UpdateInfo &info, row_t *ids, const SelectionVector &sel, idx_t count, idx_t vector_index,
 	                          idx_t vector_offset);
 	void ReallocateRootInfoIfNeeded(UpdateInfo &current_info, idx_t update_count, idx_t vector_index);
+	//! Drops the segment from its slot if nothing needs it anymore; the caller keeps the segment alive
+	void TryDropFromSlot();
 };
 
 struct UpdateNode {

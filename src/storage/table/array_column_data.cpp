@@ -371,6 +371,11 @@ bool ArrayColumnData::HasAnyChanges() const {
 	return child_column->HasAnyChanges() || validity->HasAnyChanges();
 }
 
+bool ArrayColumnData::HasInexactStatistics() const {
+	return ColumnData::HasInexactStatistics() || child_column->HasInexactStatistics() ||
+	       validity->HasInexactStatistics();
+}
+
 PersistentColumnData ArrayColumnData::Serialize() {
 	PersistentColumnData persistent_data(type);
 	persistent_data.child_columns.push_back(validity->Serialize());

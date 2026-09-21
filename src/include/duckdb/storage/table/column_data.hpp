@@ -41,6 +41,8 @@ struct RowGroupWriteInfo;
 struct TableScanOptions;
 struct TransactionData;
 struct PersistentColumnData;
+class UpdateSegment;
+struct UpdateSlot;
 class ValidityColumnData;
 struct ColumnDataFinalizeAppendState;
 struct SuballocationBlock;
@@ -131,12 +133,13 @@ public:
 
 	//! Whether or not the column has any updates
 	bool HasUpdates() const;
-	bool HasChanges(idx_t start_row, idx_t end_row) const;
-	//! Whether or not the column has changes at this level
+	//! Whether a checkpoint has to write this level: transient segments, unserialized updates, or inexact statistics
 	bool HasChanges() const;
 
 	//! Whether or not the column has ANY changes, including in child columns
 	virtual bool HasAnyChanges() const;
+	//! Whether the statistics, at any level, may cover values no longer in the column (updates widen them)
+	virtual bool HasInexactStatistics() const;
 	//! Whether or not we can scan an entire vector
 	virtual ScanVectorType GetVectorScanType(ColumnScanState &state, idx_t scan_count, Vector &result);
 
@@ -207,6 +210,10 @@ public:
 
 	virtual void CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count, Vector &scan_vector,
 	                            VisibilityBound visibility_bound) const;
+	//! After a checkpoint wrote this column as of the bound into target (this column, if nothing was rewritten): share
+	//! the update slot with the target, mark the written updates, drop the segment if nothing needs it
+	void CarryUpdatesToCheckpointTarget(ColumnData &target, VisibilityBound visibility_bound,
+	                                    BaseStatistics &target_stats);
 
 	virtual bool IsPersistent();
 	vector<DataPointer> GetDataPointers();
@@ -282,14 +289,14 @@ private:
 protected:
 	//! The segments holding the data of this column segment
 	ColumnSegmentTree data;
-	//! The lock for the updates
-	mutable mutex update_lock;
-	//! The updates for this column segment
-	shared_ptr<UpdateSegment> updates;
+	//! The updates for this column segment, shared with the columns a checkpoint rewrote it into
+	shared_ptr<UpdateSlot> update_slot;
 	//! The lock for the stats
 	mutable mutex stats_lock;
 	//! Total transient allocation size
 	atomic<idx_t> allocation_size;
+	//! See HasInexactStatistics
+	atomic<bool> stats_inexact;
 	//! The stats of the root segment
 	unique_ptr<SegmentStatistics> stats;
 

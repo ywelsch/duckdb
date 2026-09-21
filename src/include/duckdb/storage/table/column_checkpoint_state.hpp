@@ -53,6 +53,10 @@ public:
 	PartialBlockManager &GetPartialBlockManager() {
 		return partial_block_manager;
 	}
+	//! The column that is being checkpointed
+	ColumnData &GetOriginalColumn() {
+		return original_column_mutable;
+	}
 
 public:
 	template <class TARGET>

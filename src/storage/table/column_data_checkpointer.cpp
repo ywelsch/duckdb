@@ -435,15 +435,23 @@ void ColumnDataCheckpointer::Checkpoint() {
 }
 
 void ColumnDataCheckpointer::FinalizeCheckpoint() {
+	auto visibility_bound = checkpoint_info.GetVisibilityBound();
 	if (has_changes) {
 		// something has undergone changes, we rewrote everything
 		// write the new data - not the old data
+		for (idx_t i = 0; i < checkpoint_states.size(); i++) {
+			auto &state = checkpoint_states[i].get();
+			state.GetOriginalColumn().CarryUpdatesToCheckpointTarget(state.GetResultColumn(), visibility_bound,
+			                                                         *state.global_stats);
+		}
 		return;
 	}
 	// no changes - copy over the original columns
 	for (idx_t i = 0; i < checkpoint_states.size(); i++) {
 		auto &state = checkpoint_states[i].get();
 		WritePersistentSegments(state);
+		auto &original_column = state.GetOriginalColumn();
+		original_column.CarryUpdatesToCheckpointTarget(original_column, visibility_bound, *state.global_stats);
 	}
 }
 

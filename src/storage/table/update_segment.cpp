@@ -22,8 +22,9 @@ static UpdateSegment::statistics_update_function_t GetStatisticsUpdateFunction(P
 static UpdateSegment::fetch_rows_function_t GetFetchRowsFunction(PhysicalType type);
 static UpdateSegment::get_effective_updates_t GetEffectiveUpdatesFunction(PhysicalType type);
 
-UpdateSegment::UpdateSegment(ColumnData &column_data)
-    : type(column_data.type), buffer_manager(column_data.block_manager.buffer_manager), stats(column_data.type),
+UpdateSegment::UpdateSegment(ColumnData &column_data, weak_ptr<UpdateSlot> slot_p)
+    : type(column_data.type), buffer_manager(column_data.block_manager.buffer_manager), uncheckpointed_update_commit(0),
+      chain_count(0), slot(std::move(slot_p)), stats(column_data.type),
       heap(BufferAllocator::Get(column_data.GetDatabase())) {
 	auto physical_type = type.InternalType();
 
@@ -631,19 +632,23 @@ static UpdateSegment::rollback_update_function_t GetRollbackUpdateFunction(Physi
 }
 
 void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
-	// obtain an exclusive lock
-	auto lock_handle = lock.GetExclusiveLock();
+	// unlinking the node may let another thread drop the segment
+	auto self = shared_from_this();
+	{
+		auto lock_handle = lock.GetExclusiveLock();
 
-	// move the data from the UpdateInfo back into the base info
-	auto entry = GetUpdateNode(*lock_handle, info.vector_index);
-	if (!entry.IsSet()) {
-		return;
+		// move the data from the UpdateInfo back into the base info; a node that was never linked (the update failed
+		// before that) has not changed it
+		auto entry = GetUpdateNode(*lock_handle, info.vector_index);
+		if (entry.IsSet() && info.HasPrev()) {
+			auto pin = entry.Pin();
+			rollback_update_function(UpdateInfo::Get(pin), info);
+		}
+
+		// clean up the update chain
+		CleanupUpdateInternal(*lock_handle, info);
 	}
-	auto pin = entry.Pin();
-	rollback_update_function(UpdateInfo::Get(pin), info);
-
-	// clean up the update chain
-	CleanupUpdateInternal(*lock_handle, info);
+	TryDropFromSlot();
 }
 
 //===--------------------------------------------------------------------===//
@@ -651,22 +656,33 @@ void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
 //===--------------------------------------------------------------------===//
 void UpdateSegment::CleanupUpdateInternal(const StorageLockKey &lock, UpdateInfo &info) {
 	if (info.HasPrev()) {
-		auto pin = info.prev.Pin();
-		auto &prev_info = UpdateInfo::Get(pin);
-		prev_info.next = info.next;
+		{
+			auto pin = info.prev.Pin();
+			auto &prev_info = UpdateInfo::Get(pin);
+			prev_info.next = info.next;
+		}
+		if (info.HasNext()) {
+			auto next = info.next;
+			auto next_pin = next.Pin();
+			auto &next_info = UpdateInfo::Get(next_pin);
+			next_info.prev = info.prev;
+		}
+		info.prev = UndoBufferPointer();
+		info.next = UndoBufferPointer();
 	}
-	if (info.HasNext()) {
-		auto next = info.next;
-		auto next_pin = next.Pin();
-		auto &next_info = UpdateInfo::Get(next_pin);
-		next_info.prev = info.prev;
-	}
+	// linked or not, the undo entry no longer refers to this segment
+	D_ASSERT(chain_count > 0);
+	chain_count--;
 }
 
 void UpdateSegment::CleanupUpdate(UpdateInfo &info) {
-	// obtain an exclusive lock
-	auto lock_handle = lock.GetExclusiveLock();
-	CleanupUpdateInternal(*lock_handle, info);
+	// unlinking the node may let another thread drop the segment
+	auto self = shared_from_this();
+	{
+		auto lock_handle = lock.GetExclusiveLock();
+		CleanupUpdateInternal(*lock_handle, info);
+	}
+	TryDropFromSlot();
 }
 
 //===--------------------------------------------------------------------===//
@@ -1476,6 +1492,11 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 				                             row_group_start);
 			}
 			node->segment = this;
+			if (transaction.transaction) {
+				// the undo entry refers to this segment from now on, linked or not: count it before anything below
+				// can throw (non-transactional updates have no undo entry)
+				chain_count++;
+			}
 			node->vector_index = vector_index;
 			node->N = 0;
 			node->column_index = column_index;
@@ -1526,6 +1547,10 @@ void UpdateSegment::Update(TransactionData transaction, DuckTableEntry &table_en
 		}
 
 		InitializeUpdateInfo(*transaction_node, ids, sel, count, vector_index, vector_offset);
+		if (transaction.transaction) {
+			// the undo entry refers to this segment from now on: count it before anything below can throw
+			chain_count++;
+		}
 
 		// we write the updates in the update node data, and write the updates in the info
 		initialize_update_function(*transaction_node, base_data, update_info, update_format, sel);
@@ -1580,6 +1605,45 @@ bool UpdateSegment::HasUpdates(idx_t start_row_index, idx_t end_row_index) {
 		}
 	}
 	return false;
+}
+
+//===--------------------------------------------------------------------===//
+// Checkpoint interaction
+//===--------------------------------------------------------------------===//
+bool UpdateSegment::HasUnserializedChanges() const {
+	return uncheckpointed_update_commit.load() != 0;
+}
+
+void UpdateSegment::MarkCommitted(transaction_t commit_id) {
+	// commits are serialized under the transaction lock, so commit ids only grow
+	uncheckpointed_update_commit = commit_id;
+}
+
+void UpdateSegment::MarkCheckpointed(VisibilityBound visibility_bound) {
+	// a concurrent commit at or above the bound keeps its id
+	auto current = uncheckpointed_update_commit.load();
+	while (current != 0 && current < visibility_bound &&
+	       !uncheckpointed_update_commit.compare_exchange_weak(current, 0)) {
+	}
+}
+
+bool UpdateSegment::CanBeDropped() const {
+	return !HasUnserializedChanges() && chain_count.load() == 0;
+}
+
+void UpdateSegment::TryDropFromSlot() {
+	if (!CanBeDropped()) {
+		return;
+	}
+	auto slot_ptr = slot.lock();
+	if (!slot_ptr) {
+		return;
+	}
+	lock_guard<mutex> guard(slot_ptr->lock);
+	if (slot_ptr->updates.get() != this || slot_ptr->column_count != 1 || !CanBeDropped()) {
+		return;
+	}
+	slot_ptr->updates.reset();
 }
 
 } // namespace duckdb

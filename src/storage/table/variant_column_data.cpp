@@ -812,6 +812,18 @@ bool VariantColumnData::HasAnyChanges() const {
 	return false;
 }
 
+bool VariantColumnData::HasInexactStatistics() const {
+	if (ColumnData::HasInexactStatistics() || validity->HasInexactStatistics()) {
+		return true;
+	}
+	for (auto &sub_column : sub_columns) {
+		if (sub_column->HasInexactStatistics()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 PersistentColumnData VariantColumnData::Serialize() {
 	PersistentColumnData persistent_data(type);
 	if (IsShredded()) {

@@ -170,6 +170,8 @@ public:
 
 	void InitializeEmpty(const vector<LogicalType> &types, ColumnDataType data_type);
 	bool HasChanges(VisibilityBound bound) const;
+	//! See ColumnData::HasInexactStatistics
+	bool HasInexactStatistics(idx_t column_idx) const;
 
 	//! Initialize a scan over this row_group
 	bool InitializeScan(CollectionScanState &state, SegmentNode<RowGroup> &node);
