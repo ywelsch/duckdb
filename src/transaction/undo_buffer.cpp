@@ -183,7 +183,14 @@ void UndoBuffer::Cleanup(transaction_t lowest_active_transaction) {
 	//  transaction
 	CleanupState state(transaction, lowest_active_transaction, active_transaction_state);
 	UndoBuffer::IteratorState iterator_state;
-	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) { state.CleanupEntry(type, data); });
+	idx_t entry_idx = 0;
+	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) {
+		if (entry_idx++ < cleaned_up_entries) {
+			return;
+		}
+		state.CleanupEntry(type, data);
+		cleaned_up_entries++;
+	});
 }
 
 void UndoBuffer::WriteToWAL(WriteAheadLog &wal, optional_ptr<StorageCommitState> commit_state) {

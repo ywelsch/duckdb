@@ -1,0 +1,59 @@
+# name: test/sql/parallelism/interquery/concurrent_upsert_memory_pressure.test_slow
+# description: Concurrent upserts of overlapping keys under memory pressure must not corrupt the update chain
+# group: [interquery]
+
+load __TEST_DIR__/concurrent_upsert_memory_pressure.db
+
+statement ok
+SET threads=8
+
+statement ok
+CREATE TABLE t(k BIGINT PRIMARY KEY, s VARCHAR, n INTEGER)
+
+statement ok
+INSERT INTO t SELECT i, 'p' || i || repeat('x', 40), 0 FROM range(500000) r(i)
+
+statement ok
+CREATE TABLE src AS SELECT i AS k, 'v' || i || repeat('y', 40) AS s FROM range(1000000) r(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+SET memory_limit='1500MB'
+
+concurrentloop threadid 0 3
+
+loop i 0 3000
+
+statement maybe
+INSERT INTO t BY NAME
+SELECT * FROM (
+	SELECT k, s, 1 AS n FROM src
+	WHERE k BETWEEN (${threadid} * 333331 + ${i} * 104729) % 980000 AND (${threadid} * 333331 + ${i} * 104729) % 980000 + 20000
+) QUALIFY row_number() OVER (PARTITION BY k ORDER BY s DESC) = 1
+ON CONFLICT (k) DO UPDATE SET s = excluded.s, n = t.n + 1
+----
+
+endloop
+
+endloop
+
+# check through a fresh instance (replays the WAL)
+restart
+
+# every value must match its own key
+query I
+SELECT count(*) FROM t WHERE s IS DISTINCT FROM 'p' || k || repeat('x', 40) AND s IS DISTINCT FROM 'v' || k || repeat('y', 40)
+----
+0
+
+statement ok
+CHECKPOINT
+
+restart
+
+query I
+SELECT count(*) FROM t WHERE s IS DISTINCT FROM 'p' || k || repeat('x', 40) AND s IS DISTINCT FROM 'v' || k || repeat('y', 40)
+----
+0

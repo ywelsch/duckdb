@@ -35,6 +35,7 @@ void DuckCleanupInfo::Cleanup() {
 	for (auto &transaction : transactions) {
 		if (transaction->awaiting_cleanup) {
 			transaction->Cleanup(lowest_start_time);
+			transaction->awaiting_cleanup = false;
 		}
 	}
 }
@@ -239,6 +240,8 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 
+	// transactions awaiting cleanup hold a shared checkpoint lock: retry cleanups that failed earlier
+	CleanupTransactions();
 	unique_ptr<StorageLockKey> lock;
 	if (!force) {
 		// not a force checkpoint
@@ -259,6 +262,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 			if (context.interrupted) {
 				throw InterruptException();
 			}
+			CleanupTransactions();
 			lock = checkpoint_lock.TryGetExclusiveLock();
 		}
 	}
@@ -298,18 +302,25 @@ transaction_t DuckTransactionManager::GetCommitTimestamp() {
 void DuckTransactionManager::CleanupTransactions() {
 	lock_guard<mutex> c_lock(cleanup_lock);
 	while (true) {
-		unique_ptr<DuckCleanupInfo> top_cleanup_info;
+		optional_ptr<DuckCleanupInfo> top_cleanup_info;
 		{
 			lock_guard<mutex> q_lock(cleanup_queue_lock);
 			if (cleanup_queue.empty()) {
 				// all transactions have been cleaned up - done
 				return;
 			}
-			top_cleanup_info = std::move(cleanup_queue.front());
-			cleanup_queue.pop();
+			top_cleanup_info = cleanup_queue.front().get();
 		}
 		if (top_cleanup_info) {
+			// only pop once done: if this throws (e.g. OOM on Pin), the next call resumes it, as update chains may
+			// still reference the undo buffers of its transactions
 			top_cleanup_info->Cleanup();
+		}
+		unique_ptr<DuckCleanupInfo> finished_cleanup_info;
+		{
+			lock_guard<mutex> q_lock(cleanup_queue_lock);
+			finished_cleanup_info = std::move(cleanup_queue.front());
+			cleanup_queue.pop();
 		}
 	}
 }
