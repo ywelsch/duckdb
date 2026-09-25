@@ -156,7 +156,11 @@ shared_ptr<ArenaAllocator> GroupedAggregateHashTable::GetAggregateAllocator() {
 }
 
 GroupedAggregateHashTable::~GroupedAggregateHashTable() {
-	Destroy();
+	// Destroy() pins data and can throw (OOM) while unwinding a failed query: leak the states
+	try {
+		Destroy();
+	} catch (...) { // NOLINT
+	}
 }
 
 void GroupedAggregateHashTable::Destroy() {
