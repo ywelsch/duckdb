@@ -156,7 +156,13 @@ shared_ptr<ArenaAllocator> GroupedAggregateHashTable::GetAggregateAllocator() {
 }
 
 GroupedAggregateHashTable::~GroupedAggregateHashTable() {
-	Destroy();
+	try {
+		Destroy();
+	} catch (...) { // NOLINT
+		// Destroy() pins the partitioned data, which can throw (e.g. an out-of-memory error when the data was
+		// offloaded). Exceptions must not escape the destructor: this happens while unwinding a failed or cancelled
+		// query, and the destructor is implicitly noexcept. The aggregate states are leaked in this case
+	}
 }
 
 void GroupedAggregateHashTable::Destroy() {
