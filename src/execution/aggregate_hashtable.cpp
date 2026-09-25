@@ -159,8 +159,7 @@ GroupedAggregateHashTable::~GroupedAggregateHashTable() {
 	try {
 		Destroy();
 	} catch (...) { // NOLINT
-		// Destroy() pins data and can throw (OOM) while unwinding a failed query: leak the states instead of
-		// terminating
+		            // Destroy() pins data and can throw (OOM) while unwinding a failed query: leak the states
 	}
 }
 
