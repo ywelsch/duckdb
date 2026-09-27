@@ -240,6 +240,8 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 
+	// transactions awaiting cleanup hold a shared checkpoint lock: retry cleanups that failed earlier
+	CleanupTransactions();
 	unique_ptr<StorageLockKey> lock;
 	if (!force) {
 		// not a force checkpoint
@@ -260,6 +262,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 			if (context.interrupted) {
 				throw InterruptException();
 			}
+			CleanupTransactions();
 			lock = checkpoint_lock.TryGetExclusiveLock();
 		}
 	}
@@ -506,9 +509,24 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 		// Obtain the transaction lock and roll back.
 		lock_guard<mutex> t_lock(transaction_lock);
 		error = transaction.Rollback();
+		if (error.HasError()) {
+			// reserve before removing the transaction, so keeping it alive below cannot fail
+			failed_rollbacks.reserve(failed_rollbacks.size() + 1);
+		}
 
 		// Remove the transaction from the list of active transactions and gather cleanup information.
 		auto cleanup_info = RemoveTransaction(transaction);
+		if (error.HasError()) {
+			// the rollback threw part-way: update chains may still reference its undo buffers, keep it alive
+			auto &transactions = cleanup_info->transactions;
+			for (idx_t i = 0; i < transactions.size(); i++) {
+				if (transactions[i].get() == &transaction) {
+					failed_rollbacks.push_back(std::move(transactions[i]));
+					transactions.erase(transactions.begin() + static_cast<int64_t>(i));
+					break;
+				}
+			}
+		}
 		if (cleanup_info->ScheduleCleanup()) {
 			lock_guard<mutex> q_lock(cleanup_queue_lock);
 			cleanup_queue.emplace(std::move(cleanup_info));

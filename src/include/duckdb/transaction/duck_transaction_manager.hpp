@@ -136,6 +136,9 @@ private:
 	vector<unique_ptr<DuckTransaction>> active_transactions;
 	//! Set of recently committed transactions
 	vector<unique_ptr<DuckTransaction>> recently_committed_transactions;
+	//! Transactions whose rollback threw part-way (the database is invalidated): kept alive as update chains may still
+	//! reference their undo buffers
+	vector<unique_ptr<DuckTransaction>> failed_rollbacks;
 	//! The lock used for transaction operations
 	mutex transaction_lock;
 	//! The checkpoint lock
