@@ -238,7 +238,7 @@ LogicalType ParquetReader::DeriveLogicalType(const SchemaElement &s_ele, const P
 			}
 			if (s_ele.logicalType.TIME.isAdjustedToUTC) {
 				return LogicalType::TIME_TZ;
-			} else if (s_ele.logicalType.TIME.unit.__isset.NANOS) {
+			} else if (s_ele.logicalType.TIME.unit.__isset.NANOS && !parquet_options.time_ns_as_time) {
 				return LogicalType::TIME_NS;
 			}
 			return LogicalType::TIME;
@@ -845,6 +845,11 @@ ParquetOptions::ParquetOptions(ClientContext &context) {
 	}
 	if (context.TryGetCurrentSetting("__delta_only_variant_encoding_enabled", lookup_value)) {
 		variant_legacy_encoding = lookup_value.GetValue<bool>();
+	}
+	// MotherDuck-only: a registered state instead of a setting, because the MotherDuck server resets any session
+	// setting that the client did not send, and old clients don't know about this one.
+	if (context.registered_state->Get<ClientContextState>("md_parquet_time_ns_as_time")) {
+		time_ns_as_time = true;
 	}
 }
 

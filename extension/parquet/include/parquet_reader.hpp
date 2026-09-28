@@ -112,6 +112,8 @@ struct ParquetOptions {
 
 	bool binary_as_string = false;
 	bool variant_legacy_encoding = false;
+	//! Read TIME(NANOS) columns as TIME instead of TIME_NS. Set by MotherDuck for clients that predate TIME_NS.
+	bool time_ns_as_time = false;
 	bool file_row_number = false;
 	shared_ptr<ParquetEncryptionConfig> encryption_config;
 
