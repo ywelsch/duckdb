@@ -225,6 +225,8 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 
+	// transactions awaiting cleanup hold a shared checkpoint lock: retry cleanups that failed earlier
+	CleanupTransactions();
 	unique_ptr<StorageLockKey> lock;
 	if (!force) {
 		// not a force checkpoint
@@ -243,6 +245,7 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		// wait until any active transactions are finished
 		while (!lock) {
 			context.InterruptCheck();
+			CleanupTransactions();
 			lock = checkpoint_lock.TryGetExclusiveLock();
 		}
 	}
