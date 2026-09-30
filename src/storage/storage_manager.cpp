@@ -251,13 +251,13 @@ bool StorageManager::HasWAL() const {
 bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointOptions &options,
                                         ActiveCheckpointWrapper &active_checkpoint) {
 	unique_lock<mutex> guard;
-	// Lock ordering: WAL lock -> transaction lock (in GetCheckpointTransaction)
-	if (!options.wal_lock) {
-		// not holding the WAL lock yet - grab it
-		guard = GetWALLock();
+	// Lock ordering: commit lock -> transaction lock (in GetCheckpointTransaction)
+	if (!options.commit_lock) {
+		// not holding the commit lock yet - grab it
+		guard = GetCommitLock();
 	}
 	if (active_checkpoint.HasCheckpointContext()) {
-		// While holding the WAL lock, if we have a context then start a checkpoint transaction.
+		// While holding the commit lock, if we have a context then start a checkpoint transaction.
 		// The start time of this transaction defines the visibility for checkpointing, any new commits are written
 		// to the next WAL.
 		active_checkpoint.GetCheckpointTransaction(options);
@@ -335,8 +335,8 @@ void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &) {
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Finish Checkpoint");
 }
 
-unique_lock<mutex> StorageManager::GetWALLock() {
-	return unique_lock<mutex>(wal_lock);
+unique_lock<mutex> StorageManager::GetCommitLock() {
+	return unique_lock<mutex>(commit_lock);
 }
 
 string StorageManager::GetWALPath(const string &suffix) {
