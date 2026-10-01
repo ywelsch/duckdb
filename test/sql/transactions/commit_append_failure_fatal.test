@@ -1,0 +1,304 @@
+# name: test/sql/transactions/commit_append_failure_fatal.test
+# description: A commit that fails while appending its rows to the indexes or the table invalidates the database, which is intact after a restart
+# group: [transactions]
+
+require no_alternative_verify
+
+require skip_reload
+
+load {TEST_DIR}/commit_append_failure_fatal.db
+
+statement ok
+CREATE TABLE t (a INTEGER, b VARCHAR, v INTEGER, PRIMARY KEY (a, b));
+
+statement ok
+INSERT INTO t SELECT i, 'k' || i, i FROM range(10000) r(i);
+
+statement ok
+CREATE TABLE no_index (a INTEGER, b VARCHAR, v INTEGER);
+
+statement ok
+INSERT INTO no_index SELECT i, 'k' || i, i FROM range(10000) r(i);
+
+statement ok
+CHECKPOINT
+
+# --- the index append fails ---
+
+statement ok
+SET debug_force_commit_append_failure = 'INDEX_APPEND';
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM t WHERE a >= 7000;
+
+statement ok
+INSERT INTO t SELECT i, 'k' || i, -1 FROM range(7000, 15000) r(i);
+
+statement error
+COMMIT
+----
+appending to the indexes of table "t" failed, leaving them in an inconsistent state
+
+statement error
+SELECT count(*) FROM t
+----
+database has been invalidated
+
+restart
+
+statement ok
+SET debug_force_commit_append_failure = 'NONE';
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+10000	10000	0
+
+statement ok
+INSERT INTO t VALUES (12345, 'k12345', 0);
+
+statement error
+INSERT INTO t VALUES (7000, 'k7000', 0);
+----
+<REGEX>:Constraint Error.*violates primary key constraint.*
+
+statement ok
+DELETE FROM t WHERE a = 12345;
+
+# --- the table append fails, after the index append ---
+
+statement ok
+SET debug_force_commit_append_failure = 'TABLE_APPEND';
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM t WHERE a >= 7000;
+
+statement ok
+INSERT INTO t SELECT i, 'k' || i, -1 FROM range(7000, 15000) r(i);
+
+statement error
+COMMIT
+----
+appending to table "t" failed midway, leaving it in an inconsistent state
+
+restart
+
+statement ok
+SET debug_force_commit_append_failure = 'NONE';
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+10000	10000	0
+
+statement ok
+INSERT INTO t VALUES (12345, 'k12345', 0);
+
+statement ok
+DELETE FROM t WHERE a = 12345;
+
+# --- the table append fails on a table without indexes ---
+
+statement ok
+SET debug_force_commit_append_failure = 'TABLE_APPEND';
+
+statement error
+INSERT INTO no_index SELECT i, 'k' || i, -1 FROM range(10000, 15000) r(i);
+----
+appending to table "no_index" failed midway, leaving it in an inconsistent state
+
+restart
+
+statement ok
+SET debug_force_commit_append_failure = 'NONE';
+
+statement ok
+INSERT INTO no_index VALUES (20000, 'marker', 0);
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT count(*), count(*) FILTER (v = -1), count(*) FILTER (b = 'marker') FROM no_index
+----
+10001	0	1
+
+# --- merging bulk-appended row groups into the table fails, after the index append ---
+
+statement ok
+SET debug_force_commit_append_failure = 'MERGE_STORAGE';
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t SELECT i, 'k' || i, -1 FROM range(100000, 300000) r(i);
+
+statement error
+COMMIT
+----
+appending to table "t" failed midway, leaving it in an inconsistent state
+
+restart
+
+statement ok
+SET debug_force_commit_append_failure = 'NONE';
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+10000	10000	0
+
+statement ok
+INSERT INTO t VALUES (100000, 'k100000', 0);
+
+statement ok
+DELETE FROM t WHERE a = 100000;
+
+# --- a constraint violation detected at commit is reverted and is not fatal ---
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO t VALUES (50000, 'k50000', 1);
+
+statement ok con2
+INSERT INTO t VALUES (50000, 'k50000', 2);
+
+statement error con1
+COMMIT
+----
+<REGEX>:.*PRIMARY KEY or UNIQUE constraint violation.*
+
+query II
+SELECT count(*), sum(v) FILTER (a = 50000) FROM t
+----
+10001	2
+
+# --- ... unless reverting it fails ---
+
+statement ok
+SET debug_force_commit_revert_failure = true;
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO t VALUES (60000, 'k60000', 1);
+
+statement ok con2
+INSERT INTO t VALUES (60000, 'k60000', 2);
+
+# the error reports both the original failure and the failed revert
+statement error con1
+COMMIT
+----
+<REGEX>:.*PRIMARY KEY or UNIQUE constraint violation.*\n.*Could not remove the appended entries from the indexes of table "t" afterwards.*Forced index revert failure.*
+
+restart
+
+statement ok
+SET debug_force_commit_revert_failure = false;
+
+query II
+SELECT count(*), sum(v) FILTER (a = 60000) FROM t
+----
+10002	2
+
+# the upsert succeeds
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM t WHERE a >= 7000 AND a < 15000;
+
+statement ok
+INSERT INTO t SELECT i, 'k' || i, -1 FROM range(7000, 15000) r(i);
+
+statement ok
+COMMIT
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+15002	15002	8000
+
+# --- in a database other than the initial one, only that database is invalidated ---
+
+statement ok
+ATTACH '{TEST_DIR}/commit_append_failure_attached.db' AS other;
+
+statement ok
+CREATE TABLE other.t (a INTEGER, b VARCHAR, v INTEGER, PRIMARY KEY (a, b));
+
+statement ok
+INSERT INTO other.t SELECT i, 'k' || i, i FROM range(10000) r(i);
+
+statement ok
+CHECKPOINT other
+
+statement ok
+SET debug_force_commit_append_failure = 'TABLE_APPEND';
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM other.t WHERE a >= 7000;
+
+statement ok
+INSERT INTO other.t SELECT i, 'k' || i, -1 FROM range(7000, 15000) r(i);
+
+statement error
+COMMIT
+----
+Database "other" has been invalidated because committing a transaction failed
+
+statement ok
+SET debug_force_commit_append_failure = 'NONE';
+
+statement error
+SELECT count(*) FROM other.t
+----
+has been invalidated
+
+# the other databases are unaffected
+query I
+SELECT count(*) FROM t
+----
+15002
+
+statement ok
+DETACH other
+
+statement ok
+ATTACH '{TEST_DIR}/commit_append_failure_attached.db' AS other;
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM other.t
+----
+10000	10000	0
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM other.t WHERE a >= 7000;
+
+statement ok
+INSERT INTO other.t SELECT i, 'k' || i, -1 FROM range(7000, 15000) r(i);
+
+statement ok
+COMMIT
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM other.t
+----
+15000	15000	8000

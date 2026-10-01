@@ -143,7 +143,7 @@ public:
 	ValidChecker &GetValidChecker() {
 		return validity;
 	}
-	void Invalidate(const string &reason);
+	void Invalidate(const string &reason, const string &failed_operation = "checkpointing");
 
 	optional_ptr<StorageExtension> GetStorageExtension() {
 		return storage_extension;

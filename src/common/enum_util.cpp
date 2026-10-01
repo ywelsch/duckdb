@@ -29,6 +29,7 @@
 #include "duckdb/common/enums/copy_overwrite_mode.hpp"
 #include "duckdb/common/enums/cte_materialize.hpp"
 #include "duckdb/common/enums/date_part_specifier.hpp"
+#include "duckdb/common/enums/debug_commit_append_failure.hpp"
 #include "duckdb/common/enums/debug_initialize.hpp"
 #include "duckdb/common/enums/debug_order_verification.hpp"
 #include "duckdb/common/enums/debug_progress_verification.hpp"
@@ -1704,6 +1705,26 @@ const char* EnumUtil::ToChars<DatePartSpecifier>(DatePartSpecifier value) {
 template<>
 DatePartSpecifier EnumUtil::FromString<DatePartSpecifier>(const char *value) {
 	return static_cast<DatePartSpecifier>(StringUtil::StringToEnum(GetDatePartSpecifierValues(), 25, "DatePartSpecifier", value));
+}
+
+const StringUtil::EnumStringLiteral *GetDebugCommitAppendFailureValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(DebugCommitAppendFailure::NONE), "NONE" },
+		{ static_cast<uint32_t>(DebugCommitAppendFailure::INDEX_APPEND), "INDEX_APPEND" },
+		{ static_cast<uint32_t>(DebugCommitAppendFailure::TABLE_APPEND), "TABLE_APPEND" },
+		{ static_cast<uint32_t>(DebugCommitAppendFailure::MERGE_STORAGE), "MERGE_STORAGE" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<DebugCommitAppendFailure>(DebugCommitAppendFailure value) {
+	return StringUtil::EnumToString(GetDebugCommitAppendFailureValues(), 4, "DebugCommitAppendFailure", static_cast<uint32_t>(value));
+}
+
+template<>
+DebugCommitAppendFailure EnumUtil::FromString<DebugCommitAppendFailure>(const char *value) {
+	return static_cast<DebugCommitAppendFailure>(StringUtil::StringToEnum(GetDebugCommitAppendFailureValues(), 4, "DebugCommitAppendFailure", value));
 }
 
 const StringUtil::EnumStringLiteral *GetDebugInitializeValues() {

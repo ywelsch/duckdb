@@ -354,13 +354,13 @@ bool AttachedDatabase::IsInitialDatabase() const {
 	return is_initial_database;
 }
 
-void AttachedDatabase::Invalidate(const string &reason) {
+void AttachedDatabase::Invalidate(const string &reason, const string &failed_operation) {
 	string recovery = HasStorageManager() && GetStorageManager().InMemory()
 	                      ? "It is an in-memory database, so its data cannot be recovered."
 	                      : "Detach and reattach it before using it again.";
-	ValidChecker::Invalidate(*this, StringUtil::Format("Database %s has been invalidated because checkpointing "
-	                                                   "failed. %s Original error: %s",
-	                                                   GetName(), recovery, reason));
+	ValidChecker::Invalidate(*this, StringUtil::Format("Database %s has been invalidated because %s failed. %s "
+	                                                   "Original error: %s",
+	                                                   GetName(), failed_operation, recovery, reason));
 }
 
 void AttachedDatabase::SetInitialDatabase() {
