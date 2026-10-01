@@ -1178,6 +1178,17 @@ void DataTable::MergeStorage(RowGroupCollection &data, optional_ptr<StorageCommi
 	row_groups->Verify();
 }
 
+PreparedMergeStorage DataTable::PrepareMergeStorage(RowGroupCollection &data,
+                                                    optional_ptr<StorageCommitState> commit_state) {
+	return row_groups->PrepareMergeStorage(data, commit_state);
+}
+
+void DataTable::MergeStorage(RowGroupCollection &data, optional_ptr<StorageCommitState> commit_state,
+                             PreparedMergeStorage &prepared) {
+	row_groups->MergeStorage(data, this, commit_state, prepared);
+	row_groups->Verify();
+}
+
 void DataTable::WriteToLog(DuckTransaction &transaction, WriteAheadLog &log, idx_t row_start, idx_t count,
                            optional_ptr<StorageCommitState> commit_state) {
 	log.WriteSetTable(QualifiedName(info->GetSchemaPath(), info->GetTableName()));

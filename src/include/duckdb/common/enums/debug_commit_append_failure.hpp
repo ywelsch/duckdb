@@ -21,7 +21,9 @@ enum class DebugCommitAppendFailure : uint8_t {
 	//! Fail while appending the rows to the table, after the first chunk was appended (after the index append)
 	TABLE_APPEND,
 	//! Fail while merging the row groups into the table in the bulk-append path (after the index append)
-	MERGE_STORAGE
+	MERGE_STORAGE,
+	//! Fail while preparing that merge (before the index append)
+	PREPARE_MERGE_STORAGE
 };
 
 } // namespace duckdb

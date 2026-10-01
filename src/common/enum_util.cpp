@@ -1712,19 +1712,20 @@ const StringUtil::EnumStringLiteral *GetDebugCommitAppendFailureValues() {
 		{ static_cast<uint32_t>(DebugCommitAppendFailure::NONE), "NONE" },
 		{ static_cast<uint32_t>(DebugCommitAppendFailure::INDEX_APPEND), "INDEX_APPEND" },
 		{ static_cast<uint32_t>(DebugCommitAppendFailure::TABLE_APPEND), "TABLE_APPEND" },
-		{ static_cast<uint32_t>(DebugCommitAppendFailure::MERGE_STORAGE), "MERGE_STORAGE" }
+		{ static_cast<uint32_t>(DebugCommitAppendFailure::MERGE_STORAGE), "MERGE_STORAGE" },
+		{ static_cast<uint32_t>(DebugCommitAppendFailure::PREPARE_MERGE_STORAGE), "PREPARE_MERGE_STORAGE" }
 	};
 	return values;
 }
 
 template<>
 const char* EnumUtil::ToChars<DebugCommitAppendFailure>(DebugCommitAppendFailure value) {
-	return StringUtil::EnumToString(GetDebugCommitAppendFailureValues(), 4, "DebugCommitAppendFailure", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetDebugCommitAppendFailureValues(), 5, "DebugCommitAppendFailure", static_cast<uint32_t>(value));
 }
 
 template<>
 DebugCommitAppendFailure EnumUtil::FromString<DebugCommitAppendFailure>(const char *value) {
-	return static_cast<DebugCommitAppendFailure>(StringUtil::StringToEnum(GetDebugCommitAppendFailureValues(), 4, "DebugCommitAppendFailure", value));
+	return static_cast<DebugCommitAppendFailure>(StringUtil::StringToEnum(GetDebugCommitAppendFailureValues(), 5, "DebugCommitAppendFailure", value));
 }
 
 const StringUtil::EnumStringLiteral *GetDebugInitializeValues() {

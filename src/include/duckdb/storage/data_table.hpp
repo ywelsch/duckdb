@@ -42,6 +42,7 @@ class TableDataWriter;
 class ConflictManager;
 class TableScanState;
 struct TableDeleteState;
+struct PreparedMergeStorage;
 struct ConstraintState;
 struct TableUpdateState;
 struct OptimisticWriteCollection;
@@ -198,6 +199,9 @@ public:
 
 	//! Merge a row group collection directly into this table - appending it to the end of the table without copying
 	void MergeStorage(RowGroupCollection &data, optional_ptr<StorageCommitState> commit_state);
+	PreparedMergeStorage PrepareMergeStorage(RowGroupCollection &data, optional_ptr<StorageCommitState> commit_state);
+	void MergeStorage(RowGroupCollection &data, optional_ptr<StorageCommitState> commit_state,
+	                  PreparedMergeStorage &prepared);
 
 	//! Remove the row identifiers from all the indexes of the table
 	void RemoveFromIndexes(const QueryContext &context, Vector &row_identifiers, idx_t count,

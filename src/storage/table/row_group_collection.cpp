@@ -864,71 +864,87 @@ bool RowGroupCollection::IsPersistent() const {
 	return true;
 }
 
+PreparedMergeStorage::PreparedMergeStorage() {
+}
+PreparedMergeStorage::~PreparedMergeStorage() {
+}
+PreparedMergeStorage::PreparedMergeStorage(PreparedMergeStorage &&other) noexcept = default;
+
+PreparedMergeStorage RowGroupCollection::PrepareMergeStorage(RowGroupCollection &data,
+                                                             optional_ptr<StorageCommitState> commit_state) {
+	D_ASSERT(data.types == types);
+	PreparedMergeStorage result;
+	auto row_groups = GetRowGroups();
+	{
+		// load the row groups we are going to append after, which can fail (e.g., to read their metadata)
+		auto l = row_groups->Lock();
+		row_groups->GetSegmentCount(l);
+	}
+	D_ASSERT(next_row_id.load() >= total_rows.load());
+	result.start_index = row_groups->GetBaseRowId() + next_row_id.load();
+	if (!commit_state) {
+		return result;
+	}
+	// check if the row groups we are merging are optimistically written
+	// if they are, we keep around the block pointers of the leading optimistically written row groups
+	auto target_row_start = result.start_index;
+	for (auto &row_group : data.GetRowGroups()->Segments()) {
+		if (!row_group.IsPersistent()) {
+#ifdef DEBUG
+			if (result.optimistically_written_count > 0) {
+				throw InternalException("Partially optimistically written data at row %d", target_row_start);
+			}
+#endif
+			break;
+		}
+		if (!result.row_group_data) {
+			result.row_group_data = make_uniq<PersistentCollectionData>();
+		}
+		// serialize the block pointers of this row group
+		auto persistent_data = row_group.SerializeRowGroupInfo(target_row_start);
+		persistent_data.types = types;
+		result.row_group_data->row_group_data.push_back(std::move(persistent_data));
+		result.optimistically_written_count += row_group.count;
+		target_row_start += row_group.count;
+	}
+	return result;
+}
+
 void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<DataTable> table,
                                       optional_ptr<StorageCommitState> commit_state) {
+	auto prepared = PrepareMergeStorage(data, commit_state);
+	MergeStorage(data, table, commit_state, prepared);
+}
+
+void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<DataTable> table,
+                                      optional_ptr<StorageCommitState> commit_state, PreparedMergeStorage &prepared) {
 	D_ASSERT(data.types == types);
-	auto source_row_groups = data.GetRowGroups();
-	auto segments = source_row_groups->MoveSegments();
 	auto row_groups = GetRowGroups();
 	D_ASSERT(next_row_id.load() >= total_rows.load());
 	auto target_base_row_id = row_groups->GetBaseRowId();
 	auto start_index = target_base_row_id + next_row_id.load();
-
-	// check if the row groups we are merging are optimistically written
-	// if all row groups are optimistically written we keep around the block pointers
-	unique_ptr<PersistentCollectionData> row_group_data;
-	idx_t optimistically_written_count = 0;
-	if (commit_state) {
-		for (auto &entry : segments) {
-			auto &row_group = entry->GetNode();
-			if (!row_group.IsPersistent()) {
-				if (optimistically_written_count > 0) {
-#ifdef DEBUG
-					throw InternalException("Partially optimistically written data at position %d (row start %d)",
-					                        entry->GetIndex(), entry->GetRowStart());
-#endif
-				}
-				break;
-			}
-			optimistically_written_count += row_group.count;
-		}
-		if (optimistically_written_count > 0) {
-			row_group_data = make_uniq<PersistentCollectionData>();
-		}
+	if (start_index != prepared.start_index) {
+		throw InternalException("RowGroupCollection::MergeStorage - the collection was appended to after preparing");
 	}
+	auto source_row_groups = data.GetRowGroups();
+	auto segments = source_row_groups->MoveSegments();
 	bool is_persistent = segments.back()->GetNode().IsPersistent();
-	idx_t merged_count = 0;
-#ifdef D_ASSERT_IS_ENABLED
-	idx_t source_offset = 0;
-#endif
 	idx_t target_row_start = start_index;
 	for (auto &entry : segments) {
-#ifdef D_ASSERT_IS_ENABLED
-		D_ASSERT(entry->GetRowStart() == source_row_groups->GetBaseRowId() + source_offset);
-#endif
 		auto row_group = entry->MoveNode();
 		row_group->MoveToCollection(*this);
 		idx_t row_group_count = row_group->count;
-
-		if (commit_state && merged_count < optimistically_written_count) {
-			// serialize the block pointers of this row group
-			auto persistent_data = row_group->SerializeRowGroupInfo(target_row_start);
-			persistent_data.types = types;
-			row_group_data->row_group_data.push_back(std::move(persistent_data));
-		}
-		merged_count += row_group_count;
-#ifdef D_ASSERT_IS_ENABLED
-		source_offset += row_group_count;
-#endif
 		row_groups->AppendSegment(std::move(row_group), target_row_start);
 		target_row_start += row_group_count;
 	}
-	if (commit_state && optimistically_written_count > 0) {
-		// if we have serialized the row groups - push the serialized block pointers into the commit state
-		commit_state->AddRowGroupData(*table, start_index, optimistically_written_count, std::move(row_group_data));
+	if (prepared.row_group_data) {
+		// push the serialized block pointers into the commit state
+		D_ASSERT(commit_state);
+		commit_state->AddRowGroupData(*table, start_index, prepared.optimistically_written_count,
+		                              std::move(prepared.row_group_data));
 	}
 	stats.MergeStats(data.stats);
-	D_ASSERT(source_offset == data.total_rows.load());
+	D_ASSERT(target_row_start - start_index == data.total_rows.load());
 	D_ASSERT(data.next_row_id.load() == data.total_rows.load());
 	total_rows += data.total_rows.load();
 	next_row_id = target_row_start - target_base_row_id;

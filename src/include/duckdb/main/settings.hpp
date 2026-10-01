@@ -690,8 +690,9 @@ struct DebugForceCommitAppendFailureSetting {
 	static constexpr const char *Name = "debug_force_commit_append_failure";
 	static constexpr const char *Description =
 	    "Force the commit-time append of a transaction's rows to a table to fail at the given point: while appending "
-	    "to the indexes (INDEX_APPEND), while appending to the table (TABLE_APPEND), or while merging bulk-appended "
-	    "row groups into the table (MERGE_STORAGE). Can be used for testing commit error recovery.";
+	    "to the indexes (INDEX_APPEND), while appending to the table (TABLE_APPEND), or while preparing "
+	    "(PREPARE_MERGE_STORAGE) or doing (MERGE_STORAGE) the merge of bulk-appended row groups into the table. Can be "
+	    "used for testing commit error recovery.";
 	static constexpr const char *InputType = "VARCHAR";
 	static constexpr bool IsDebug = true;
 	static constexpr bool IsDeprecated = false;

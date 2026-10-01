@@ -377,7 +377,7 @@
     },
     {
         "name": "debug_force_commit_append_failure",
-        "description": "Force the commit-time append of a transaction's rows to a table to fail at the given point: while appending to the indexes (INDEX_APPEND), while appending to the table (TABLE_APPEND), or while merging bulk-appended row groups into the table (MERGE_STORAGE). Can be used for testing commit error recovery.",
+        "description": "Force the commit-time append of a transaction's rows to a table to fail at the given point: while appending to the indexes (INDEX_APPEND), while appending to the table (TABLE_APPEND), or while preparing (PREPARE_MERGE_STORAGE) or doing (MERGE_STORAGE) the merge of bulk-appended row groups into the table. Can be used for testing commit error recovery.",
         "type": "ENUM<DebugCommitAppendFailure>",
         "default_scope": "global",
         "default_value": "NONE",

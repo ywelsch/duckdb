@@ -161,6 +161,46 @@ INSERT INTO t VALUES (100000, 'k100000', 0);
 statement ok
 DELETE FROM t WHERE a = 100000;
 
+# --- preparing that merge fails, before the index append: a regular error ---
+
+statement ok
+SET debug_force_commit_append_failure = 'PREPARE_MERGE_STORAGE';
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t SELECT i, 'k' || i, -1 FROM range(100000, 300000) r(i);
+
+statement error
+COMMIT
+----
+Forced prepare merge storage failure
+
+statement ok
+SET debug_force_commit_append_failure = 'NONE';
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+10000	10000	0
+
+statement ok
+INSERT INTO t VALUES (100000, 'k100000', 0);
+
+statement ok
+DELETE FROM t WHERE a = 100000;
+
+statement ok
+CHECKPOINT
+
+restart
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+10000	10000	0
+
 # --- a constraint violation detected at commit is reverted and is not fatal ---
 
 statement ok con1

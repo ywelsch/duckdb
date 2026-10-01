@@ -41,6 +41,19 @@ struct PersistentCollectionData;
 class CheckpointTask;
 class TableIOManager;
 class CommitDropState;
+
+//! The part of RowGroupCollection::MergeStorage that can fail without having changed either collection
+struct PreparedMergeStorage {
+	PreparedMergeStorage();
+	~PreparedMergeStorage();
+	PreparedMergeStorage(PreparedMergeStorage &&other) noexcept;
+
+	//! The row at which the merged row groups start
+	idx_t start_index = 0;
+	//! The number of leading rows that were optimistically written, and their serialized block pointers
+	idx_t optimistically_written_count = 0;
+	unique_ptr<PersistentCollectionData> row_group_data;
+};
 class DataTable;
 class DuckTableEntry;
 class RowGroupIterationHelper;
@@ -134,6 +147,11 @@ public:
 
 	void MergeStorage(RowGroupCollection &data, optional_ptr<DataTable> table,
 	                  optional_ptr<StorageCommitState> commit_state);
+	//! Prepare merging data into this collection: loads this collection and serializes the block pointers for the WAL
+	PreparedMergeStorage PrepareMergeStorage(RowGroupCollection &data, optional_ptr<StorageCommitState> commit_state);
+	//! Merge data into this collection, which must not have been appended to since PrepareMergeStorage
+	void MergeStorage(RowGroupCollection &data, optional_ptr<DataTable> table,
+	                  optional_ptr<StorageCommitState> commit_state, PreparedMergeStorage &prepared);
 	bool IsPersistent() const;
 
 	void RemoveFromIndexes(const QueryContext &context, TableIndexList &indexes, Vector &row_identifiers, idx_t count,

@@ -650,6 +650,11 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 		// row by row.
 		// first flush any outstanding blocks
 		storage.FlushBlocks();
+		// prepare the merge before the index append: until then, a failure has not changed anything yet
+		if (ForcedCommitAppendFailure(table) == DebugCommitAppendFailure::PREPARE_MERGE_STORAGE) {
+			throw InvalidInputException("Forced prepare merge storage failure (debug_force_commit_append_failure)");
+		}
+		auto prepared_merge = table.PrepareMergeStorage(storage.GetCollection(), commit_state);
 		// Append to the indexes.
 		storage.AppendToIndexes(transaction, append_state);
 		// finally move over the row groups
@@ -657,7 +662,7 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 			if (ForcedCommitAppendFailure(table) == DebugCommitAppendFailure::MERGE_STORAGE) {
 				throw InvalidInputException("Forced merge storage failure (debug_force_commit_append_failure)");
 			}
-			table.MergeStorage(storage.GetCollection(), commit_state);
+			table.MergeStorage(storage.GetCollection(), commit_state, prepared_merge);
 		} catch (std::exception &ex) {
 			ThrowAppendFailure(table, ex);
 		}
