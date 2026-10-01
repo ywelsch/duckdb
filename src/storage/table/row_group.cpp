@@ -1261,10 +1261,16 @@ void RowGroup::RevertAppend(idx_t new_count) {
 	if (new_count > this->count) {
 		throw InternalException("RowGroup::RevertAppend new_count out of range");
 	}
-	auto &vinfo = GetOrCreateVersionInfo();
-	vinfo.RevertAppend(new_count);
-	for (auto &column : GetColumns()) {
-		column->RevertAppend(UnsafeNumericCast<row_t>(new_count));
+	// new_count can equal count: a failed append writes columns before FinalizeAppend updates the count
+	if (!HasUnloadedDeletes()) {
+		if (auto vinfo = GetVersionInfo()) {
+			vinfo->RevertAppend(new_count);
+		}
+	}
+	for (idx_t c = 0; c < GetColumnCount(); c++) {
+		if (ColumnIsLoaded(c)) {
+			GetColumn(c).RevertAppend(UnsafeNumericCast<row_t>(new_count));
+		}
 	}
 	SetCount(new_count);
 	Verify();

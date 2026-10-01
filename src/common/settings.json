@@ -376,6 +376,14 @@
         "struct": "ForceBitpackingModeSetting"
     },
     {
+        "name": "debug_force_commit_append_failure",
+        "description": "Force the commit-time append of a transaction's rows to a table to fail at the given point: while appending to the indexes (INDEX_APPEND), while appending to the table (TABLE_APPEND), or while merging bulk-appended row groups into the table (MERGE_STORAGE). Can be used for testing commit error recovery.",
+        "type": "ENUM<DebugCommitAppendFailure>",
+        "default_scope": "global",
+        "default_value": "NONE",
+        "is_debug": true
+    },
+    {
         "name": "debug_force_commit_failure",
         "description": "Force transaction commit to fail after the undo buffer has been committed. Can be used for testing commit error recovery.",
         "type": "BOOLEAN",
@@ -385,7 +393,7 @@
     },
     {
         "name": "debug_force_commit_revert_failure",
-        "description": "Force RevertCommit to fail while recovering from a commit failure.",
+        "description": "Force reverting a failed commit to fail while recovering from the commit failure.",
         "type": "BOOLEAN",
         "default_scope": "global",
         "default_value": "false",

@@ -100,6 +100,8 @@ public:
 	void AppendToTable(DuckTransaction &transaction, TableAppendState &append_state);
 	ErrorData AppendToIndexes(DuckTransaction &transaction, RowGroupCollection &source, TableIndexList &index_list,
 	                          const vector<LogicalType> &table_types, row_t &start_row);
+	//! Undo AppendToIndexes for rows [row_start, row_end) after a failed commit; throws a FatalException on failure
+	void RevertIndexAppend(DuckTransaction &transaction, row_t row_start, row_t row_end, const ErrorData &cause);
 	void AppendToDeleteIndexes(Vector &row_ids, DataChunk &delete_chunk);
 
 	//! Create an optimistic row group collection for this table.
@@ -116,6 +118,11 @@ public:
 	OptimisticWriteCollection &GetPrimaryCollection();
 
 private:
+	//! Scan the indexed columns of source as table-layout chunks, until the callback returns false
+	static void ScanIndexedColumns(DuckTransaction &transaction, RowGroupCollection &source, TableIndexList &index_list,
+	                               const vector<LogicalType> &table_types,
+	                               const std::function<bool(DataChunk &table_chunk)> &callback);
+
 	mutex collections_lock;
 };
 

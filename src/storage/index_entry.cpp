@@ -99,9 +99,12 @@ void IndexEntry::RevertAppend(DataChunk &chunk, Vector &row_ids) {
 		delta->Delete(chunk, row_ids);
 		return;
 	}
-	if (owned_index->IsBound()) {
-		owned_index->Cast<BoundIndex>().Delete(chunk, row_ids);
+	if (!owned_index->IsBound()) {
+		// Append buffered the entries for replay: buffer their removal, so that the replay cancels them out.
+		owned_index->Cast<UnboundIndex>().BufferChunk(chunk, row_ids, BufferedIndexReplay::DEL_ENTRY);
+		return;
 	}
+	owned_index->Cast<BoundIndex>().Delete(chunk, row_ids);
 }
 
 void IndexEntry::InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const {

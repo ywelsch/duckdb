@@ -3,7 +3,9 @@
 #include "duckdb/transaction/commit_state.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/common/enums/debug_commit_append_failure.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/partial_block_manager.hpp"
@@ -16,6 +18,14 @@
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 
 namespace duckdb {
+
+static DebugCommitAppendFailure ForcedCommitAppendFailure(DataTable &table) {
+	auto &db = table.GetAttached();
+	if (db.IsSystem() || db.IsTemporary()) {
+		return DebugCommitAppendFailure::NONE;
+	}
+	return Settings::Get<DebugForceCommitAppendFailureSetting>(db.GetDatabase());
+}
 
 LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &table)
     : context(context), table_ref(table), allocator(Allocator::Get(table.db)), deleted_rows(0),
@@ -155,20 +165,18 @@ bool LocalTableStorage::IsBulkAppend() const {
 	return collection.GetTotalRows() >= collection.GetRowGroupSize();
 }
 
-ErrorData LocalTableStorage::AppendToIndexes(DuckTransaction &transaction, RowGroupCollection &source,
-                                             TableIndexList &index_list, const vector<LogicalType> &table_types,
-                                             row_t &start_row) {
+void LocalTableStorage::ScanIndexedColumns(DuckTransaction &transaction, RowGroupCollection &source,
+                                           TableIndexList &index_list, const vector<LogicalType> &table_types,
+                                           const std::function<bool(DataChunk &table_chunk)> &callback) {
 	// We only scan the indexed columns: mapped_column_ids lists them (sorted for a deterministic order),
 	// and the scan below produces index_chunk in that order, i.e., index_chunk.data[i] holds the data of
 	// the table's physical column mapped_column_ids[i].
-	D_ASSERT(!index_list.Empty());
 	auto indexed_columns = index_list.GetIndexedColumns();
 	vector<StorageIndex> mapped_column_ids;
 	for (auto &col : indexed_columns) {
 		mapped_column_ids.emplace_back(col);
 	}
 	std::sort(mapped_column_ids.begin(), mapped_column_ids.end());
-	auto checkpoint_id = transaction.GetTransactionManager().Cast<DuckTransactionManager>().GetActiveCheckpoint();
 
 	// The bound expressions of the indexes (and their bound column references) are in relation to
 	// ALL table columns, so we create an empty table chunk based on the table types. It references
@@ -176,20 +184,33 @@ ErrorData LocalTableStorage::AppendToIndexes(DuckTransaction &transaction, RowGr
 	DataChunk table_chunk;
 	table_chunk.InitializeEmpty(table_types);
 
-	ErrorData error;
 	for (auto &index_chunk : source.Chunks(transaction, mapped_column_ids)) {
 		D_ASSERT(index_chunk.ColumnCount() == mapped_column_ids.size());
 		for (idx_t i = 0; i < mapped_column_ids.size(); i++) {
 			auto col_id = mapped_column_ids[i].GetPrimaryIndex();
 			table_chunk.data[col_id].Reference(index_chunk.data[i]);
 		}
+		if (!callback(table_chunk)) {
+			return;
+		}
+	}
+}
 
+ErrorData LocalTableStorage::AppendToIndexes(DuckTransaction &transaction, RowGroupCollection &source,
+                                             TableIndexList &index_list, const vector<LogicalType> &table_types,
+                                             row_t &start_row) {
+	D_ASSERT(!index_list.Empty());
+	auto checkpoint_id = transaction.GetTransactionManager().Cast<DuckTransactionManager>().GetActiveCheckpoint();
+
+	ErrorData error;
+	ScanIndexedColumns(transaction, source, index_list, table_types, [&](DataChunk &table_chunk) {
 		error = index_list.Append(delete_indexes, table_chunk, start_row, index_append_mode, checkpoint_id);
 		if (error.HasError()) {
-			break;
+			return false;
 		}
-		start_row += UnsafeNumericCast<row_t>(index_chunk.size());
-	}
+		start_row += UnsafeNumericCast<row_t>(table_chunk.size());
+		return true;
+	});
 	return error;
 }
 
@@ -197,9 +218,13 @@ void LocalTableStorage::AppendToTable(DuckTransaction &transaction, TableAppendS
 	auto &table = table_ref.get();
 	table.InitializeAppend(transaction, append_state);
 	auto &collection = *row_groups->collection;
+	auto force_failure = ForcedCommitAppendFailure(table) == DebugCommitAppendFailure::TABLE_APPEND;
 	for (auto &table_chunk : collection.Chunks(transaction)) {
 		// Append to the base table.
 		table.Append(table_chunk, append_state);
+		if (force_failure) {
+			throw InvalidInputException("Forced table append failure (debug_force_commit_append_failure)");
+		}
 	}
 	table.FinalizeAppend(transaction, append_state);
 }
@@ -216,32 +241,56 @@ void LocalTableStorage::AppendToIndexes(DuckTransaction &transaction, TableAppen
 	auto &index_list = data_table_info->GetIndexes();
 	auto &collection = *row_groups->collection;
 	auto error = AppendToIndexes(transaction, collection, index_list, table.GetTypes(), append_state.current_row);
-	if (error.HasError()) {
-		// Revert all appended row IDs.
-		row_t current_row = append_state.row_start;
-		// Remove the data from the indexes, if any.
-		for (auto &chunk : collection.Chunks(transaction)) {
-			if (current_row >= append_state.current_row) {
-				// Finished deleting all rows from the index.
-				break;
-			}
-			// Remove the chunk.
-			try {
-				index_list.RevertAppend(chunk, current_row);
-			} catch (std::exception &ex) { // LCOV_EXCL_START
-				error = ErrorData(ex);
-				break;
-			} // LCOV_EXCL_STOP
+	if (!error.HasError() && ForcedCommitAppendFailure(table) == DebugCommitAppendFailure::INDEX_APPEND) {
+		error = ErrorData(InvalidInputException("Forced index append failure (debug_force_commit_append_failure)"));
+	}
+	if (!error.HasError()) {
+		return;
+	}
+	// Only a constraint violation leaves the failing chunk clean; other errors (e.g., OOM) can leave a partial key
+	RevertIndexAppend(transaction, append_state.row_start, append_state.current_row, error);
+	if (error.Type() != ExceptionType::CONSTRAINT) {
+		throw FatalException("Failed to commit: appending to the indexes of table %s failed, leaving them in an "
+		                     "inconsistent state: %s",
+		                     table.GetTableName(), error.Message());
+	}
+	error.Throw();
+}
 
-			current_row += UnsafeNumericCast<row_t>(chunk.size());
+void LocalTableStorage::RevertIndexAppend(DuckTransaction &transaction, row_t row_start, row_t row_end,
+                                          const ErrorData &cause) {
+	auto &table = table_ref.get();
+	auto &index_list = table.GetDataTableInfo()->GetIndexes();
+	if (row_start >= row_end || index_list.Empty()) {
+		return;
+	}
+	auto current_row = row_start;
+	try {
+		auto &db = table.GetAttached();
+		if (!db.IsSystem() && !db.IsTemporary() &&
+		    Settings::Get<DebugForceCommitRevertFailureSetting>(db.GetDatabase())) {
+			throw IOException("Forced index revert failure (debug_force_commit_revert_failure)");
 		}
+		ScanIndexedColumns(transaction, *row_groups->collection, index_list, table.GetTypes(),
+		                   [&](DataChunk &table_chunk) {
+			                   // AppendToIndexes scanned the same chunks, so row_end is at a chunk boundary
+			                   D_ASSERT(current_row + UnsafeNumericCast<row_t>(table_chunk.size()) <= row_end);
+			                   index_list.RevertAppend(table_chunk, current_row);
+			                   current_row += UnsafeNumericCast<row_t>(table_chunk.size());
+			                   return current_row < row_end;
+		                   });
+	} catch (std::exception &ex) {
+		// The index still contains entries for rows that do not exist: we cannot continue.
+		ErrorData error(ex);
+		throw FatalException("Failed to commit: %s\nCould not remove the appended entries from the indexes of table %s "
+		                     "afterwards: %s",
+		                     cause.Message(), table.GetTableName(), error.Message());
+	}
 
 #ifdef DEBUG
-		// Verify that our index memory is stable.
-		table.VerifyIndexBuffers();
+	// Verify that our index memory is stable.
+	table.VerifyIndexBuffers();
 #endif
-		error.Throw();
-	}
 }
 
 PhysicalIndex LocalTableStorage::CreateOptimisticCollection(unique_ptr<OptimisticWriteCollection> collection) {
@@ -577,6 +626,7 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 
 	TableAppendState append_state;
 	table.AppendLock(transaction, append_state);
+	const auto row_start = append_state.row_start;
 	if (storage.IsBulkAppend() ||
 	    (append_state.row_start == 0 && storage.deleted_rows == 0 && !storage.WritesToDisk())) {
 		// bulk append (at least one full row group, no deletes): move over the storage directly.
@@ -589,7 +639,17 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 		// Append to the indexes.
 		storage.AppendToIndexes(transaction, append_state);
 		// finally move over the row groups
-		table.MergeStorage(storage.GetCollection(), commit_state);
+		try {
+			if (ForcedCommitAppendFailure(table) == DebugCommitAppendFailure::MERGE_STORAGE) {
+				throw InvalidInputException("Forced merge storage failure (debug_force_commit_append_failure)");
+			}
+			table.MergeStorage(storage.GetCollection(), commit_state);
+		} catch (std::exception &ex) {
+			// the row groups may have been moved out already, so we cannot scan them to undo the index append
+			ErrorData error(ex);
+			throw FatalException("Failed to commit: merging the appended rows into table %s failed: %s",
+			                     table.GetTableName(), error.Message());
+		}
 	} else {
 		// check if we have written data
 		// if we have, we cannot merge to disk after all
@@ -599,8 +659,25 @@ void LocalStorage::Flush(DataTable &table, LocalTableStorage &storage, optional_
 		storage.Rollback();
 		// append to the indexes
 		storage.AppendToIndexes(transaction, append_state);
+		const auto index_row_end = append_state.current_row;
 		// after that is successful - append to the table
-		storage.AppendToTable(transaction, append_state);
+		try {
+			storage.AppendToTable(transaction, append_state);
+		} catch (std::exception &ex) {
+			// the undo buffer does not know about this append yet: undo it here, under the append lock
+			ErrorData error(ex);
+			// revert the table first, to release the memory of the partially appended rows
+			try {
+				table.RevertAppendInternal(NumericCast<idx_t>(row_start));
+			} catch (std::exception &revert_ex) {
+				ErrorData revert_error(revert_ex);
+				throw FatalException("Failed to commit: %s\nCould not revert the partial append to table %s "
+				                     "afterwards: %s",
+				                     error.Message(), table.GetTableName(), revert_error.Message());
+			}
+			storage.RevertIndexAppend(transaction, row_start, index_row_end, error);
+			throw;
+		}
 	}
 	// table_entry is set through the append path (InitializeAppend/Append/LocalMerge/Alter)
 	D_ASSERT(storage.table_entry);

@@ -174,6 +174,8 @@ enum class DateCastResult : uint8_t;
 
 enum class DatePartSpecifier : uint8_t;
 
+enum class DebugCommitAppendFailure : uint8_t;
+
 enum class DebugInitialize : uint8_t;
 
 enum class DebugOrderVerification : uint8_t;
@@ -879,6 +881,9 @@ const char* EnumUtil::ToChars<DateCastResult>(DateCastResult value);
 
 template<>
 const char* EnumUtil::ToChars<DatePartSpecifier>(DatePartSpecifier value);
+
+template<>
+const char* EnumUtil::ToChars<DebugCommitAppendFailure>(DebugCommitAppendFailure value);
 
 template<>
 const char* EnumUtil::ToChars<DebugInitialize>(DebugInitialize value);
@@ -1831,6 +1836,9 @@ DateCastResult EnumUtil::FromString<DateCastResult>(const char *value);
 
 template<>
 DatePartSpecifier EnumUtil::FromString<DatePartSpecifier>(const char *value);
+
+template<>
+DebugCommitAppendFailure EnumUtil::FromString<DebugCommitAppendFailure>(const char *value);
 
 template<>
 DebugInitialize EnumUtil::FromString<DebugInitialize>(const char *value);

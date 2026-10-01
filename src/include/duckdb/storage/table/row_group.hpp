@@ -188,7 +188,7 @@ public:
 	void AppendVersionInfo(TransactionData transaction, idx_t count);
 	//! Commit a previous append made by RowGroup::AppendVersionInfo
 	void CommitAppend(transaction_t commit_id, idx_t start, idx_t count);
-	//! Revert a previous append made by RowGroup::AppendVersionInfo
+	//! Revert a previous append (including column data of a failed append) back to new_count rows
 	void RevertAppend(idx_t new_count);
 	//! Clean up append states that can either be compressed or deleted
 	void CleanupAppend(VisibilityBound lowest_visibility_bound, idx_t start, idx_t count);

@@ -100,6 +100,16 @@ void ForceBitpackingModeSetting::OnSet(SettingCallbackInfo &info, Value &paramet
 }
 
 //===----------------------------------------------------------------------===//
+// Debug Force Commit Append Failure
+//===----------------------------------------------------------------------===//
+void DebugForceCommitAppendFailureSetting::OnSet(SettingCallbackInfo &info, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("debug_force_commit_append_failure setting cannot be NULL");
+	}
+	EnumUtil::FromString<DebugCommitAppendFailure>(StringValue::Get(parameter));
+}
+
+//===----------------------------------------------------------------------===//
 // Debug Order Verification
 //===----------------------------------------------------------------------===//
 void DebugOrderVerificationSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {

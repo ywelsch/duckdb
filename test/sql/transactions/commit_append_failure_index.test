@@ -1,0 +1,134 @@
+# name: test/sql/transactions/commit_append_failure_index.test
+# description: A commit that fails while appending rows to the table, after appending them to the indexes, is fully reverted
+# group: [transactions]
+
+require no_alternative_verify
+
+require skip_reload
+
+load {TEST_DIR}/commit_append_failure_index.db
+
+statement ok
+CREATE TABLE t (a INTEGER, b VARCHAR, v INTEGER, PRIMARY KEY (a, b));
+
+statement ok
+INSERT INTO t SELECT i, 'k' || i, i FROM range(10000) r(i);
+
+statement ok
+CREATE TABLE no_pk (a INTEGER, b VARCHAR, v INTEGER);
+
+statement ok
+INSERT INTO no_pk SELECT i, 'k' || i, i FROM range(10000) r(i);
+
+statement ok
+CHECKPOINT
+
+# the staged rows overlap 3000 existing keys and add 5000 new ones
+statement ok
+CREATE TEMP TABLE staging AS SELECT i AS a, 'k' || i AS b, -1 AS v FROM range(7000, 15000) r(i);
+
+statement ok
+SET debug_force_commit_append_failure = 'TABLE_APPEND';
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM t WHERE (a, b) IN (SELECT a, b FROM staging);
+
+statement ok
+INSERT INTO t SELECT * FROM staging;
+
+statement error
+COMMIT
+----
+Forced table append failure
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM no_pk WHERE (a, b) IN (SELECT a, b FROM staging);
+
+statement ok
+INSERT INTO no_pk SELECT * FROM staging;
+
+statement error
+COMMIT
+----
+Forced table append failure
+
+statement ok
+SET debug_force_commit_append_failure = 'NONE';
+
+# the tables are as before the transactions
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+10000	10000	0
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM no_pk
+----
+10000	10000	0
+
+# the keys of the reverted transaction are not in the primary key index
+statement ok
+INSERT INTO t VALUES (12345, 'k12345', 0);
+
+statement ok
+DELETE FROM t WHERE a = 12345;
+
+# existing keys are still in the primary key index
+statement error
+INSERT INTO t VALUES (7000, 'k7000', 0);
+----
+<REGEX>:Constraint Error.*violates primary key constraint.*
+
+# commit a write to the same tables and checkpoint them
+statement ok
+INSERT INTO t VALUES (20000, 'marker', 0);
+
+statement ok
+INSERT INTO no_pk VALUES (20000, 'marker', 0);
+
+statement ok
+CHECKPOINT
+
+restart
+
+query IIII
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1), count(*) FILTER (b = 'marker') FROM t
+----
+10001	10001	0	1
+
+query IIII
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1), count(*) FILTER (b = 'marker') FROM no_pk
+----
+10001	10001	0	1
+
+# the upsert now succeeds
+statement ok
+CREATE TEMP TABLE staging AS SELECT i AS a, 'k' || i AS b, -1 AS v FROM range(7000, 15000) r(i);
+
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM t WHERE (a, b) IN (SELECT a, b FROM staging);
+
+statement ok
+INSERT INTO t SELECT * FROM staging;
+
+statement ok
+COMMIT
+
+query III
+SELECT count(*), count(DISTINCT (a, b)), count(*) FILTER (v = -1) FROM t
+----
+15001	15001	8000
+
+statement error
+INSERT INTO t VALUES (14999, 'k14999', 0);
+----
+<REGEX>:Constraint Error.*violates primary key constraint.*
