@@ -14,6 +14,7 @@
 #include "duckdb/parser/parsed_data/extra_drop_info.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
+#include "duckdb/common/enums/database_modification_type.hpp"
 
 namespace duckdb {
 struct ExtraDropInfo;
@@ -39,6 +40,9 @@ public:
 	unique_ptr<ExtraDropInfo> extra_drop_info;
 
 public:
+	//! The modifications the drop makes to the database of the dropped entry
+	DatabaseModificationType GetModifications() const;
+
 	const QualifiedName &GetQualifiedName() const {
 		return qualified_name;
 	}

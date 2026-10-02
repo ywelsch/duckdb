@@ -14,6 +14,16 @@ DropInfo::DropInfo(const DropInfo &info)
       qualified_name(info.qualified_name) {
 }
 
+DatabaseModificationType DropInfo::GetModifications() const {
+	DatabaseModificationType result = DatabaseModificationType::DROP_CATALOG_ENTRY;
+	// schemas contain tables, and dependents dropped by a cascade can be tables
+	if (type == CatalogType::TABLE_ENTRY || type == CatalogType::INDEX_ENTRY || type == CatalogType::SCHEMA_ENTRY ||
+	    cascade) {
+		result |= DatabaseModificationType::DROP_STORAGE;
+	}
+	return result;
+}
+
 unique_ptr<DropInfo> DropInfo::Copy() const {
 	return make_uniq<DropInfo>(*this);
 }

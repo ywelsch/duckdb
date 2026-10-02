@@ -35,6 +35,30 @@ bool AlterInfo::IsAddUniqueConstraint() const {
 	return constraint_info.constraint->type == ConstraintType::UNIQUE;
 }
 
+DatabaseModificationType AlterInfo::GetModifications() const {
+	DatabaseModificationType result = DatabaseModificationType::ALTER_TABLE;
+	if (type != AlterType::ALTER_TABLE) {
+		return result;
+	}
+	switch (Cast<AlterTableInfo>().alter_table_type) {
+	case AlterTableType::ADD_COLUMN:
+	case AlterTableType::REMOVE_COLUMN:
+	case AlterTableType::ALTER_COLUMN_TYPE:
+	case AlterTableType::ADD_FIELD:
+	case AlterTableType::REMOVE_FIELD:
+	case AlterTableType::RENAME_FIELD:
+		result |= DatabaseModificationType::REWRITE_TABLE_STORAGE;
+		break;
+	case AlterTableType::ADD_CONSTRAINT:
+		// a primary key or unique constraint is backed by an index
+		result |= DatabaseModificationType::CREATE_INDEX;
+		break;
+	default:
+		break;
+	}
+	return result;
+}
+
 bool AlterInfo::IsAddPrimaryKey() const {
 	if (!IsAddUniqueConstraint()) {
 		return false;

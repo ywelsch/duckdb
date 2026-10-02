@@ -14,6 +14,7 @@
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/enums/on_create_conflict.hpp"
+#include "duckdb/common/enums/database_modification_type.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 
@@ -53,6 +54,9 @@ public:
 	InsertionOrderPreservingMap<string> tags;
 
 public:
+	//! The modifications the create makes to the database of the created entry
+	DatabaseModificationType GetModifications() const;
+
 	const QualifiedName &GetQualifiedName() const {
 		return qualified_name;
 	}

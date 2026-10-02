@@ -22,6 +22,10 @@ public:
 	static constexpr idx_t DROP_CATALOG_ENTRY = 1ULL << 5ULL;
 	static constexpr idx_t SEQUENCE = 1ULL << 6ULL;
 	static constexpr idx_t CREATE_INDEX = 1ULL << 7ULL;
+	//! A new version of an existing table that shares the column data of the old version
+	static constexpr idx_t REWRITE_TABLE_STORAGE = 1ULL << 8ULL;
+	//! Table or index storage that may be dropped at commit
+	static constexpr idx_t DROP_STORAGE = 1ULL << 9ULL;
 
 	constexpr DatabaseModificationType() : value(0) {
 	}
@@ -59,6 +63,20 @@ public:
 	}
 	bool CreateIndex() const {
 		return value & CREATE_INDEX;
+	}
+	bool RewriteTableStorage() const {
+		return value & REWRITE_TABLE_STORAGE;
+	}
+	bool DropStorage() const {
+		return value & DROP_STORAGE;
+	}
+	//! Whether a transaction making these modifications keeps checkpoints from running until it is cleaned up
+	bool RequiresCheckpointLock() const {
+		return UpdateData() || RewriteTableStorage() || DropStorage();
+	}
+	//! Whether a transaction making these modifications keeps full checkpoints from vacuuming
+	bool RequiresVacuumLock() const {
+		return InsertData() || DeleteData() || CreateIndex();
 	}
 
 private:

@@ -6,6 +6,16 @@
 
 namespace duckdb {
 
+DatabaseModificationType CreateInfo::GetModifications() const {
+	DatabaseModificationType result = DatabaseModificationType::CREATE_CATALOG_ENTRY;
+	if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT &&
+	    (type == CatalogType::TABLE_ENTRY || type == CatalogType::INDEX_ENTRY || type == CatalogType::SCHEMA_ENTRY)) {
+		// the replaced entry is dropped
+		result |= DatabaseModificationType::DROP_STORAGE;
+	}
+	return result;
+}
+
 void CreateInfo::CopyProperties(CreateInfo &other) const {
 	other.type = type;
 	other.SetQualifiedName(GetQualifiedName());

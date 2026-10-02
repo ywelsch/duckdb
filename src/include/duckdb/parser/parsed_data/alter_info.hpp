@@ -13,6 +13,7 @@
 #include "duckdb/parser/parsed_data/parse_info.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
+#include "duckdb/common/enums/database_modification_type.hpp"
 
 namespace duckdb {
 class LogicalDependencyList;
@@ -97,6 +98,8 @@ public:
 	AlterEntryData GetAlterEntryData() const;
 	bool IsAddPrimaryKey() const;
 	bool IsAddUniqueConstraint() const;
+	//! The modifications the alter makes to the database of the altered entry
+	DatabaseModificationType GetModifications() const;
 
 protected:
 	explicit AlterInfo(AlterType type);
