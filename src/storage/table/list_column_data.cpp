@@ -452,6 +452,11 @@ bool ListColumnData::HasAnyChanges() const {
 	return ColumnData::HasAnyChanges() || validity->HasAnyChanges() || child_column->HasAnyChanges();
 }
 
+bool ListColumnData::HasInexactStatistics() const {
+	return ColumnData::HasInexactStatistics() || validity->HasInexactStatistics() ||
+	       child_column->HasInexactStatistics();
+}
+
 PersistentColumnData ListColumnData::Serialize() {
 	auto persistent_data = ColumnData::Serialize();
 	persistent_data.child_columns.push_back(validity->Serialize());

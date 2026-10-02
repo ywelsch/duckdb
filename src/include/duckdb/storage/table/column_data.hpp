@@ -41,6 +41,8 @@ struct RowGroupWriteInfo;
 struct TableScanOptions;
 struct TransactionData;
 struct PersistentColumnData;
+class UpdateSegment;
+struct ColumnUpdates;
 class ValidityColumnData;
 struct ColumnDataFinalizeAppendState;
 struct SuballocationBlock;
@@ -130,12 +132,13 @@ public:
 
 	//! Whether or not the column has any updates
 	bool HasUpdates() const;
-	bool HasChanges(idx_t start_row, idx_t end_row) const;
-	//! Whether or not the column has changes at this level
+	//! Whether a checkpoint has to write this column: transient segments, unserialized updates, or inexact statistics
 	bool HasChanges() const;
 
 	//! Whether or not the column has ANY changes, including in child columns
 	virtual bool HasAnyChanges() const;
+	//! Whether the statistics of this column or a child may list values no longer in it, as updates widen them
+	virtual bool HasInexactStatistics() const;
 	//! Whether or not we can scan an entire vector
 	virtual ScanVectorType GetVectorScanType(ColumnScanState &state, idx_t scan_count, Vector &result);
 
@@ -205,6 +208,8 @@ public:
 
 	virtual void CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count, Vector &scan_vector,
 	                            VisibilityBound visibility_bound) const;
+	//! Hands the update segment to the column a checkpoint rewrote this one into; clears it when nothing needs it
+	void CheckpointUpdates(ColumnData &target, VisibilityBound visibility_bound);
 
 	virtual bool IsPersistent();
 	vector<DataPointer> GetDataPointers();
@@ -280,14 +285,14 @@ private:
 protected:
 	//! The segments holding the data of this column segment
 	ColumnSegmentTree data;
-	//! The lock for the updates
-	mutable mutex update_lock;
-	//! The updates for this column segment
-	unique_ptr<UpdateSegment> updates;
+	//! The updates of this column, shared with the column a checkpoint rewrote it into
+	shared_ptr<ColumnUpdates> updates;
 	//! The lock for the stats
 	mutable mutex stats_lock;
 	//! Total transient allocation size
 	atomic<idx_t> allocation_size;
+	//! Whether updates or CheckpointUpdates widened the statistics; stays set until a checkpoint rewrites the column
+	atomic<bool> stats_inexact;
 	//! The stats of the root segment
 	unique_ptr<SegmentStatistics> stats;
 

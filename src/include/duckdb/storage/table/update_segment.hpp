@@ -11,6 +11,7 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/statistics/segment_statistics.hpp"
 #include "duckdb/common/types/string_heap.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/transaction/undo_buffer_allocator.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 
@@ -23,6 +24,19 @@ class Vector;
 struct UpdateInfo;
 struct UpdateNode;
 struct UndoBufferAllocator;
+
+class UpdateSegment;
+
+//! A column's update segment, shared with the column a checkpoint rewrote it into; cleared once nothing needs it
+struct ColumnUpdates {
+	mutex lock;
+	unique_ptr<UpdateSegment> segment;
+	//! The column a checkpoint last wrote the segment's values into; null once that column is gone
+	optional_ptr<ColumnData> newest_column;
+
+	//! Clears the segment if only the newest column holds it and nothing needs its versions anymore
+	void ClearIfLastHolder(const unique_lock<mutex> &guard, idx_t holders);
+};
 
 //! The updates to one column of a row group: per vector, a root with the newest values and a chain of older ones
 class UpdateSegment {
@@ -42,6 +56,14 @@ public:
 	bool HasUncommittedUpdates(idx_t vector_index);
 	bool HasUpdates(idx_t vector_index) const;
 	bool HasUpdates(idx_t start_row_idx, idx_t end_row_idx);
+	//! Whether a committed update in this segment still has to be written by a checkpoint
+	bool HasUnserializedChanges() const;
+	//! Whether the contents can go: no version chain has entries and no committed update is unwritten
+	bool CanBeCleared() const;
+	//! Drops the contents but keeps the segment object, which undo entries may still point to
+	void Clear();
+	void MarkCommitted(transaction_t commit_id);
+	void MarkCheckpointed(VisibilityBound visibility_bound);
 
 	void FetchUpdates(TransactionData transaction, idx_t vector_index, Vector &result);
 	void FetchCommitted(idx_t vector_index, Vector &result);
@@ -67,6 +89,8 @@ private:
 	vector<column_t> nested_column_path;
 	//! The buffer manager the root node allocates from
 	BufferManager &buffer_manager;
+	//! The newest commit id of an update on this segment that no checkpoint has written yet, or 0
+	atomic<transaction_t> newest_uncheckpointed_update_commit;
 	//! The lock for the update segment
 	mutable StorageLock lock;
 	//! The root node (if any)
@@ -112,6 +136,7 @@ private:
 
 private:
 	UndoBufferPointer GetUpdateNode(StorageLockKey &lock, idx_t vector_idx) const;
+	bool HasLinkedEntries(StorageLockKey &lock) const;
 	void InitializeUpdateInfo(idx_t vector_idx);
 	void InitializeUpdateInfo(UpdateInfo &info, row_t *ids, const SelectionVector &sel, idx_t count, idx_t vector_index,
 	                          idx_t vector_offset);

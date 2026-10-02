@@ -9,8 +9,7 @@ namespace duckdb {
 
 ColumnCheckpointState::ColumnCheckpointState(const RowGroup &row_group, ColumnData &original_column,
                                              PartialBlockManager &partial_block_manager)
-    : row_group(row_group), original_column(original_column), partial_block_manager(partial_block_manager),
-      original_column_mutable(original_column) {
+    : row_group(row_group), original_column(original_column), partial_block_manager(partial_block_manager) {
 }
 
 ColumnCheckpointState::~ColumnCheckpointState() {
@@ -36,7 +35,7 @@ shared_ptr<ColumnData> ColumnCheckpointState::GetFinalResult() {
 	if (!result_column) {
 		// no result column instantiated - that means we haven't changed anything and can directly return the
 		// original column
-		return original_column_mutable.shared_from_this();
+		return original_column.shared_from_this();
 	}
 	result_column->SetCount(original_column.count.load());
 	return result_column;

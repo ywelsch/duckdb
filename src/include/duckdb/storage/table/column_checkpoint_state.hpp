@@ -28,16 +28,13 @@ struct ColumnCheckpointState {
 	virtual ~ColumnCheckpointState();
 
 	const RowGroup &row_group;
-	const ColumnData &original_column;
+	ColumnData &original_column;
 	vector<DataPointer> data_pointers;
 	unique_ptr<BaseStatistics> global_stats;
 
 protected:
 	PartialBlockManager &partial_block_manager;
 	shared_ptr<ColumnData> result_column;
-
-private:
-	ColumnData &original_column_mutable;
 
 public:
 	virtual shared_ptr<ColumnData> CreateEmptyColumnData();

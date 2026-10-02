@@ -23,7 +23,8 @@ static UpdateSegment::fetch_rows_function_t GetFetchRowsFunction(PhysicalType ty
 static UpdateSegment::get_effective_updates_t GetEffectiveUpdatesFunction(PhysicalType type);
 
 UpdateSegment::UpdateSegment(ColumnData &column_data)
-    : type(column_data.type), buffer_manager(column_data.block_manager.buffer_manager), stats(column_data.type),
+    : type(column_data.type), buffer_manager(column_data.block_manager.buffer_manager),
+      newest_uncheckpointed_update_commit(0), stats(column_data.type),
       heap(BufferAllocator::Get(column_data.GetDatabase())) {
 	auto physical_type = type.InternalType();
 
@@ -635,6 +636,10 @@ void UpdateSegment::RollbackUpdate(UpdateInfo &info) {
 	// obtain an exclusive lock
 	auto lock_handle = lock.GetExclusiveLock();
 
+	if (!info.HasPrev()) {
+		// never linked (the update failed): data may be partial and the vector root may belong to another update
+		return;
+	}
 	// move the data from the UpdateInfo back into the base info
 	auto entry = GetUpdateNode(*lock_handle, info.vector_index);
 	if (!entry.IsSet()) {
@@ -1069,6 +1074,10 @@ static UpdateSegment::merge_update_function_t GetMergeUpdateFunction(PhysicalTyp
 // Update statistics
 //===--------------------------------------------------------------------===//
 unique_ptr<BaseStatistics> UpdateSegment::GetStatistics() {
+	auto read_lock = lock.GetSharedLock();
+	if (!root) {
+		return nullptr;
+	}
 	lock_guard<mutex> stats_guard(stats_lock);
 	return stats.statistics.ToUnique();
 }
@@ -1582,6 +1591,68 @@ bool UpdateSegment::HasUpdates(idx_t start_row_index, idx_t end_row_index) {
 		}
 	}
 	return false;
+}
+
+//===--------------------------------------------------------------------===//
+// Checkpoint interaction
+//===--------------------------------------------------------------------===//
+bool UpdateSegment::HasUnserializedChanges() const {
+	return newest_uncheckpointed_update_commit.load() != 0;
+}
+
+void UpdateSegment::MarkCommitted(transaction_t commit_id) {
+	// commits are serialized under the transaction lock, so commit ids only grow
+	newest_uncheckpointed_update_commit = commit_id;
+}
+
+void UpdateSegment::MarkCheckpointed(VisibilityBound visibility_bound) {
+	// a commit at or above the bound that races with this call keeps its id
+	auto current = newest_uncheckpointed_update_commit.load();
+	while (current != 0 && current < visibility_bound &&
+	       !newest_uncheckpointed_update_commit.compare_exchange_weak(current, 0)) {
+	}
+}
+
+void ColumnUpdates::ClearIfLastHolder(const unique_lock<mutex> &guard, idx_t holders) {
+	D_ASSERT(guard.owns_lock() && guard.mutex() == &lock);
+	if (holders != 1 || !newest_column || !segment || !segment->CanBeCleared()) {
+		return;
+	}
+	segment->Clear();
+}
+
+bool UpdateSegment::HasLinkedEntries(StorageLockKey &lock_key) const {
+	if (!root) {
+		return false;
+	}
+	for (idx_t vector_idx = 0; vector_idx < root->info.size(); vector_idx++) {
+		auto entry = GetUpdateNode(lock_key, vector_idx);
+		if (!entry.IsSet()) {
+			continue;
+		}
+		auto pin = entry.Pin();
+		if (UpdateInfo::Get(pin).HasNext()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool UpdateSegment::CanBeCleared() const {
+	if (HasUnserializedChanges()) {
+		return false;
+	}
+	auto read_lock = lock.GetSharedLock();
+	return !HasLinkedEntries(*read_lock);
+}
+
+void UpdateSegment::Clear() {
+	auto write_lock = lock.GetExclusiveLock();
+	D_ASSERT(!HasUnserializedChanges() && !HasLinkedEntries(*write_lock));
+	// the heap stays: a scan copies string pointers into its result and reads them after releasing the lock
+	root.reset();
+	lock_guard<mutex> stats_guard(stats_lock);
+	stats.statistics = BaseStatistics::CreateEmpty(type);
 }
 
 } // namespace duckdb

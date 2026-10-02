@@ -60,7 +60,7 @@ FilterPropagateResult ColumnData::CheckValidityZonemap(ColumnScanState &state, T
 ColumnData::ColumnData(BlockManager &block_manager, DataTableInfo &info, idx_t column_index, LogicalType type_p,
                        ColumnDataType data_type_p, optional_ptr<ColumnData> parent_p)
     : count(0), block_manager(block_manager), info(info), column_index(column_index), type(std::move(type_p)),
-      allocation_size(0),
+      updates(make_shared_ptr<ColumnUpdates>()), allocation_size(0), stats_inexact(false),
       data_type(data_type_p == ColumnDataType::CHECKPOINT_TARGET ? ColumnDataType::MAIN_TABLE : data_type_p),
       parent(parent_p) {
 	if (!parent) {
@@ -69,6 +69,18 @@ ColumnData::ColumnData(BlockManager &block_manager, DataTableInfo &info, idx_t c
 }
 
 ColumnData::~ColumnData() {
+	unique_lock<mutex> guard(updates->lock);
+	if (updates->newest_column.get() == this) {
+		// the column with every value goes away: the others keep reading their versions from the segment
+		updates->newest_column = nullptr;
+		return;
+	}
+	try {
+		// this column goes away: the column a checkpoint rewrote it into may now be the only one holding the segment
+		updates->ClearIfLastHolder(guard, updates.use_count() - 1);
+	} catch (...) {
+		// the check pins root entries, which can fail under memory pressure; the next checkpoint clears it then
+	}
 }
 
 void ColumnData::SetDataType(ColumnDataType data_type_p) {
@@ -88,45 +100,73 @@ StorageManager &ColumnData::GetStorageManager() const {
 }
 
 bool ColumnData::HasUpdates() const {
-	lock_guard<mutex> update_guard(update_lock);
-	return updates.get();
+	auto updates_ref = GetUpdates();
+	return updates_ref && updates_ref->HasUpdates();
 }
 
 optional_ptr<UpdateSegment> ColumnData::GetUpdates() const {
-	lock_guard<mutex> update_guard(update_lock);
-	return updates.get();
+	lock_guard<mutex> guard(updates->lock);
+	return updates->segment.get();
 }
 
-bool ColumnData::HasChanges(idx_t start_row, idx_t end_row) const {
-	auto updates_ref = GetUpdates();
-	if (!updates_ref) {
-		return false;
+void ColumnData::CheckpointUpdates(ColumnData &target, VisibilityBound visibility_bound) {
+	unique_lock<mutex> guard(updates->lock);
+	if (&target != this) {
+		// nobody but the checkpoint can reach the target yet
+		D_ASSERT(!target.updates->segment && target.updates.use_count() == 1);
+		target.updates = updates;
 	}
-	if (updates_ref->HasUpdates(start_row, end_row)) {
-		return true;
+	// the target has every value as of the bound: only it may be the last column holding the segment
+	updates->newest_column = &target;
+	auto &segment = updates->segment;
+	if (!segment) {
+		return;
 	}
-	return false;
+	// marked before the checkpoint is durable, which is safe: a failed checkpoint invalidates the whole database
+	segment->MarkCheckpointed(visibility_bound);
+	if (segment->CanBeCleared()) {
+		// if another column still holds the segment, its readers need the values until that column goes away
+		updates->ClearIfLastHolder(guard, updates.use_count());
+	}
 }
 
 bool ColumnData::HasChanges() const {
+	auto updates_ref = GetUpdates();
+	bool has_unserialized_updates = updates_ref && updates_ref->HasUnserializedChanges();
 	for (auto &segment_node : data.SegmentNodes()) {
 		auto &segment = segment_node.GetNode();
 		if (segment.GetSegmentType() == ColumnSegmentType::TRANSIENT) {
 			// transient segment: always need to write to disk
 			return true;
 		}
-		// persistent segment; check if there were any updates or deletions in this segment
+		if (!has_unserialized_updates) {
+			continue;
+		}
+		// persistent segment; check if there were any updates in this segment
 		idx_t start_row_idx = segment_node.GetRowStart();
 		idx_t end_row_idx = start_row_idx + segment.count;
-		if (HasChanges(start_row_idx, end_row_idx)) {
+		if (updates_ref->HasUpdates(start_row_idx, end_row_idx)) {
 			return true;
 		}
+	}
+	if (stats_inexact && (!updates_ref || updates_ref->CanBeCleared())) {
+		// a rewrite makes the statistics exact again, but only once the segment can be cleared along with it
+		return true;
 	}
 	return false;
 }
 
 bool ColumnData::HasAnyChanges() const {
 	return HasChanges();
+}
+
+bool ColumnData::HasInexactStatistics() const {
+	if (stats_inexact) {
+		return true;
+	}
+	// a segment with updates may have widened the statistics, an empty one has not
+	auto updates_ref = GetUpdates();
+	return updates_ref && updates_ref->HasUpdates();
 }
 
 idx_t ColumnData::GetMaxEntry() {
@@ -328,12 +368,16 @@ void ColumnData::FetchUpdateRow(TransactionData transaction, row_t row_id, Vecto
 void ColumnData::UpdateInternal(TransactionData transaction, DuckTableEntry &table_entry, idx_t column_index,
                                 Vector &update_vector, row_t *row_ids, idx_t update_count, Vector &base_vector,
                                 idx_t row_group_start) {
-	lock_guard<mutex> update_guard(update_lock);
-	if (!updates) {
-		updates = make_uniq<UpdateSegment>(*this);
+	lock_guard<mutex> guard(updates->lock);
+	auto &segment = updates->segment;
+	if (!segment) {
+		segment = make_uniq<UpdateSegment>(*this);
 	}
-	updates->Update(transaction, table_entry, column_index, update_vector, row_ids, update_count, base_vector,
+	segment->Update(transaction, table_entry, column_index, update_vector, row_ids, update_count, base_vector,
 	                row_group_start);
+	if (segment->HasUpdates()) {
+		stats_inexact = true;
+	}
 }
 
 idx_t ColumnData::ScanVector(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
