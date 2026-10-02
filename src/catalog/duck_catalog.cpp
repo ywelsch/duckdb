@@ -169,11 +169,12 @@ static void ScanNestedSchemas(CatalogTransaction transaction, SchemaCatalogEntry
 	});
 }
 
-static void ScanNestedSchemas(SchemaCatalogEntry &schema, const std::function<void(SchemaCatalogEntry &)> &callback) {
-	schema.Scan(CatalogType::SCHEMA_ENTRY, [&](CatalogEntry &entry) {
+static void ScanNestedSchemas(VisibilityBound bound, SchemaCatalogEntry &schema,
+                              const std::function<void(SchemaCatalogEntry &)> &callback) {
+	schema.Cast<DuckSchemaEntry>().GetCatalogSet(CatalogType::SCHEMA_ENTRY).Scan(bound, [&](CatalogEntry &entry) {
 		auto &nested = entry.Cast<SchemaCatalogEntry>();
 		callback(nested);
-		ScanNestedSchemas(nested, callback);
+		ScanNestedSchemas(bound, nested, callback);
 	});
 }
 
@@ -189,10 +190,14 @@ void DuckCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 }
 
 void DuckCatalog::ScanSchemas(std::function<void(SchemaCatalogEntry &)> callback) {
-	schemas->Scan([&](CatalogEntry &entry) {
+	ScanSchemas(VisibilityBound::AllCommitted(), std::move(callback));
+}
+
+void DuckCatalog::ScanSchemas(VisibilityBound bound, std::function<void(SchemaCatalogEntry &)> callback) {
+	schemas->Scan(bound, [&](CatalogEntry &entry) {
 		auto &schema = entry.Cast<SchemaCatalogEntry>();
 		callback(schema);
-		ScanNestedSchemas(schema, callback);
+		ScanNestedSchemas(bound, schema, callback);
 	});
 }
 

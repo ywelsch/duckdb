@@ -788,13 +788,17 @@ void CatalogSet::ScanWithPrefix(CatalogTransaction transaction, const std::funct
 }
 
 void CatalogSet::Scan(const std::function<void(CatalogEntry &)> &callback) {
+	Scan(VisibilityBound::AllCommitted(), callback);
+}
+
+void CatalogSet::Scan(VisibilityBound bound, const std::function<void(CatalogEntry &)> &callback) {
 	// lock the catalog set
 	lock_guard<mutex> lock(catalog_lock);
+	CatalogTransaction transaction(catalog.GetDatabase(), MAX_TRANSACTION_ID, bound);
 	for (auto &kv : map.Entries()) {
-		auto &entry = *kv.second;
-		auto &committed_entry = GetCommittedEntry(entry);
-		if (!committed_entry.deleted) {
-			callback(committed_entry);
+		auto &entry = GetEntryForTransaction(transaction, *kv.second);
+		if (!entry.deleted) {
+			callback(entry);
 		}
 	}
 }

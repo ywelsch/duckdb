@@ -102,6 +102,8 @@ public:
 
 	//! Scan the catalog set, invoking the callback method for every committed entry
 	DUCKDB_API void Scan(const std::function<void(CatalogEntry &)> &callback);
+	//! Scan the catalog set, invoking the callback method for every entry committed below the bound
+	DUCKDB_API void Scan(VisibilityBound bound, const std::function<void(CatalogEntry &)> &callback);
 	//! Scan the catalog set, invoking the callback method for every entry
 	DUCKDB_API void ScanWithPrefix(CatalogTransaction transaction, const std::function<void(CatalogEntry &)> &callback,
 	                               const Identifier &prefix);

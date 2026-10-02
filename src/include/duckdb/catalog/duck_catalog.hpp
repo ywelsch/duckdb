@@ -40,6 +40,8 @@ public:
 	DUCKDB_API optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 	DUCKDB_API void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
 	DUCKDB_API void ScanSchemas(std::function<void(SchemaCatalogEntry &)> callback);
+	//! Scan the schemas committed below the bound, including nested schemas
+	DUCKDB_API void ScanSchemas(VisibilityBound bound, std::function<void(SchemaCatalogEntry &)> callback);
 
 	DUCKDB_API optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction,
 	                                                         const EntryLookupInfo &schema_lookup,

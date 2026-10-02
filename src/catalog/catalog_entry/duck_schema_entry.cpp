@@ -365,6 +365,12 @@ void DuckSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEnt
 	set.Scan(callback);
 }
 
+void DuckSchemaEntry::Scan(CatalogType type, VisibilityBound bound,
+                           const std::function<void(CatalogEntry &)> &callback) {
+	auto &set = GetCatalogSet(type);
+	set.Scan(bound, callback);
+}
+
 void DuckSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	if (info.type == CatalogType::TRIGGER_ENTRY) {
 		throw InternalException("Triggers should be dropped through their table, not through the schema");
