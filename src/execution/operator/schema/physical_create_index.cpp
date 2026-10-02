@@ -13,6 +13,7 @@
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/execution/index/index_type.hpp"
 
@@ -184,7 +185,7 @@ SinkFinalizeType PhysicalCreateIndex::Finalize(Pipeline &pipeline, Event &event,
 	}
 
 	// Add the index to the storage.
-	storage.AddIndex(std::move(bound_index));
+	storage.AddIndex(std::move(bound_index), DuckTransaction::Get(context, storage.db));
 
 	return SinkFinalizeType::READY;
 }

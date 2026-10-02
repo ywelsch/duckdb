@@ -18,6 +18,7 @@
 namespace duckdb {
 
 class ConflictManager;
+class DuckTransaction;
 class ConflictInfo;
 class IndexEntry;
 class TableIndexList;
@@ -33,6 +34,8 @@ class TableIndexIterationHelper;
 
 struct IndexSerializationInfo {
 	case_insensitive_map_t<Value> options;
+	//! The checkpoint that serializes the indexes, which skips the indexes it does not write
+	optional_idx checkpoint_id;
 };
 
 // IndexStorageInfo is move-only. Keep every serialized info in owned_infos and expose stable ordered references.
@@ -49,8 +52,10 @@ public:
 
 	//! Iterates over shared ownership of stable index entries while holding the entry-list lock.
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
-	//! Adds an index entry to the list of index entries.
-	void AddIndex(unique_ptr<Index> index);
+	//! Adds an index entry to the list of index entries, created by the given transaction if any.
+	void AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransaction> transaction = nullptr);
+	//! Marks every index entry as created by the given transaction.
+	void MarkCreatedBy(DuckTransaction &transaction);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.

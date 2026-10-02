@@ -16,6 +16,7 @@
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 
 namespace duckdb {
 
@@ -82,14 +83,26 @@ TableIndexList::~TableIndexList() {
 	}
 }
 
-void TableIndexList::AddIndex(unique_ptr<Index> index) {
+void TableIndexList::AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransaction> transaction) {
 	D_ASSERT(index);
-	annotated_lock_guard lock(index_entries_lock);
 	auto index_entry = make_shared_ptr<IndexEntry>(std::move(index));
+	if (transaction) {
+		index_entry->MarkUncommitted();
+		transaction->AddCreatedIndex(index_entry);
+	}
+	annotated_lock_guard lock(index_entries_lock);
 	if (index_entry->GetBindState() != IndexBindState::BOUND) {
 		unbound_count++;
 	}
 	index_entries.push_back(std::move(index_entry));
+}
+
+void TableIndexList::MarkCreatedBy(DuckTransaction &transaction) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (auto &entry : index_entries) {
+		entry->MarkUncommitted();
+		transaction.AddCreatedIndex(entry);
+	}
 }
 
 void TableIndexList::InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const {
@@ -522,6 +535,10 @@ IndexSerializationResult TableIndexList::SerializeToDisk(QueryContext context, c
 
 	result.owned_infos.reserve(index_entries.size());
 	for (const auto &entry : index_entries) {
+		if (info.checkpoint_id.IsValid() && !entry->PartOfCheckpoint(info.checkpoint_id)) {
+			// created by a transaction that committed after the checkpoint's bound, or not at all
+			continue;
+		}
 		auto storage_info = entry->SerializeToDisk(context, info.options);
 		D_ASSERT(!storage_info.name.empty());
 		result.owned_infos.push_back(std::move(storage_info));

@@ -57,7 +57,8 @@ ErrorData IndexEntry::Append(DataChunk &chunk, Vector &row_ids, const shared_ptr
 
 	bool lookup_main_index = false;
 	optional_ptr<BoundIndex> append_index;
-	if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint)) {
+	if (bound_index.SupportsDeltaIndexes() && PartOfCheckpoint(active_checkpoint) &&
+	    deltas.ShouldUse(active_checkpoint)) {
 		append_index = deltas.GetOrCreate(bound_index, IndexDeltaType::ADDED_DATA_DURING_CHECKPOINT);
 		if (bound_index.IsUnique()) {
 			lookup_main_index = true;
@@ -267,7 +268,8 @@ void IndexEntry::RemoveFromIndex(DataChunk &chunk, Vector &row_ids, const IndexR
 	if (removal_type == IndexRemovalType::DELETED_ROWS_IN_USE) {
 		// Cleanup always removes directly from "deleted_rows_in_use", even during a checkpoint.
 		ApplyIndexRemoval(bound_index, deltas, chunk, row_ids, removal_type);
-	} else if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint)) {
+	} else if (bound_index.SupportsDeltaIndexes() && PartOfCheckpoint(active_checkpoint) &&
+	           deltas.ShouldUse(active_checkpoint)) {
 		// During a checkpoint, route changes through the checkpoint deltas instead of the main index.
 		ApplyIndexRemovalDuringCheckpoint(bound_index, deltas, chunk, row_ids, removal_type);
 	} else {
@@ -481,6 +483,19 @@ IndexStorageInfo IndexEntry::SerializeToWAL(const case_insensitive_map_t<Value> 
 	// We never write an unbound index to the WAL.
 	D_ASSERT(owned_index->IsBound());
 	return owned_index->Cast<BoundIndex>().SerializeToWAL(options);
+}
+
+void IndexEntry::MarkUncommitted() {
+	first_checkpoint = NumericLimits<idx_t>::Maximum();
+}
+
+void IndexEntry::MarkCommitted(const optional_idx active_checkpoint) {
+	// a running checkpoint's bound predates this commit
+	first_checkpoint = active_checkpoint.IsValid() ? active_checkpoint.GetIndex() + 1 : 0;
+}
+
+bool IndexEntry::PartOfCheckpoint(const optional_idx checkpoint_id) const {
+	return checkpoint_id.IsValid() && checkpoint_id.GetIndex() >= first_checkpoint.load();
 }
 
 void IndexEntry::MergeCheckpointDeltas(const optional_idx checkpoint_id) {

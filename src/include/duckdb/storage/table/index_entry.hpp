@@ -169,6 +169,12 @@ public:
 	void MergeCheckpointDeltas(optional_idx checkpoint_id);
 	//! Adds transaction-local copies of the physical index to the target lists when required.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
+	//! Marks the index as created by a transaction that has not committed yet.
+	void MarkUncommitted();
+	//! Marks the index as committed while the given checkpoint, if any, was running.
+	void MarkCommitted(optional_idx active_checkpoint);
+	//! Returns whether the given checkpoint writes this index.
+	bool PartOfCheckpoint(optional_idx checkpoint_id) const;
 
 public:
 	//! Acquire shared access to a stable physical index.
@@ -200,6 +206,8 @@ private:
 	//! The physical index owned by this stable logical entry.
 	unique_ptr<Index> owned_index;
 	IndexDeltas deltas;
+	//! The first checkpoint that writes this index, the maximum while its creating transaction is uncommitted
+	atomic<idx_t> first_checkpoint {0};
 };
 
 template <class TARGET>
