@@ -304,6 +304,12 @@ void FixedSizeAllocator::SerializeBuffers(PartialBlockManager &partial_block_man
 	}
 }
 
+void FixedSizeAllocator::ReleaseBlocks(vector<block_id_t> &block_ids) {
+	for (auto &buffer : buffers) {
+		buffer.second->ReleaseBlock(block_ids);
+	}
+}
+
 vector<IndexBufferInfo> FixedSizeAllocator::InitSerializationToWAL() {
 	vector<IndexBufferInfo> buffer_infos;
 	for (auto &buffer : buffers) {

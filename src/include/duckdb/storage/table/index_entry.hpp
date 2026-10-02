@@ -134,6 +134,8 @@ public:
 	string GetIndexType() const;
 	//! Destroys the physical index.
 	void Retire();
+	//! Hands the on-disk blocks of the index over to the caller, who frees them; the index stays usable.
+	void ReleaseStorageBlocks(vector<block_id_t> &block_ids);
 	//! Binds the unbound physical index without replacing it.
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types);
 	//! Replaces the unbound physical index with its bound representation.
@@ -208,6 +210,8 @@ private:
 	IndexDeltas deltas;
 	//! The first checkpoint that writes this index, the maximum while its creating transaction is uncommitted
 	atomic<idx_t> first_checkpoint {0};
+	//! Whether the on-disk blocks were handed over, also those of an index bound later
+	bool storage_released = false;
 };
 
 template <class TARGET>

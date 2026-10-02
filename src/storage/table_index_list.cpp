@@ -97,6 +97,13 @@ void TableIndexList::AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransact
 	index_entries.push_back(std::move(index_entry));
 }
 
+void TableIndexList::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (auto &entry : index_entries) {
+		entry->ReleaseStorageBlocks(block_ids);
+	}
+}
+
 void TableIndexList::MarkCreatedBy(DuckTransaction &transaction) {
 	annotated_lock_guard lock(index_entries_lock);
 	for (auto &entry : index_entries) {

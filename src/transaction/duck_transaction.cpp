@@ -1,5 +1,6 @@
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/storage/table/index_entry.hpp"
+#include "duckdb/storage/buffer/block_handle.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
@@ -316,6 +317,7 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 			commit_info.wal_sync_offset = commit_state->FlushCommit(sync_now);
 		}
 		drop_state.FinalizeCommit();
+		dropped_blocks = drop_state.TakeDroppedBlocks();
 		auto active_checkpoint = GetTransactionManager().GetActiveCheckpoint();
 		for (auto &index : created_indexes) {
 			index->MarkCommitted(active_checkpoint);
@@ -384,14 +386,26 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	if (!vacuum_lock && type.RequiresVacuumLock()) {
 		vacuum_lock = GetTransactionManager().SharedVacuumLock();
 	}
+	if (type.RequiresCommitCheckpointLock()) {
+		commit_requires_checkpoint_lock = true;
+	}
 }
 
-unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock() {
-	if (!checkpoint_lock) {
-		return GetTransactionManager().TryGetCheckpointLock();
-	} else {
+unique_ptr<StorageLockKey> DuckTransaction::GetCommitCheckpointLock() {
+	if (!commit_requires_checkpoint_lock || checkpoint_lock) {
+		return nullptr;
+	}
+	return GetTransactionManager().SharedCheckpointLock();
+}
+
+unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock(optional_ptr<StorageLockKey> commit_checkpoint_lock) {
+	if (checkpoint_lock) {
 		return GetTransactionManager().TryUpgradeCheckpointLock(*checkpoint_lock);
 	}
+	if (commit_checkpoint_lock) {
+		return GetTransactionManager().TryUpgradeCheckpointLock(*commit_checkpoint_lock);
+	}
+	return GetTransactionManager().TryGetCheckpointLock();
 }
 
 } // namespace duckdb

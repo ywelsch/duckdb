@@ -16,6 +16,7 @@
 #include "duckdb/common/enums/active_transaction_state.hpp"
 
 namespace duckdb {
+class BlockHandle;
 class CommitDropState;
 class IndexEntry;
 class DuckTableEntry;
@@ -108,7 +109,10 @@ public:
 		return view.transaction_id;
 	}
 
-	unique_ptr<StorageLockKey> TryGetCheckpointLock();
+	//! Try to obtain the exclusive checkpoint lock, upgrading the shared lock the transaction or its commit holds
+	unique_ptr<StorageLockKey> TryGetCheckpointLock(optional_ptr<StorageLockKey> commit_checkpoint_lock);
+	//! The shared checkpoint lock to hold while committing, if the commit needs one the transaction does not hold
+	unique_ptr<StorageLockKey> GetCommitCheckpointLock();
 
 	void SetIsCheckpointTransaction() {
 		is_checkpoint_transaction = true;
@@ -126,6 +130,10 @@ private:
 	unique_ptr<StorageLockKey> checkpoint_lock;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
+	//! Whether the commit of this transaction must not overlap a checkpoint
+	bool commit_requires_checkpoint_lock = false;
+	//! The blocks this transaction dropped, kept from reuse while older snapshots can still read them
+	vector<shared_ptr<BlockHandle>> dropped_blocks;
 	//! Lock for accessing sequence_usage
 	mutex sequence_lock;
 	//! Map of all sequences that were used during the transaction and the value they had in this transaction

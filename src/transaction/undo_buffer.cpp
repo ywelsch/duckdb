@@ -153,13 +153,6 @@ UndoBufferProperties UndoBuffer::GetProperties() {
 			auto catalog_entry = Load<CatalogEntry *>(data);
 			auto &parent = catalog_entry->Parent();
 			switch (parent.type) {
-			case CatalogType::DELETED_ENTRY:
-				// only dropped tables and indexes free storage that other transactions might still read
-				if (catalog_entry->type == CatalogType::TABLE_ENTRY ||
-				    catalog_entry->type == CatalogType::INDEX_ENTRY) {
-					properties.has_dropped_entries = true;
-				}
-				break;
 			case CatalogType::INDEX_ENTRY: {
 				auto &index = parent.Cast<DuckIndexEntry>();
 				properties.estimated_size += index.initial_index_size;

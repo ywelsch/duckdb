@@ -130,6 +130,8 @@ public:
 
 	//! Resets all index storage, clearing the index entirely. The index lock must be held.
 	virtual void ResetStorage(IndexLock &index_lock) DUCKDB_REQUIRES(index_lock) = 0;
+	//! Hands the on-disk blocks to the caller, who frees them; by default the index frees them when destroyed.
+	virtual void ReleaseStorageBlocks(vector<block_id_t> &block_ids) DUCKDB_EXCLUDES(lock);
 	//! Obtains a lock and calls ResetStorage while holding that lock.
 	void ResetStorage() override DUCKDB_EXCLUDES(lock);
 

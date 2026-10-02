@@ -43,24 +43,38 @@ void CommitDropState::RemoveIndex(TableIndexList &indexes, Identifier name) {
 	pending_index_removals.push_back(PendingIndexRemoval {indexes, std::move(name)});
 }
 
+void CommitDropState::DropIndexStorage(TableIndexList &indexes) {
+	dropped_index_storage.push_back(indexes);
+}
+
 void CommitDropState::FinalizeCommit() {
+	for (auto &removal : pending_index_removals) {
+		removal.indexes.get().RemoveIndex(removal.name);
+	}
+	// the dropped table's indexes stay usable for older snapshots, but their blocks are freed now
+	for (auto &indexes : dropped_index_storage) {
+		indexes.get().ReleaseStorageBlocks(dropped_block_ids);
+	}
 	if (block_manager) {
 		for (auto block_id : dropped_block_ids) {
+			dropped_blocks.push_back(block_manager->RegisterBlock(block_id));
 			block_manager->MarkBlockAsModified(block_id);
 		}
 	}
 	// assert that !block_manager -> dropped_block_ids.empty()
 	D_ASSERT(block_manager || dropped_block_ids.empty());
 
-	for (auto &removal : pending_index_removals) {
-		removal.indexes.get().RemoveIndex(removal.name);
-	}
 	dropped_block_ids.clear();
 	pending_index_removals.clear();
+	dropped_index_storage.clear();
+}
+
+vector<shared_ptr<BlockHandle>> CommitDropState::TakeDroppedBlocks() {
+	return std::move(dropped_blocks);
 }
 
 bool CommitDropState::Empty() const {
-	return dropped_block_ids.empty() && pending_index_removals.empty();
+	return dropped_block_ids.empty() && pending_index_removals.empty() && dropped_index_storage.empty();
 }
 
 //===--------------------------------------------------------------------===//

@@ -56,6 +56,8 @@ public:
 	void AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransaction> transaction = nullptr);
 	//! Marks every index entry as created by the given transaction.
 	void MarkCreatedBy(DuckTransaction &transaction);
+	//! Hands the on-disk blocks of every index over to the caller, who frees them; the indexes stay usable.
+	void ReleaseStorageBlocks(vector<block_id_t> &block_ids);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.

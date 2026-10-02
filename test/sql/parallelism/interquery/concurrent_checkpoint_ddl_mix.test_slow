@@ -1,0 +1,228 @@
+# name: test/sql/parallelism/interquery/concurrent_checkpoint_ddl_mix.test_slow
+# description: DDL, drops, sequences and readers of dropped tables run alongside checkpoints
+# group: [interquery]
+
+load {TEST_DIR}/concurrent_checkpoint_ddl_mix.db
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET checkpoint_threshold='200KB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE SEQUENCE seq
+
+statement ok
+CREATE TABLE ids (id BIGINT DEFAULT nextval('seq'), tid INTEGER)
+
+statement ok
+CREATE TABLE r2 (i INTEGER)
+
+statement ok
+INSERT INTO r2 SELECT range FROM range(1000)
+
+statement ok
+CREATE TABLE r4 AS SELECT -1 AS v, r, repeat(md5(r::VARCHAR), 160) AS s FROM range(2000) t(r)
+
+concurrentloop threadid 0 6
+
+# thread 0: checkpoints, which a table rewrite in thread 2 can hold off
+loop i 0 40
+
+onlyif threadid=0
+statement maybe
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+onlyif threadid=0
+statement ok
+INSERT INTO ids (tid) VALUES (0)
+
+endloop
+
+# thread 1: indexed tables are created, filled and dropped
+loop i 0 20
+
+onlyif threadid=1
+statement ok
+CREATE TABLE t1_{i} (id INTEGER PRIMARY KEY, s VARCHAR)
+
+onlyif threadid=1
+statement ok
+INSERT INTO t1_{i} SELECT r, 'v' || r FROM range(3000) t(r)
+
+onlyif threadid=1
+statement ok
+CREATE INDEX t1_{i}_s ON t1_{i}(s)
+
+# rows committed during a checkpoint are only checked against at commit
+onlyif threadid=1
+statement error
+INSERT INTO t1_{i} VALUES (7, 'dup')
+----
+constraint
+
+onlyif threadid=1
+query I
+SELECT COUNT(*) FROM t1_{i} WHERE s = 'v2999'
+----
+1
+
+endloop
+
+loop i 0 20
+
+onlyif threadid=1
+statement ok
+DROP TABLE t1_{i}
+
+endloop
+
+# thread 2: catalog-only DDL, and a table rewrite now and then
+loop i 0 20
+
+onlyif threadid=2
+statement ok
+CREATE VIEW v2_{i} AS SELECT {i} AS x
+
+onlyif threadid=2
+statement ok
+CREATE MACRO m2_{i}(a) AS a + {i}
+
+onlyif threadid=2
+statement ok
+ALTER TABLE r2 RENAME TO r2x
+
+onlyif threadid=2
+statement ok
+COMMENT ON TABLE r2x IS 'round {i}'
+
+onlyif threadid=2
+statement ok
+ALTER TABLE r2x RENAME TO r2
+
+onlyif threadid=2
+statement ok
+DROP VIEW v2_{i}
+
+onlyif threadid=2
+statement ok
+DROP MACRO m2_{i}
+
+endloop
+
+onlyif threadid=2
+statement ok
+ALTER TABLE r2 ADD COLUMN extra INTEGER DEFAULT 5
+
+# thread 3: sequence users, one transaction at a time spans several checkpoints
+loop i 0 20
+
+onlyif threadid=3
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=3
+statement ok
+INSERT INTO ids (tid) SELECT 3 FROM range(100)
+
+onlyif threadid=3
+statement ok
+INSERT INTO ids (tid) SELECT 3 FROM range(100)
+
+onlyif threadid=3
+statement ok
+COMMIT
+
+endloop
+
+# thread 4: the table is replaced, which drops the previous version
+loop i 0 20
+
+onlyif threadid=4
+statement ok
+CREATE OR REPLACE TABLE r4 AS SELECT {i} AS v, r, repeat(md5(r::VARCHAR), 160) AS s FROM range(2000) t(r)
+
+endloop
+
+# thread 5: readers keep the dropped versions of r4 alive and read them after checkpoints
+loop i 0 30
+
+onlyif threadid=5
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=5
+query III
+SELECT COUNT(*), COUNT(DISTINCT v), bool_and(s = repeat(md5(r::VARCHAR), 160)) FROM r4
+----
+2000	1	true
+
+onlyif threadid=5
+query III
+SELECT COUNT(*), COUNT(DISTINCT v), bool_and(s = repeat(md5(r::VARCHAR), 160)) FROM r4
+----
+2000	1	true
+
+onlyif threadid=5
+statement ok
+COMMIT
+
+endloop
+
+endloop
+
+loop k 0 2
+
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE table_name LIKE 't1_%'
+----
+0
+
+query III
+SELECT COUNT(*), COUNT(DISTINCT id), COUNT(*) FILTER (WHERE tid = 3) FROM ids
+----
+4040	4040	4000
+
+query III
+SELECT COUNT(*), SUM(i), SUM(extra) FROM r2
+----
+1000	499500	5000
+
+query III
+SELECT COUNT(*), MIN(v), bool_and(s = repeat(md5(r::VARCHAR), 160)) FROM r4
+----
+2000	19	true
+
+query I
+SELECT COUNT(*) FROM duckdb_views() WHERE view_name LIKE 'v2_%'
+----
+0
+
+restart
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+endloop
+
+statement ok
+INSERT INTO ids (tid) VALUES (9)
+
+statement ok
+CHECKPOINT
+
+restart
+
+query II
+SELECT COUNT(*), COUNT(DISTINCT id) FROM ids
+----
+4041	4041

@@ -17,6 +17,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
+class BlockHandle;
 class BlockManager;
 class CatalogEntry;
 class TableIndexList;
@@ -52,15 +53,21 @@ public:
 	//! memory index data and also marks all blocks on disk as free blocks allowing for reclamation. Block marking for
 	//! indexes is handled implicitly along destruction paths for index memory.
 	void RemoveIndex(TableIndexList &indexes, Identifier name);
+	//! Register the indexes of a dropped table, whose blocks are freed during FinalizeCommit.
+	void DropIndexStorage(TableIndexList &indexes);
 	//! Finalize accumulated block marks and index removals.
 	void FinalizeCommit();
+	//! Returns handles to the dropped blocks: the blocks are not reused while a handle exists.
+	vector<shared_ptr<BlockHandle>> TakeDroppedBlocks();
 	//! True if no work has been queued.
 	bool Empty() const;
 
 private:
 	optional_ptr<BlockManager> block_manager;
 	vector<block_id_t> dropped_block_ids;
+	vector<shared_ptr<BlockHandle>> dropped_blocks;
 	vector<PendingIndexRemoval> pending_index_removals;
+	vector<reference<TableIndexList>> dropped_index_storage;
 };
 
 struct IndexDataRemover {

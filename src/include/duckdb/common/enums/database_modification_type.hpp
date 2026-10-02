@@ -72,7 +72,11 @@ public:
 	}
 	//! Whether a transaction making these modifications keeps checkpoints from running until it is cleaned up
 	bool RequiresCheckpointLock() const {
-		return UpdateData() || RewriteTableStorage() || DropStorage();
+		return UpdateData() || RewriteTableStorage();
+	}
+	//! Whether a transaction making these modifications keeps checkpoints from running while it commits
+	bool RequiresCommitCheckpointLock() const {
+		return DropStorage();
 	}
 	//! Whether a transaction making these modifications keeps full checkpoints from vacuuming
 	bool RequiresVacuumLock() const {
