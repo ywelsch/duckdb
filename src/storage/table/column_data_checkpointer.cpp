@@ -434,14 +434,15 @@ void ColumnDataCheckpointer::Checkpoint() {
 	WriteToDisk();
 }
 
-void ColumnDataCheckpointer::FinalizeCheckpoint() {
+void ColumnDataCheckpointer::FinalizeCheckpoint(const BaseStatistics &old_stats) {
 	auto visibility_bound = checkpoint_info.GetVisibilityBound();
 	if (has_changes) {
 		// something has undergone changes, we rewrote everything
 		// write the new data - not the old data
 		for (idx_t i = 0; i < checkpoint_states.size(); i++) {
 			auto &state = checkpoint_states[i].get();
-			state.original_column.CheckpointUpdates(state.GetResultColumn(), visibility_bound);
+			state.original_column.CheckpointUpdates(state.GetResultColumn(), visibility_bound, *state.global_stats,
+			                                        old_stats);
 		}
 		return;
 	}
@@ -449,7 +450,8 @@ void ColumnDataCheckpointer::FinalizeCheckpoint() {
 	for (idx_t i = 0; i < checkpoint_states.size(); i++) {
 		auto &state = checkpoint_states[i].get();
 		WritePersistentSegments(state);
-		state.original_column.CheckpointUpdates(state.original_column, visibility_bound);
+		state.original_column.CheckpointUpdates(state.original_column, visibility_bound, *state.global_stats,
+		                                        old_stats);
 	}
 }
 

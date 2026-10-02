@@ -209,7 +209,8 @@ public:
 	virtual void CheckpointScan(ColumnSegment &segment, ColumnScanState &state, idx_t count, Vector &scan_vector,
 	                            VisibilityBound visibility_bound) const;
 	//! Hands the update segment to the column a checkpoint rewrote this one into; clears it when nothing needs it
-	void CheckpointUpdates(ColumnData &target, VisibilityBound visibility_bound);
+	void CheckpointUpdates(ColumnData &target, VisibilityBound visibility_bound, BaseStatistics &target_stats,
+	                       const BaseStatistics &old_stats);
 
 	virtual bool IsPersistent();
 	vector<DataPointer> GetDataPointers();
