@@ -10,6 +10,7 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
+#include "duckdb/storage/block_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
@@ -112,11 +113,32 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 
 void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
 	// called under the commit lock: a commit's flush and its commit or revert are entirely before or after this
+	lock_guard<mutex> guard(active_checkpoint_lock);
 	active_checkpoint = checkpoint_id;
 }
 
 void DuckTransactionManager::ResetActiveCheckpoint() {
+	lock_guard<mutex> guard(active_checkpoint_lock);
 	active_checkpoint = 0;
+	auto &block_manager = db.GetStorageManager().GetBlockManager();
+	for (auto block_id : optimistic_blocks_during_checkpoint) {
+		block_manager.MarkBlockAsCheckpointed(block_id);
+	}
+	optimistic_blocks_during_checkpoint.clear();
+}
+
+void DuckTransactionManager::MarkOptimisticBlocksAsCheckpointed(const vector<block_id_t> &block_ids) {
+	lock_guard<mutex> guard(active_checkpoint_lock);
+	if (active_checkpoint != 0) {
+		// the running checkpoint's header must list them as free: replaying the WAL marks them as used
+		optimistic_blocks_during_checkpoint.insert(optimistic_blocks_during_checkpoint.end(), block_ids.begin(),
+		                                           block_ids.end());
+		return;
+	}
+	auto &block_manager = db.GetStorageManager().GetBlockManager();
+	for (auto block_id : block_ids) {
+		block_manager.MarkBlockAsCheckpointed(block_id);
+	}
 }
 
 DuckTransactionManager::CheckpointDecision::CheckpointDecision(string reason_p)

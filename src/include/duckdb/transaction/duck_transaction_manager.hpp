@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/storage/storage_info.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
@@ -68,6 +69,8 @@ public:
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
 	void ResetActiveCheckpoint();
+	//! Marks optimistically written blocks as checkpointed, once the running checkpoint, if any, ended
+	void MarkOptimisticBlocksAsCheckpointed(const vector<block_id_t> &block_ids);
 
 	bool IsDuckTransactionManager() override {
 		return true;
@@ -154,6 +157,10 @@ private:
 	atomic<transaction_t> last_commit;
 	//! The currently active checkpoint, zero when none is running
 	atomic<idx_t> active_checkpoint;
+	//! Protects resetting the active checkpoint and optimistic_blocks_during_checkpoint
+	mutex active_checkpoint_lock;
+	//! Optimistic blocks committed while a checkpoint runs, which it does not write: they stay newly used until it ends
+	vector<block_id_t> optimistic_blocks_during_checkpoint;
 	//! Source of checkpoint identities
 	atomic<idx_t> next_checkpoint_id = {0};
 	//! Set of currently running transactions
