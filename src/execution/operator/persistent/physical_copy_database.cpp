@@ -15,6 +15,7 @@
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 
 namespace duckdb {
 
@@ -84,7 +85,7 @@ SourceResultType PhysicalCopyDatabase::GetDataInternal(ExecutionContext &context
 		storage_info.options.emplace("v1_0_0_storage", false);
 		auto unbound_index = make_uniq<UnboundIndex>(create_index_info.Copy(), std::move(storage_info),
 		                                             data_table.GetTableIOManager(), catalog.GetAttached());
-		data_table.AddIndex(std::move(unbound_index));
+		data_table.AddIndex(std::move(unbound_index), DuckTransaction::Get(context.client, data_table.db));
 
 		// We add unbound indexes, so we immediately bind them.
 		// Otherwise, WAL serialization fails due to unbound indexes.

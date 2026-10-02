@@ -18,6 +18,7 @@
 namespace duckdb {
 
 class ConflictManager;
+class DuckTransaction;
 class ConflictInfo;
 class IndexEntry;
 class TableIndexList;
@@ -33,6 +34,8 @@ class TableIndexIterationHelper;
 
 struct IndexSerializationInfo {
 	case_insensitive_map_t<Value> options;
+	//! The visibility bound of the checkpoint that serializes the indexes, which skips the indexes it does not write
+	VisibilityBound visibility_bound = VisibilityBound::IncludingUncommitted();
 };
 
 // IndexStorageInfo is move-only. Keep every serialized info in owned_infos and expose stable ordered references.
@@ -49,8 +52,10 @@ public:
 
 	//! Iterates over shared ownership of stable index entries while holding the entry-list lock.
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
-	//! Adds an index entry to the list of index entries.
-	void AddIndex(unique_ptr<Index> index);
+	//! Adds an index entry to the list of index entries, created by the given transaction if any.
+	void AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransaction> transaction = nullptr);
+	//! Marks every index entry as created by the given transaction.
+	void MarkCreatedBy(DuckTransaction &transaction);
 	//! Hands the on-disk blocks of every index over to the caller, who frees them; the indexes stay usable.
 	void ReleaseStorageBlocks(vector<block_id_t> &block_ids);
 	//! Initializes the transaction-local delete and append indexes.
@@ -59,7 +64,7 @@ public:
 	void Append(DataChunk &chunk, Vector &row_ids);
 	//! Appends a table chunk with generated row IDs, using delete and checkpoint indexes where required.
 	ErrorData Append(optional_ptr<TableIndexList> delete_indexes, DataChunk &chunk, row_t row_start,
-	                 IndexAppendMode append_mode, optional_idx active_checkpoint);
+	                 IndexAppendMode append_mode, const ActiveCheckpoint &active_checkpoint);
 	//! Reverts an append to all index entries.
 	void RevertAppend(DataChunk &chunk, Vector &row_ids);
 	//! Reverts an append with generated row IDs starting at row_start.
@@ -68,7 +73,7 @@ public:
 	void AppendToDeleteIndexes(DataChunk &chunk, Vector &row_ids);
 	//! Applies a removal or removal rollback to all index entries.
 	void RemoveFromIndexes(DataChunk &chunk, Vector &row_ids, IndexRemovalType removal_type,
-	                       optional_idx active_checkpoint = optional_idx());
+	                       const ActiveCheckpoint &active_checkpoint = ActiveCheckpoint());
 	//! Removes an index entry from the list of index entries and release any storage the index owns.
 	void RemoveIndex(const Identifier &name);
 	//! Removes an index entry from the list of index entries without releasing it. A kept entry is still written by

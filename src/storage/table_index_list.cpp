@@ -16,6 +16,7 @@
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 
 namespace duckdb {
 
@@ -82,10 +83,14 @@ TableIndexList::~TableIndexList() {
 	}
 }
 
-void TableIndexList::AddIndex(unique_ptr<Index> index) {
+void TableIndexList::AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransaction> transaction) {
 	D_ASSERT(index);
-	annotated_lock_guard lock(index_entries_lock);
 	auto index_entry = make_shared_ptr<IndexEntry>(std::move(index));
+	if (transaction) {
+		index_entry->MarkUncommitted(transaction->GetTransactionId());
+		transaction->AddCreatedIndex(index_entry);
+	}
+	annotated_lock_guard lock(index_entries_lock);
 	if (index_entry->GetBindState() != IndexBindState::BOUND) {
 		unbound_count++;
 	}
@@ -96,6 +101,14 @@ void TableIndexList::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
 	annotated_lock_guard lock(index_entries_lock);
 	for (auto &entry : index_entries) {
 		entry->ReleaseStorageBlocks(block_ids);
+	}
+}
+
+void TableIndexList::MarkCreatedBy(DuckTransaction &transaction) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (auto &entry : index_entries) {
+		entry->MarkUncommitted(transaction.GetTransactionId());
+		transaction.AddCreatedIndex(entry);
 	}
 }
 
@@ -120,7 +133,7 @@ void TableIndexList::Append(DataChunk &chunk, Vector &row_ids) {
 }
 
 ErrorData TableIndexList::Append(optional_ptr<TableIndexList> delete_indexes, DataChunk &chunk, row_t row_start,
-                                 IndexAppendMode append_mode, optional_idx active_checkpoint) {
+                                 IndexAppendMode append_mode, const ActiveCheckpoint &active_checkpoint) {
 	Vector row_ids(LogicalType::ROW_TYPE);
 	VectorOperations::GenerateSequence(row_ids, chunk.size(), row_start, 1);
 
@@ -169,7 +182,7 @@ void TableIndexList::AppendToDeleteIndexes(DataChunk &chunk, Vector &row_ids) {
 }
 
 void TableIndexList::RemoveFromIndexes(DataChunk &chunk, Vector &row_ids, const IndexRemovalType removal_type,
-                                       const optional_idx active_checkpoint) {
+                                       const ActiveCheckpoint &active_checkpoint) {
 	annotated_lock_guard lock(index_entries_lock);
 	for (const auto &entry : index_entries) {
 		entry->RemoveFromIndex(chunk, row_ids, removal_type, active_checkpoint);
@@ -543,6 +556,10 @@ IndexSerializationResult TableIndexList::SerializeToDisk(QueryContext context, c
 
 	result.owned_infos.reserve(index_entries.size() + kept_index_entries.size());
 	auto serialize = [&](const shared_ptr<IndexEntry> &entry) {
+		if (!entry->PartOfCheckpoint(info.visibility_bound)) {
+			// created by a transaction that committed after the checkpoint's bound, or not at all
+			return;
+		}
 		auto storage_info = entry->SerializeToDisk(context, info.options);
 		D_ASSERT(!storage_info.name.empty());
 		result.owned_infos.push_back(std::move(storage_info));

@@ -32,4 +32,12 @@ struct CheckpointOptions {
 	optional_ptr<unique_lock<mutex>> commit_lock;
 };
 
+//! The checkpoint that is running while a commit changes a table, if any
+struct ActiveCheckpoint {
+	//! Empty when no checkpoint is running
+	optional_idx checkpoint_id;
+	//! What the running checkpoint sees
+	VisibilityBound visibility_bound;
+};
+
 } // namespace duckdb

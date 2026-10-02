@@ -38,7 +38,7 @@ void IndexEntry::Append(DataChunk &chunk, Vector &row_ids) {
 }
 
 ErrorData IndexEntry::Append(DataChunk &chunk, Vector &row_ids, const shared_ptr<IndexEntry> &delete_entry,
-                             IndexAppendMode append_mode, optional_idx active_checkpoint) {
+                             IndexAppendMode append_mode, const ActiveCheckpoint &active_checkpoint) {
 	auto entry_lock = lock.GetExclusiveLock();
 	if (!owned_index->IsBound()) {
 		auto &unbound_index = owned_index->Cast<UnboundIndex>();
@@ -57,7 +57,8 @@ ErrorData IndexEntry::Append(DataChunk &chunk, Vector &row_ids, const shared_ptr
 
 	bool lookup_main_index = false;
 	optional_ptr<BoundIndex> append_index;
-	if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint)) {
+	if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint.checkpoint_id) &&
+	    PartOfCheckpoint(active_checkpoint.visibility_bound)) {
 		append_index = deltas.GetOrCreate(bound_index, IndexDeltaType::ADDED_DATA_DURING_CHECKPOINT);
 		if (bound_index.IsUnique()) {
 			lookup_main_index = true;
@@ -252,7 +253,7 @@ static void ApplyIndexRemovalDuringCheckpoint(BoundIndex &index, IndexDeltas &de
 }
 
 void IndexEntry::RemoveFromIndex(DataChunk &chunk, Vector &row_ids, const IndexRemovalType removal_type,
-                                 const optional_idx active_checkpoint) {
+                                 const ActiveCheckpoint &active_checkpoint) {
 	auto entry_lock = lock.GetExclusiveLock();
 	if (!owned_index->IsBound()) {
 		// Buffer the delete: chunk is in table layout with all indexed columns populated.
@@ -267,7 +268,8 @@ void IndexEntry::RemoveFromIndex(DataChunk &chunk, Vector &row_ids, const IndexR
 	if (removal_type == IndexRemovalType::DELETED_ROWS_IN_USE) {
 		// Cleanup always removes directly from "deleted_rows_in_use", even during a checkpoint.
 		ApplyIndexRemoval(bound_index, deltas, chunk, row_ids, removal_type);
-	} else if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint)) {
+	} else if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint.checkpoint_id) &&
+	           PartOfCheckpoint(active_checkpoint.visibility_bound)) {
 		// During a checkpoint, route changes through the checkpoint deltas instead of the main index.
 		ApplyIndexRemovalDuringCheckpoint(bound_index, deltas, chunk, row_ids, removal_type);
 	} else {
@@ -499,6 +501,18 @@ IndexStorageInfo IndexEntry::SerializeToWAL(const case_insensitive_map_t<Value> 
 	// We never write an unbound index to the WAL.
 	D_ASSERT(owned_index->IsBound());
 	return owned_index->Cast<BoundIndex>().SerializeToWAL(options);
+}
+
+void IndexEntry::MarkUncommitted(const transaction_t transaction_id) {
+	commit_id = transaction_id;
+}
+
+void IndexEntry::MarkCommitted(const transaction_t commit_id_p) {
+	commit_id = commit_id_p;
+}
+
+bool IndexEntry::PartOfCheckpoint(const VisibilityBound visibility_bound) const {
+	return commit_id.load() < visibility_bound;
 }
 
 void IndexEntry::MergeCheckpointDeltas(const optional_idx checkpoint_id) {

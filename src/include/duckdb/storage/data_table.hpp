@@ -201,7 +201,8 @@ public:
 
 	//! Remove the row identifiers from all the indexes of the table
 	void RemoveFromIndexes(const QueryContext &context, Vector &row_identifiers, idx_t count,
-	                       IndexRemovalType removal_type, optional_idx checkpoint_id = optional_idx());
+	                       IndexRemovalType removal_type,
+	                       const ActiveCheckpoint &active_checkpoint = ActiveCheckpoint());
 
 	void SetAsMainTable() {
 		this->version = DataTableVersion::MAIN_TABLE;
@@ -289,8 +290,8 @@ public:
 	//! It is either empty, or initialized via its index storage information.
 	void AddIndex(const ColumnList &columns, const vector<LogicalIndex> &column_indexes, const IndexConstraintType type,
 	              IndexStorageInfo index_info);
-	//! AddIndex moves an index to this table's index list.
-	void AddIndex(unique_ptr<Index> index);
+	//! AddIndex moves an index to this table's index list, created by the given transaction if any.
+	void AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransaction> transaction = nullptr);
 
 	//! Returns a list of the partition stats
 	vector<PartitionStatistics> GetPartitionStats(ClientContext &context);

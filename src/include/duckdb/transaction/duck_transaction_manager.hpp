@@ -12,6 +12,7 @@
 #include "duckdb/storage/storage_info.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
+#include "duckdb/storage/checkpoint/checkpoint_options.hpp"
 #include "duckdb/common/queue.hpp"
 
 #include <condition_variable>
@@ -61,14 +62,14 @@ public:
 	//! Wait until every published commit is durable. Called under the commit lock, so no new commit can
 	//! enter its sync window and the wait is bounded by the syncs in flight
 	void WaitForDurability();
-	optional_idx GetActiveCheckpoint() const {
-		auto id = active_checkpoint.load();
-		return id == 0 ? optional_idx() : optional_idx(id);
+	ActiveCheckpoint GetActiveCheckpoint() const {
+		lock_guard<mutex> guard(active_checkpoint_lock);
+		return active_checkpoint;
 	}
 	idx_t NextCheckpointId() {
 		return ++next_checkpoint_id;
 	}
-	void SetActiveCheckpoint(idx_t checkpoint_id);
+	void SetActiveCheckpoint(idx_t checkpoint_id, VisibilityBound visibility_bound);
 	void ResetActiveCheckpoint();
 	//! Marks optimistically written blocks as checkpointed, once the running checkpoint, if any, ended
 	void MarkOptimisticBlocksAsCheckpointed(const vector<block_id_t> &block_ids);
@@ -163,10 +164,10 @@ private:
 	atomic<VisibilityBound> lowest_visibility_bound;
 	//! The last commit timestamp
 	atomic<transaction_t> last_commit;
-	//! The currently active checkpoint, zero when none is running
-	atomic<idx_t> active_checkpoint;
-	//! Protects resetting the active checkpoint and optimistic_blocks_during_checkpoint
-	mutex active_checkpoint_lock;
+	//! The currently active checkpoint, if any
+	ActiveCheckpoint active_checkpoint;
+	//! Protects active_checkpoint and optimistic_blocks_during_checkpoint
+	mutable mutex active_checkpoint_lock;
 	//! Optimistic blocks committed while a checkpoint runs, which it does not write: they stay newly used until it ends
 	vector<block_id_t> optimistic_blocks_during_checkpoint;
 	//! Lock for dropped_storage, held while freeing it: a checkpoint that starts waits for storage freed at cleanup

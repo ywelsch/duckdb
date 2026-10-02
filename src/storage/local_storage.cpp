@@ -165,7 +165,7 @@ ErrorData LocalTableStorage::AppendToIndexes(DuckTransaction &transaction, RowGr
 		mapped_column_ids.emplace_back(col);
 	}
 	std::sort(mapped_column_ids.begin(), mapped_column_ids.end());
-	auto checkpoint_id = transaction.GetTransactionManager().Cast<DuckTransactionManager>().GetActiveCheckpoint();
+	auto active_checkpoint = transaction.GetTransactionManager().Cast<DuckTransactionManager>().GetActiveCheckpoint();
 
 	// The bound expressions of the indexes (and their bound column references) are in relation to
 	// ALL table columns, so we create an empty table chunk based on the table types. It references
@@ -181,7 +181,7 @@ ErrorData LocalTableStorage::AppendToIndexes(DuckTransaction &transaction, RowGr
 			table_chunk.data[col_id].Reference(index_chunk.data[i]);
 		}
 
-		error = index_list.Append(delete_indexes, table_chunk, start_row, index_append_mode, checkpoint_id);
+		error = index_list.Append(delete_indexes, table_chunk, start_row, index_append_mode, active_checkpoint);
 		if (error.HasError()) {
 			break;
 		}
@@ -463,7 +463,7 @@ void LocalStorage::Append(LocalAppendState &state, DuckTableEntry &table_entry, 
 
 	if (!storage->append_indexes.Empty()) {
 		auto error = storage->append_indexes.Append(storage->delete_indexes, table_chunk, NumericCast<row_t>(base_id),
-		                                            storage->index_append_mode, optional_idx());
+		                                            storage->index_append_mode, ActiveCheckpoint());
 		if (error.HasError()) {
 			error.Throw();
 		}

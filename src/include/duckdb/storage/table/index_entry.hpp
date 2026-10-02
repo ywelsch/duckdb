@@ -11,6 +11,7 @@
 #include "duckdb/common/enums/index_removal_type.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/storage/checkpoint/checkpoint_options.hpp"
 #include "duckdb/execution/index/bound_index.hpp"
 #include "duckdb/storage/index.hpp"
 #include "duckdb/storage/storage_lock.hpp"
@@ -116,14 +117,14 @@ public:
 	void Append(DataChunk &chunk, Vector &row_ids);
 	//! Appends a chunk using delete and checkpoint indexes where required.
 	ErrorData Append(DataChunk &chunk, Vector &row_ids, const shared_ptr<IndexEntry> &delete_entry,
-	                 IndexAppendMode append_mode, optional_idx active_checkpoint);
+	                 IndexAppendMode append_mode, const ActiveCheckpoint &active_checkpoint);
 	//! Reverts an append to the physical index or its checkpoint delta.
 	void RevertAppend(DataChunk &chunk, Vector &row_ids);
 	//! Appends deleted rows to the bound physical index if it enforces uniqueness.
 	void AppendToDeleteIndexes(DataChunk &chunk, Vector &row_ids);
 	//! Applies a removal or removal rollback to the physical index and its deltas.
 	void RemoveFromIndex(DataChunk &chunk, Vector &row_ids, IndexRemovalType removal_type,
-	                     optional_idx active_checkpoint);
+	                     const ActiveCheckpoint &active_checkpoint);
 	//! Returns whether the physical index enforces a unique constraint.
 	bool IsUnique() const;
 	//! Returns whether the physical index matches the foreign key columns and role.
@@ -171,6 +172,12 @@ public:
 	void MergeCheckpointDeltas(optional_idx checkpoint_id);
 	//! Adds transaction-local copies of the physical index to the target lists when required.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
+	//! Marks the index as created by the given transaction, which has not committed yet.
+	void MarkUncommitted(transaction_t transaction_id);
+	//! Marks the index as committed with the given commit id.
+	void MarkCommitted(transaction_t commit_id);
+	//! Returns whether a checkpoint with the given visibility bound writes this index.
+	bool PartOfCheckpoint(VisibilityBound visibility_bound) const;
 
 public:
 	//! Acquire shared access to a stable physical index.
@@ -202,6 +209,8 @@ private:
 	//! The physical index owned by this stable logical entry.
 	unique_ptr<Index> owned_index;
 	IndexDeltas deltas;
+	//! The commit id of the transaction that created this index, its transaction id while uncommitted
+	atomic<transaction_t> commit_id {0};
 	//! Whether the on-disk blocks were handed over, also those of an index bound later
 	bool storage_released = false;
 };

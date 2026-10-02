@@ -360,8 +360,8 @@ bool DataTable::HasUniqueIndexes() const {
 	return info->indexes.HasUniqueIndexes();
 }
 
-void DataTable::AddIndex(unique_ptr<Index> index) {
-	info->indexes.AddIndex(std::move(index));
+void DataTable::AddIndex(unique_ptr<Index> index, optional_ptr<DuckTransaction> transaction) {
+	info->indexes.AddIndex(std::move(index), transaction);
 }
 
 bool DataTable::HasForeignKeyIndex(const vector<PhysicalIndex> &keys, ForeignKeyType type) {
@@ -1060,7 +1060,7 @@ void DataTable::AppendLock(DuckTransaction &transaction, TableAppendState &state
 	state.row_start = NumericCast<row_t>(row_groups->GetNextRowId());
 	state.current_row = state.row_start;
 	auto &transaction_manager = transaction.GetTransactionManager();
-	auto active_checkpoint = transaction_manager.GetActiveCheckpoint();
+	auto active_checkpoint = transaction_manager.GetActiveCheckpoint().checkpoint_id;
 	if (info->AppendRequiresNewRowGroup(*row_groups, active_checkpoint)) {
 		// there is a checkpoint active while we are appending
 		// in this case we cannot just blindly append to the last row group, because we need to checkpoint that
@@ -1257,7 +1257,7 @@ void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_
 // Indexes
 //===--------------------------------------------------------------------===//
 void DataTable::RemoveFromIndexes(const QueryContext &context, Vector &row_identifiers, idx_t count,
-                                  IndexRemovalType removal_type, optional_idx active_checkpoint) {
+                                  IndexRemovalType removal_type, const ActiveCheckpoint &active_checkpoint) {
 	row_groups->RemoveFromIndexes(context, info->indexes, row_identifiers, count, removal_type, active_checkpoint);
 }
 

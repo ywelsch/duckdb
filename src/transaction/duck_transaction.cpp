@@ -1,4 +1,5 @@
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/storage/table/index_entry.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
@@ -319,6 +320,10 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 			GetTransactionManager().DropStorage(drop_state);
 			dropped_storage = std::move(drop_state);
 		}
+		for (auto &index : created_indexes) {
+			index->MarkCommitted(commit_info.commit_id);
+		}
+		created_indexes.clear();
 		return ErrorData();
 	} catch (std::exception &ex) {
 		// Record the error and run RevertCommit() outside this try-catch: RevertCommit() iterates the
@@ -355,6 +360,7 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 }
 
 ErrorData DuckTransaction::Rollback() {
+	created_indexes.clear();
 	try {
 		storage->Rollback();
 		undo_buffer.Rollback();
@@ -362,6 +368,11 @@ ErrorData DuckTransaction::Rollback() {
 	} catch (std::exception &ex) {
 		return ErrorData(ex);
 	}
+}
+
+void DuckTransaction::AddCreatedIndex(shared_ptr<IndexEntry> index) {
+	lock_guard<mutex> guard(created_indexes_lock);
+	created_indexes.push_back(std::move(index));
 }
 
 void DuckTransaction::Cleanup(VisibilityBound lowest_visibility_bound) {

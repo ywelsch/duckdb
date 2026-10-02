@@ -1018,7 +1018,7 @@ void RowGroupCollection::Update(TransactionData transaction, DuckTableEntry &tab
 
 void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableIndexList &indexes,
                                            Vector &row_identifiers, idx_t count, IndexRemovalType removal_type,
-                                           optional_idx active_checkpoint) {
+                                           const ActiveCheckpoint &active_checkpoint) {
 	// Collect all Indexed columns on the table.
 	auto indexed_column_id_set = indexes.GetIndexedColumns();
 

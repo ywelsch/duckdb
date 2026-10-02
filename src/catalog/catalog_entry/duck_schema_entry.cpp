@@ -41,6 +41,7 @@
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/table_index_list.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_window_function_info.hpp"
@@ -190,6 +191,11 @@ optional_ptr<CatalogEntry> DuckSchemaEntry::AddEntryInternal(CatalogTransaction 
 
 optional_ptr<CatalogEntry> DuckSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
 	auto table = make_uniq<DuckTableEntry>(catalog, *this, info);
+	if (transaction.transaction && transaction.transaction->IsDuckTransaction()) {
+		// the indexes of the new table commit together with it
+		auto &indexes = table->GetStorage().GetDataTableInfo()->GetIndexes();
+		indexes.MarkCreatedBy(transaction.transaction->Cast<DuckTransaction>());
+	}
 	auto &dependencies = info.Base().dependencies;
 
 	vector<unique_ptr<AlterForeignKeyInfo>> fk_arrays;

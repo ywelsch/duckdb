@@ -58,7 +58,6 @@ DuckTransactionManager::DuckTransactionManager(AttachedDatabase &db) : Transacti
 	// uncommitted data could be read by
 	current_transaction_id = TRANSACTION_ID_START;
 	lowest_visibility_bound = VisibilityBound::IncludingUncommitted();
-	active_checkpoint = 0;
 	if (!db.GetCatalog().IsDuckCatalog()) {
 		// Specifically the StorageManager of the DuckCatalog is relied on, with `db.GetStorageManager`
 		throw InternalException("DuckTransactionManager should only be created together with a DuckCatalog");
@@ -112,15 +111,16 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	return transaction_ref;
 }
 
-void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
+void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id, VisibilityBound visibility_bound) {
 	// called under the commit lock: a commit's flush and its commit or revert are entirely before or after this
 	lock_guard<mutex> guard(active_checkpoint_lock);
-	active_checkpoint = checkpoint_id;
+	active_checkpoint.checkpoint_id = checkpoint_id;
+	active_checkpoint.visibility_bound = visibility_bound;
 }
 
 void DuckTransactionManager::ResetActiveCheckpoint() {
 	lock_guard<mutex> guard(active_checkpoint_lock);
-	active_checkpoint = 0;
+	active_checkpoint = ActiveCheckpoint();
 	auto &block_manager = db.GetStorageManager().GetBlockManager();
 	for (auto block_id : optimistic_blocks_during_checkpoint) {
 		block_manager.MarkBlockAsCheckpointed(block_id);
@@ -130,7 +130,7 @@ void DuckTransactionManager::ResetActiveCheckpoint() {
 
 void DuckTransactionManager::MarkOptimisticBlocksAsCheckpointed(const vector<block_id_t> &block_ids) {
 	lock_guard<mutex> guard(active_checkpoint_lock);
-	if (active_checkpoint != 0) {
+	if (active_checkpoint.checkpoint_id.IsValid()) {
 		// the running checkpoint's header must list them as free: replaying the WAL marks them as used
 		optimistic_blocks_during_checkpoint.insert(optimistic_blocks_during_checkpoint.end(), block_ids.begin(),
 		                                           block_ids.end());
@@ -145,7 +145,7 @@ void DuckTransactionManager::MarkOptimisticBlocksAsCheckpointed(const vector<blo
 void DuckTransactionManager::DropStorage(shared_ptr<CommitDropState> drop_state) {
 	// a running checkpoint's bound predates this commit, so it still writes the dropped indexes: no checkpoint starts
 	// before the commit is done
-	drop_state->RemoveIndexes(GetActiveCheckpoint().IsValid());
+	drop_state->RemoveIndexes(GetActiveCheckpoint().checkpoint_id.IsValid());
 	lock_guard<mutex> guard(dropped_storage_lock);
 	dropped_storage.push_back(std::move(drop_state));
 }

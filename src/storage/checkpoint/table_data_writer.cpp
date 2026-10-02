@@ -196,6 +196,7 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 	if (!v1_0_0_storage) {
 		serialization_info.options.emplace("v1_0_0_storage", v1_0_0_storage);
 	}
+	serialization_info.visibility_bound = GetCheckpointOptions().visibility_bound;
 
 	auto index_storage_infos = info.GetIndexes().SerializeToDisk(context, serialization_info);
 
