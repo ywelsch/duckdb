@@ -648,6 +648,19 @@ struct DebugDeltaOnlyVariantEncodingEnabledSetting {
 	static Value GetSetting(const ClientContext &context);
 };
 
+struct DebugDisableIndexCheckpointDeltasSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "debug_disable_index_checkpoint_deltas";
+	static constexpr const char *Description =
+	    "DEBUG SETTING: let ART indexes behave like index types without checkpoint deltas";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr bool IsDebug = false;
+	static constexpr bool IsDeprecated = false;
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct DebugDisableOptimizerSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "debug_disable_optimizer";

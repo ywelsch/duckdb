@@ -126,6 +126,8 @@ public:
 	                     optional_idx active_checkpoint);
 	//! Returns whether the physical index enforces a unique constraint.
 	bool IsUnique() const;
+	//! Returns whether changes made during a checkpoint go to deltas, or straight to the index the checkpoint writes.
+	bool SupportsCheckpointDeltas() const;
 	//! Returns whether the physical index matches the foreign key columns and role.
 	bool IsForeignKeyIndex(const vector<PhysicalIndex> &fk_keys, ForeignKeyType fk_type) const;
 	//! Returns the name of the physical index.

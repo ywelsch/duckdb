@@ -272,6 +272,8 @@ public:
 
 	void BindIndexes(ClientContext &context);
 	bool HasIndexes() const;
+	//! Whether an index of the table writes changes made during a checkpoint straight to the index it writes
+	bool HasIndexesWithoutCheckpointDeltas() const;
 	bool HasUniqueIndexes() const;
 	bool HasForeignKeyIndex(const vector<PhysicalIndex> &keys, ForeignKeyType type);
 	void SetIndexStorageInfo(vector<IndexStorageInfo> index_storage_info);

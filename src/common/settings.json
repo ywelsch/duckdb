@@ -344,6 +344,13 @@
         ]
     },
     {
+        "name": "debug_disable_index_checkpoint_deltas",
+        "description": "DEBUG SETTING: let ART indexes behave like index types without checkpoint deltas",
+        "type": "BOOLEAN",
+        "default_scope": "global",
+        "default_value": "false"
+    },
+    {
         "name": "debug_disable_optimizer",
         "description": "Disable running the optimizer.",
         "type": "BOOLEAN",

@@ -192,6 +192,16 @@ void TableIndexList::RemoveIndex(idx_t index_oid) {
 	}
 }
 
+bool TableIndexList::HasIndexesWithoutCheckpointDeltas() const {
+	annotated_lock_guard lock(index_entries_lock);
+	for (const auto &entry : index_entries) {
+		if (!entry->SupportsCheckpointDeltas()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool TableIndexList::HasUniqueIndexes() const {
 	annotated_lock_guard lock(index_entries_lock);
 	for (const auto &entry : index_entries) {

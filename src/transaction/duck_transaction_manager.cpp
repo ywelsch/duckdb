@@ -134,7 +134,8 @@ bool DuckTransactionManager::HasOtherTransactions(DuckTransaction &transaction) 
 
 DuckTransactionManager::CheckpointDecision
 DuckTransactionManager::CanCheckpoint(DuckTransaction &transaction, unique_ptr<StorageLockKey> &lock,
-                                      const UndoBufferProperties &undo_properties) {
+                                      const UndoBufferProperties &undo_properties,
+                                      optional_ptr<StorageLockKey> commit_checkpoint_lock) {
 	if (db.IsSystem()) {
 		return CheckpointDecision("system transaction");
 	}
@@ -152,7 +153,7 @@ DuckTransactionManager::CanCheckpoint(DuckTransaction &transaction, unique_ptr<S
 		return CheckpointDecision("checkpointing on commit disabled through configuration");
 	}
 	// try to lock the checkpoint lock
-	lock = transaction.TryGetCheckpointLock();
+	lock = transaction.TryGetCheckpointLock(commit_checkpoint_lock);
 	if (!lock) {
 		return CheckpointDecision("Failed to obtain checkpoint lock - another thread is writing/checkpointing or "
 		                          "another read transaction relies on data that is not yet committed");
@@ -309,6 +310,13 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
 	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
 	ErrorData error = transaction.PreFlushOptimisticBlocks(db);
+	auto undo_properties = transaction.GetUndoProperties();
+	// a checkpoint writes an index without checkpoint deltas as it is then: a commit changing one must not overlap it
+	unique_ptr<StorageLockKey> commit_checkpoint_lock;
+	if (undo_properties.has_deletes_from_indexes_without_checkpoint_deltas ||
+	    transaction.AppendsToIndexesWithoutCheckpointDeltas()) {
+		commit_checkpoint_lock = transaction.GetCommitCheckpointLock();
+	}
 	unique_lock<mutex> t_lock(transaction_lock);
 	if (!db.IsSystem() && !db.IsTemporary()) {
 		if (transaction.ChangesMade()) {
@@ -321,8 +329,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 	// check if we can checkpoint
 	unique_ptr<StorageLockKey> lock;
-	auto undo_properties = transaction.GetUndoProperties();
-	auto checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties);
+	auto checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties, commit_checkpoint_lock.get());
 	unique_lock<mutex> held_wal_lock;
 	unique_ptr<StorageCommitState> commit_state;
 	bool skip_wal_write_due_to_checkpoint = false;
