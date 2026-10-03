@@ -370,12 +370,25 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	}
 }
 
-unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock() {
-	if (!checkpoint_lock) {
-		return GetTransactionManager().TryGetCheckpointLock();
-	} else {
+unique_ptr<StorageLockKey> DuckTransaction::GetCommitCheckpointLock() {
+	if (checkpoint_lock) {
+		return nullptr;
+	}
+	return GetTransactionManager().SharedCheckpointLock();
+}
+
+bool DuckTransaction::AppendsToIndexesWithoutCheckpointDeltas() const {
+	return storage->AppendsToIndexesWithoutCheckpointDeltas();
+}
+
+unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock(optional_ptr<StorageLockKey> commit_checkpoint_lock) {
+	if (checkpoint_lock) {
 		return GetTransactionManager().TryUpgradeCheckpointLock(*checkpoint_lock);
 	}
+	if (commit_checkpoint_lock) {
+		return GetTransactionManager().TryUpgradeCheckpointLock(*commit_checkpoint_lock);
+	}
+	return GetTransactionManager().TryGetCheckpointLock();
 }
 
 shared_ptr<CheckpointLock> DuckTransaction::SharedLockTable(DataTableInfo &info) {

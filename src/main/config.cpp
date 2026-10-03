@@ -112,6 +112,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING(DebugCheckpointScanSleepMsSetting),
     DUCKDB_SETTING(DebugCheckpointSleepMsSetting),
     DUCKDB_GLOBAL(DebugDeltaOnlyVariantEncodingEnabledSetting),
+    DUCKDB_SETTING(DebugDisableIndexCheckpointDeltasSetting),
     DUCKDB_SETTING(DebugDisableOptimizerSetting),
     DUCKDB_SETTING(EnableCachingOperatorsSetting),
     DUCKDB_SETTING(DebugEvictionQueueSleepMicroSecondsSetting),

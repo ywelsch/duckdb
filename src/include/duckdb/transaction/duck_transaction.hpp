@@ -98,7 +98,12 @@ public:
 		return view.transaction_id;
 	}
 
-	unique_ptr<StorageLockKey> TryGetCheckpointLock();
+	//! Try to obtain the exclusive checkpoint lock, upgrading the shared lock the transaction or its commit holds
+	unique_ptr<StorageLockKey> TryGetCheckpointLock(optional_ptr<StorageLockKey> commit_checkpoint_lock);
+	//! The shared checkpoint lock to hold while committing, unless the transaction holds it already
+	unique_ptr<StorageLockKey> GetCommitCheckpointLock();
+	//! Whether rows are appended to a table with an index without checkpoint deltas
+	bool AppendsToIndexesWithoutCheckpointDeltas() const;
 
 	//! Get a shared lock on a table
 	shared_ptr<CheckpointLock> SharedLockTable(DataTableInfo &info);

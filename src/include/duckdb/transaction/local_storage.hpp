@@ -129,6 +129,8 @@ public:
 	idx_t EstimatedSize() const;
 	bool IsEmpty() const;
 	void InsertEntry(DataTable &table, shared_ptr<LocalTableStorage> entry);
+	//! Whether rows are appended to a table with an index without checkpoint deltas
+	bool AppendsToIndexesWithoutCheckpointDeltas() const;
 
 private:
 	mutable mutex table_storage_lock;
@@ -195,6 +197,8 @@ public:
 
 	bool ChangesMade() noexcept;
 	idx_t EstimatedSize();
+	//! Whether rows are appended to a table with an index without checkpoint deltas
+	bool AppendsToIndexesWithoutCheckpointDeltas() const;
 
 	void DropTable(DataTable &table);
 	bool Find(DataTable &table);

@@ -333,6 +333,16 @@ vector<shared_ptr<LocalTableStorage>> LocalTableManager::GetEntries() const {
 	return result;
 }
 
+bool LocalTableManager::AppendsToIndexesWithoutCheckpointDeltas() const {
+	lock_guard<mutex> l(table_storage_lock);
+	for (auto &entry : table_storage) {
+		if (entry.first.get().HasIndexesWithoutCheckpointDeltas()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 idx_t LocalTableManager::EstimatedSize() const {
 	lock_guard<mutex> l(table_storage_lock);
 	idx_t estimated_size = 0;
@@ -529,6 +539,10 @@ bool LocalStorage::ChangesMade() noexcept {
 
 bool LocalStorage::Find(DataTable &table) {
 	return table_manager.GetStorage(table) != nullptr;
+}
+
+bool LocalStorage::AppendsToIndexesWithoutCheckpointDeltas() const {
+	return table_manager.AppendsToIndexesWithoutCheckpointDeltas();
 }
 
 idx_t LocalStorage::EstimatedSize() {

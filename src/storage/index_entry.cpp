@@ -276,6 +276,15 @@ void IndexEntry::RemoveFromIndex(DataChunk &chunk, Vector &row_ids, const IndexR
 	}
 }
 
+bool IndexEntry::SupportsCheckpointDeltas() const {
+	auto entry_lock = lock.GetSharedLock();
+	if (!owned_index->IsBound()) {
+		// an unbound index is bound before it is changed
+		return owned_index->GetIndexType() == ART::TYPE_NAME;
+	}
+	return owned_index->Cast<BoundIndex>().SupportsDeltaIndexes();
+}
+
 bool IndexEntry::IsUnique() const {
 	auto entry_lock = lock.GetSharedLock();
 	return owned_index->IsUnique();

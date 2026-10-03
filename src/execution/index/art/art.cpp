@@ -1,4 +1,5 @@
 #include "duckdb/execution/index/art/art.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/main/attached_database.hpp"
 
 #include "duckdb/common/types/conflict_manager.hpp"
@@ -1191,7 +1192,7 @@ idx_t ART::GetInMemorySize(IndexLock &index_lock) const {
 }
 
 bool ART::SupportsDeltaIndexes() const {
-	return true;
+	return !Settings::Get<DebugDisableIndexCheckpointDeltasSetting>(db.GetDatabase());
 }
 
 unique_ptr<BoundIndex> ART::CreateEmptyCopy(const IndexConstraintType constraint_type) const {

@@ -133,6 +133,9 @@ UndoBufferProperties UndoBuffer::GetProperties() {
 			}
 			if (info->table->GetStorage().HasIndexes()) {
 				properties.has_index_deletes = true;
+				if (info->table->GetStorage().HasIndexesWithoutCheckpointDeltas()) {
+					properties.has_deletes_from_indexes_without_checkpoint_deltas = true;
+				}
 			}
 			properties.has_deletes = true;
 			break;

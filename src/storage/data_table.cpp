@@ -356,6 +356,10 @@ bool DataTable::HasIndexes() const {
 	return !info->indexes.Empty();
 }
 
+bool DataTable::HasIndexesWithoutCheckpointDeltas() const {
+	return info->indexes.HasIndexesWithoutCheckpointDeltas();
+}
+
 bool DataTable::HasUniqueIndexes() const {
 	return info->indexes.HasUniqueIndexes();
 }

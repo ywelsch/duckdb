@@ -51,6 +51,8 @@ public:
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
 	//! Adds an index entry to the list of index entries.
 	void AddIndex(unique_ptr<Index> index, optional_idx index_oid);
+	//! Returns whether any index writes changes made during a checkpoint straight to the index the checkpoint writes.
+	bool HasIndexesWithoutCheckpointDeltas() const;
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.

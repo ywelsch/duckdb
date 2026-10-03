@@ -28,6 +28,7 @@ struct UndoBufferProperties {
 	bool has_updates = false;
 	bool has_deletes = false;
 	bool has_index_deletes = false;
+	bool has_deletes_from_indexes_without_checkpoint_deltas = false;
 	bool has_catalog_changes = false;
 	bool has_dropped_entries = false;
 };
