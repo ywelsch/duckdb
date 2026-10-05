@@ -34,6 +34,9 @@ DatabaseModificationType AlterInfo::GetModifications() const {
 	case AlterTableType::SET_COLUMN_COMMENT:
 		// the new version of the table keeps the storage of the old one
 		return DatabaseModificationType();
+	case AlterTableType::ADD_CONSTRAINT:
+		// a primary key or unique constraint is backed by an index
+		return DatabaseModificationType::CREATE_INDEX;
 	default:
 		return DatabaseModificationType::ALTER_TABLE;
 	}

@@ -1,5 +1,5 @@
 # name: test/sql/storage/concurrent_checkpoint_catalog_ddl.test_slow
-# description: DDL that keeps or drops table storage, and sequence use, commit while a checkpoint runs, and replay from the WAL
+# description: DDL that does not rewrite table storage, and sequence use, commit while a checkpoint runs, and replay from the WAL
 # group: [storage]
 
 load {TEST_DIR}/concurrent_checkpoint_catalog_ddl.db
@@ -121,12 +121,11 @@ onlyif threadid=1
 statement ok
 INSERT INTO t2 (i) VALUES (100000)
 
-# creating table storage still waits for the checkpoint
+# tables created after the checkpoint's bound, also in the transaction that stays open
 onlyif threadid=1
 statement ok
 CREATE TABLE created AS SELECT i FROM range(1000) t(i)
 
-# also in a transaction that inserted into a table the checkpoint writes later
 onlyif threadid=2
 statement ok
 CREATE TABLE in_txn AS SELECT 1 AS one
@@ -238,7 +237,7 @@ SELECT COUNT(*), COUNT(DISTINCT id), MAX(id) FROM ids
 ----
 12	12	12
 
-# an open transaction keeps checkpoints from running only if its DDL creates or changes table storage
+# an open transaction keeps checkpoints from running only if its DDL rewrites table storage
 statement ok
 CREATE TABLE u (i INTEGER)
 
@@ -381,6 +380,66 @@ statement ok con1
 BEGIN TRANSACTION
 
 statement ok con1
+CREATE TABLE x (i INTEGER)
+
+statement ok
+INSERT INTO t2 VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE INDEX u_idx ON u(i)
+
+statement ok
+INSERT INTO t2 VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+ALTER TABLE u ADD PRIMARY KEY (i)
+
+statement ok
+INSERT INTO t2 VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE OR REPLACE TABLE u AS SELECT 1 AS i
+
+statement ok
+INSERT INTO t2 VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
 DROP TABLE u
 
 statement ok
@@ -407,58 +466,7 @@ CHECKPOINT
 statement ok con1
 ROLLBACK
 
-# DDL that creates or changes table storage keeps them from running
-
-statement ok con1
-BEGIN TRANSACTION
-
-statement ok con1
-CREATE TABLE x (i INTEGER)
-
-statement ok
-INSERT INTO t2 VALUES (1, 1)
-
-statement error
-CHECKPOINT
-----
-Cannot CHECKPOINT
-
-statement ok con1
-ROLLBACK
-
-statement ok con1
-BEGIN TRANSACTION
-
-statement ok con1
-CREATE INDEX u_idx ON u(i)
-
-statement ok
-INSERT INTO t2 VALUES (1, 1)
-
-statement error
-CHECKPOINT
-----
-Cannot CHECKPOINT
-
-statement ok con1
-ROLLBACK
-
-statement ok con1
-BEGIN TRANSACTION
-
-statement ok con1
-ALTER TABLE u ADD PRIMARY KEY (i)
-
-statement ok
-INSERT INTO t2 VALUES (1, 1)
-
-statement error
-CHECKPOINT
-----
-Cannot CHECKPOINT
-
-statement ok con1
-ROLLBACK
+# DDL that rewrites table storage keeps them from running
 
 statement ok con1
 BEGIN TRANSACTION

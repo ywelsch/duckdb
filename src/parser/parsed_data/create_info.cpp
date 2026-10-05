@@ -9,15 +9,16 @@ namespace duckdb {
 DatabaseModificationType CreateInfo::GetModifications() const {
 	switch (type) {
 	case CatalogType::TABLE_ENTRY:
-	case CatalogType::INDEX_ENTRY:
-	case CatalogType::TRIGGER_ENTRY:
-		return DatabaseModificationType::CREATE_CATALOG_ENTRY;
 	case CatalogType::SCHEMA_ENTRY:
-		// replacing a schema drops the existing one
+		// replacing a table or schema drops the existing one
 		if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
 			return DatabaseModificationType::CREATE_CATALOG_ENTRY;
 		}
 		return DatabaseModificationType();
+	case CatalogType::INDEX_ENTRY:
+		return DatabaseModificationType::CREATE_INDEX;
+	case CatalogType::TRIGGER_ENTRY:
+		return DatabaseModificationType::CREATE_CATALOG_ENTRY;
 	default:
 		return DatabaseModificationType();
 	}
