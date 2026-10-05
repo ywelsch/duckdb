@@ -350,8 +350,26 @@ unique_ptr<BoundIndex> IndexEntry::Bind(IndexBinder &binder, const vector<Logica
 	return owned_index->Cast<UnboundIndex>().Bind(binder, table_types);
 }
 
+void IndexEntry::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
+	auto entry_lock = lock.GetExclusiveLock();
+	storage_released = true;
+	if (!owned_index) {
+		return;
+	}
+	if (owned_index->IsBound()) {
+		owned_index->Cast<BoundIndex>().ReleaseStorageBlocks(block_ids);
+	} else {
+		owned_index->Cast<UnboundIndex>().ReleaseStorageBlocks(block_ids);
+	}
+}
+
 void IndexEntry::CommitBind(unique_ptr<BoundIndex> bound_index) {
 	auto entry_lock = lock.GetExclusiveLock();
+	if (storage_released) {
+		// the blocks were handed over while the index was unbound
+		vector<block_id_t> released_blocks;
+		bound_index->ReleaseStorageBlocks(released_blocks);
+	}
 	owned_index = std::move(bound_index);
 	bind_state = IndexBindState::BOUND;
 }

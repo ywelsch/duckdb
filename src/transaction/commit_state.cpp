@@ -36,31 +36,50 @@ CommitDropState::CommitDropState(optional_ptr<BlockManager> block_manager) : blo
 }
 
 void CommitDropState::DropBlock(block_id_t block_id) {
-	dropped_block_ids.push_back(block_id);
+	D_ASSERT(block_manager);
+	if (!block_manager) {
+		return;
+	}
+	dropped_blocks.push_back(block_manager->RegisterBlock(block_id));
+	block_manager->MarkBlockAsModified(block_id);
 }
 
-void CommitDropState::RemoveIndex(TableIndexList &indexes, Identifier name) {
-	pending_index_removals.push_back(PendingIndexRemoval {indexes, std::move(name)});
+void CommitDropState::RemoveIndex(shared_ptr<DataTableInfo> info, Identifier name) {
+	pending_index_removals.push_back(PendingIndexRemoval {std::move(info), std::move(name), nullptr});
+}
+
+void CommitDropState::DropTable(shared_ptr<DataTable> table) {
+	dropped_tables.push_back(std::move(table));
+}
+
+void CommitDropState::DropColumn(shared_ptr<DataTable> table, idx_t column_index) {
+	dropped_columns.emplace_back(std::move(table), column_index);
+}
+
+void CommitDropState::DetachIndexes() {
+	for (auto &removal : pending_index_removals) {
+		removal.removed_entry = removal.info->GetIndexes().DetachIndex(removal.name);
+	}
 }
 
 void CommitDropState::FinalizeCommit() {
-	if (block_manager) {
-		for (auto block_id : dropped_block_ids) {
-			block_manager->MarkBlockAsModified(block_id);
+	for (auto &removal : pending_index_removals) {
+		if (removal.removed_entry) {
+			removal.info->GetIndexes().ReleaseKeptIndex(*removal.removed_entry);
+			removal.removed_entry->Retire();
 		}
 	}
-	// assert that !block_manager -> dropped_block_ids.empty()
-	D_ASSERT(block_manager || dropped_block_ids.empty());
-
-	for (auto &removal : pending_index_removals) {
-		removal.indexes.get().RemoveIndex(removal.name);
+	// collected now: a checkpoint that wrote the table frees the blocks it replaced itself
+	for (auto &table : dropped_tables) {
+		table->CommitDropTable(*this);
 	}
-	dropped_block_ids.clear();
-	pending_index_removals.clear();
+	for (auto &column : dropped_columns) {
+		column.first->CommitDropColumn(column.second, *this);
+	}
 }
 
 bool CommitDropState::Empty() const {
-	return dropped_block_ids.empty() && pending_index_removals.empty();
+	return dropped_tables.empty() && dropped_columns.empty() && pending_index_removals.empty();
 }
 
 //===--------------------------------------------------------------------===//

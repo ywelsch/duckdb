@@ -680,6 +680,13 @@ void ART::ResetStorage(IndexLock &index_lock) {
 	root_ptr.Clear();
 }
 
+void ART::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
+	IndexLock index_lock(*this);
+	for (auto &allocator : *allocators) {
+		allocator->ReleaseBlocks(block_ids);
+	}
+}
+
 idx_t ART::TryDelete(IndexLock &state, DataChunk &entries, Vector &row_ids, optional_ptr<SelectionVector> deleted_sel,
                      optional_ptr<SelectionVector> non_deleted_sel) {
 	state.AssertHeld(*this);

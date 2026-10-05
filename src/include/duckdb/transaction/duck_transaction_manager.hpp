@@ -16,6 +16,7 @@
 #include <condition_variable>
 
 namespace duckdb {
+class CommitDropState;
 class DuckTransactionManager;
 class DuckTransaction;
 struct UndoBufferProperties;
@@ -68,6 +69,12 @@ public:
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
 	void ResetActiveCheckpoint();
+	//! Detaches the indexes a commit dropped. Its storage is freed when the transaction is cleaned up, or earlier by a
+	//! checkpoint whose bound is past the commit
+	void DropStorage(CommitDropState &drop_state);
+	//! Frees the storage dropped by commits below the bound: of a starting checkpoint, which does not write it, or of
+	//! the cleanup, after which no snapshot reads it
+	void FreeDroppedStorage(VisibilityBound visibility_bound);
 
 	bool IsDuckTransactionManager() override {
 		return true;
@@ -154,6 +161,10 @@ private:
 	atomic<transaction_t> last_commit;
 	//! The currently active checkpoint, zero when none is running
 	atomic<idx_t> active_checkpoint;
+	//! Lock for dropped_storage, held while freeing it: a checkpoint that starts waits for storage freed at cleanup
+	mutex dropped_storage_lock;
+	//! Storage dropped by committed transactions that are not cleaned up yet, and not freed by a checkpoint
+	vector<reference<CommitDropState>> dropped_storage;
 	//! Source of checkpoint identities
 	atomic<idx_t> next_checkpoint_id = {0};
 	//! Set of currently running transactions

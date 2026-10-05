@@ -2214,6 +2214,8 @@ void RowGroupCollection::CommitDropTable(CommitDropState &drop_state) {
 	auto row_groups = GetRowGroups();
 	for (auto &row_group : row_groups->Segments()) {
 		row_group.CommitDrop(drop_state);
+		// ensure all metadata blocks are loaded before they risk being freed by the next checkpoint
+		row_group.LoadDeletes();
 	}
 }
 

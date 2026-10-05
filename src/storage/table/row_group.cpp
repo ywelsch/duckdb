@@ -1187,6 +1187,10 @@ shared_ptr<RowVersionManager> RowGroup::GetOrCreateVersionInfoPtr() {
 	return version_info->GetOrCreate(GetBlockManager());
 }
 
+void RowGroup::LoadDeletes() {
+	GetVersionInfo();
+}
+
 RowVersionManager &RowGroup::GetOrCreateVersionInfo() {
 	return *GetOrCreateVersionInfoPtr();
 }

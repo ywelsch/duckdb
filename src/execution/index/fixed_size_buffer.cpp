@@ -75,9 +75,17 @@ FixedSizeBuffer::~FixedSizeBuffer() {
 		// decrements the reader count on the underlying block handle (Destroy() unpins)
 		buffer_handle.Destroy();
 	}
-	if (OnDisk()) {
+	if (OnDisk() && !block_released) {
 		// marking a block as modified decreases the reference count of multi-use blocks
 		block_manager.MarkBlockAsModified(block_pointer.block_id);
+	}
+}
+
+void FixedSizeBuffer::ReleaseBlock(vector<block_id_t> &block_ids) {
+	lock_guard<mutex> l(lock);
+	if (OnDisk() && !block_released) {
+		block_ids.push_back(block_pointer.block_id);
+		block_released = true;
 	}
 }
 
@@ -104,10 +112,11 @@ void FixedSizeBuffer::Serialize(PartialBlockManager &partial_block_manager, cons
 
 	// The buffer is in memory.
 	D_ASSERT(InMemory());
-	if (OnDisk()) {
+	if (OnDisk() && !block_released) {
 		// We copied it onto a new buffer when loading from disk.
 		block_manager.MarkBlockAsModified(block_pointer.block_id);
 	}
+	block_released = false;
 
 	// Write the changes.
 	// First, we get a partial block allocation.

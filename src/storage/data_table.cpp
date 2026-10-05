@@ -1626,6 +1626,12 @@ idx_t DataTable::GetNextRowId() const {
 
 void DataTable::CommitDropTable(CommitDropState &drop_state) {
 	row_groups->CommitDropTable(drop_state);
+	// the indexes stay usable for older snapshots, but their blocks are freed with the table's
+	vector<block_id_t> index_blocks;
+	info->GetIndexes().ReleaseStorageBlocks(index_blocks);
+	for (auto block_id : index_blocks) {
+		drop_state.DropBlock(block_id);
+	}
 }
 
 idx_t DataTable::GetRowGroupCount() const {
