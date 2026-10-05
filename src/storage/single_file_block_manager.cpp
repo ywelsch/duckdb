@@ -1342,6 +1342,10 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	for (auto &block : checkpoint_freed_blocks) {
 		all_free_blocks.insert(block);
 	}
+	// blocks freed while still in use are free on disk, they only cannot be reused yet
+	for (auto &block : free_blocks_in_use) {
+		all_free_blocks.insert(block);
+	}
 	auto written_multi_use_blocks = multi_use_blocks;
 	// newly used blocks are still free blocks for this checkpoint - so add them to the free list that we write
 	for (auto &newly_used_block : newly_used_blocks) {

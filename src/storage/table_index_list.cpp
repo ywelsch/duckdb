@@ -92,6 +92,13 @@ void TableIndexList::AddIndex(unique_ptr<Index> index) {
 	index_entries.push_back(std::move(index_entry));
 }
 
+void TableIndexList::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (auto &entry : index_entries) {
+		entry->ReleaseStorageBlocks(block_ids);
+	}
+}
+
 void TableIndexList::InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const {
 	D_ASSERT(this != &delete_indexes);
 	D_ASSERT(this != &append_indexes);
@@ -170,24 +177,38 @@ void TableIndexList::RemoveFromIndexes(DataChunk &chunk, Vector &row_ids, const 
 }
 
 void TableIndexList::RemoveIndex(const Identifier &name) {
-	shared_ptr<IndexEntry> removed_entry;
-	{
-		annotated_lock_guard lock(index_entries_lock);
-		for (idx_t i = 0; i < index_entries.size(); i++) {
-			auto &entry = index_entries[i];
-			if (entry->GetName() != name) {
-				continue;
-			}
-			if (entry->GetBindState() != IndexBindState::BOUND) {
-				unbound_count--;
-			}
-			removed_entry = std::move(entry);
-			index_entries.erase_at(i);
-			break;
-		}
-	}
+	auto removed_entry = DetachIndex(name, false);
 	if (removed_entry) {
 		removed_entry->Retire();
+	}
+}
+
+shared_ptr<IndexEntry> TableIndexList::DetachIndex(const Identifier &name, bool keep_for_checkpoint) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (idx_t i = 0; i < index_entries.size(); i++) {
+		auto entry = index_entries[i];
+		if (entry->GetName() != name) {
+			continue;
+		}
+		if (entry->GetBindState() != IndexBindState::BOUND) {
+			unbound_count--;
+		}
+		index_entries.erase_at(i);
+		if (keep_for_checkpoint) {
+			kept_index_entries.push_back(entry);
+		}
+		return entry;
+	}
+	return nullptr;
+}
+
+void TableIndexList::ReleaseKeptIndex(const IndexEntry &entry) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (idx_t i = 0; i < kept_index_entries.size(); i++) {
+		if (kept_index_entries[i].get() == &entry) {
+			kept_index_entries.erase_at(i);
+			return;
+		}
 	}
 }
 
@@ -520,12 +541,19 @@ IndexSerializationResult TableIndexList::SerializeToDisk(QueryContext context, c
 
 	IndexSerializationResult result;
 
-	result.owned_infos.reserve(index_entries.size());
-	for (const auto &entry : index_entries) {
+	result.owned_infos.reserve(index_entries.size() + kept_index_entries.size());
+	auto serialize = [&](const shared_ptr<IndexEntry> &entry) {
 		auto storage_info = entry->SerializeToDisk(context, info.options);
 		D_ASSERT(!storage_info.name.empty());
 		result.owned_infos.push_back(std::move(storage_info));
 		result.ordered_infos.push_back(result.owned_infos.back());
+	};
+	for (const auto &entry : index_entries) {
+		serialize(entry);
+	}
+	// dropped after the checkpoint's bound
+	for (const auto &entry : kept_index_entries) {
+		serialize(entry);
 	}
 
 	return result;

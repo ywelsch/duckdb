@@ -17,9 +17,11 @@
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
+class BlockHandle;
 class BlockManager;
 class CatalogEntry;
 class TableIndexList;
+class IndexEntry;
 class DataChunk;
 class DuckTransaction;
 class WriteAheadLog;
@@ -34,8 +36,10 @@ enum class CommitMode { COMMIT, REVERT_COMMIT };
 
 //! An index that has been marked for removal from a table's index list once the commit chain succeeds.
 struct PendingIndexRemoval {
-	reference<TableIndexList> indexes;
+	shared_ptr<DataTableInfo> info;
 	Identifier name;
+	//! The removed index entry, released during FinalizeCommit
+	shared_ptr<IndexEntry> removed_entry;
 };
 
 //! Accumulates block marks and index removals during commit so they can be applied together once the
@@ -51,16 +55,31 @@ public:
 	//! Register an index to be removed from a table's index list during FinalizeCommit. Index removal will drop in
 	//! memory index data and also marks all blocks on disk as free blocks allowing for reclamation. Block marking for
 	//! indexes is handled implicitly along destruction paths for index memory.
-	void RemoveIndex(TableIndexList &indexes, Identifier name);
+	void RemoveIndex(shared_ptr<DataTableInfo> info, Identifier name);
+	//! Register a dropped table, whose blocks are collected and freed during FinalizeCommit.
+	void DropTable(shared_ptr<DataTable> table);
+	//! Register the indexes of a dropped table, whose blocks are freed during FinalizeCommit.
+	void DropIndexStorage(TableIndexList &indexes);
+	//! Removes the registered indexes from their tables; a running checkpoint keeps writing kept indexes.
+	void RemoveIndexes(bool keep_for_checkpoint);
 	//! Finalize accumulated block marks and index removals.
 	void FinalizeCommit();
 	//! True if no work has been queued.
 	bool Empty() const;
 
+	//! The commit id of the transaction that dropped the storage
+	transaction_t commit_id = 0;
+
 private:
 	optional_ptr<BlockManager> block_manager;
 	vector<block_id_t> dropped_block_ids;
+	//! Handles to the dropped blocks: the blocks are not reused while a handle exists
+	vector<shared_ptr<BlockHandle>> dropped_blocks;
+	vector<shared_ptr<DataTable>> dropped_tables;
 	vector<PendingIndexRemoval> pending_index_removals;
+	bool indexes_removed = false;
+	bool finalized = false;
+	vector<reference<TableIndexList>> dropped_index_storage;
 };
 
 struct IndexDataRemover {

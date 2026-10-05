@@ -82,6 +82,8 @@ private:
 
 	//! Load a buffer from disk, if not in memory.
 	void LoadFromDisk();
+	//! Hands the on-disk block over to the caller, who frees it: the buffer no longer does.
+	void ReleaseBlock(vector<block_id_t> &block_ids);
 	//! Returns the first free offset in a bitmask
 	uint32_t GetOffset(const idx_t bitmask_count, const idx_t available_segments);
 	//! Sets the allocation size, if dirty
@@ -105,6 +107,8 @@ private:
 	bool vacuum;
 	//! True: has been loaded from disk.
 	bool loaded;
+	//! True: the on-disk block was handed over by ReleaseBlock.
+	bool block_released = false;
 
 	//! Partial block id and offset
 	BlockPointer block_pointer;

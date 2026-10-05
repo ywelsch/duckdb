@@ -633,6 +633,8 @@ void RowGroup::CommitDrop(CommitDropState &drop_state) {
 	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
 		CommitDropColumn(column_idx, drop_state);
 	}
+	// older snapshots can still read the deletes, whose metadata the next checkpoint frees
+	GetVersionInfo();
 }
 
 struct BlockIdDropper : public BlockIdVisitor {

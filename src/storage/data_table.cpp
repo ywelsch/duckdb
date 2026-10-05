@@ -1626,6 +1626,7 @@ idx_t DataTable::GetNextRowId() const {
 
 void DataTable::CommitDropTable(CommitDropState &drop_state) {
 	row_groups->CommitDropTable(drop_state);
+	drop_state.DropIndexStorage(info->GetIndexes());
 }
 
 idx_t DataTable::GetRowGroupCount() const {
