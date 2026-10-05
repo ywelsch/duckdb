@@ -17,7 +17,7 @@ public:
 	static constexpr idx_t INSERT_DATA = 1ULL << 0ULL;
 	static constexpr idx_t DELETE_DATA = 1ULL << 1ULL;
 	static constexpr idx_t UPDATE_DATA = 1ULL << 2ULL;
-	//! An ALTER TABLE that may change table storage: not renames, defaults, DROP NOT NULL or comments
+	//! An ALTER TABLE that may change table storage: not renames, defaults, NOT NULL or comments
 	static constexpr idx_t ALTER_TABLE = 1ULL << 3ULL;
 	//! Creating a table, index or trigger, or replacing a schema: not entries without table storage
 	static constexpr idx_t CREATE_CATALOG_ENTRY = 1ULL << 4ULL;

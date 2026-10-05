@@ -164,6 +164,10 @@ public:
 	void UpdateColumn(TransactionData transaction, DuckTableEntry &table_entry, Vector &row_ids,
 	                  const vector<column_t> &column_path, DataChunk &updates);
 
+	mutex &GetAppendLock() {
+		return append_lock;
+	}
+
 	CollectionCheckpointSnapshot SnapshotForCheckpoint(TableDataWriter &writer) const;
 	CollectionCheckpointResult Checkpoint(TableDataWriter &writer, TableStatistics &global_stats,
 	                                      const CollectionCheckpointSnapshot &snapshot);
@@ -266,6 +270,8 @@ private:
 	vector<LogicalType> types;
 	//! Lock held when accessing or modifying the owned_row_groups pointer
 	mutable mutex row_group_pointer_lock;
+	//! Lock for appending entries, shared by all tables that use this collection
+	mutex append_lock;
 	//! The owning pointer of the segment tree
 	shared_ptr<RowGroupSegmentTree> owned_row_groups;
 	//! Table statistics

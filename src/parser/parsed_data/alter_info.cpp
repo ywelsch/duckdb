@@ -29,6 +29,7 @@ DatabaseModificationType AlterInfo::GetModifications() const {
 	case AlterTableType::RENAME_COLUMN:
 	case AlterTableType::RENAME_TABLE:
 	case AlterTableType::SET_DEFAULT:
+	case AlterTableType::SET_NOT_NULL:
 	case AlterTableType::DROP_NOT_NULL:
 	case AlterTableType::SET_COLUMN_COMMENT:
 		// the new version of the table keeps the storage of the old one

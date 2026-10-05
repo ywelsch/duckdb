@@ -102,7 +102,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	default_executor.AddExpression(default_value);
 
 	// prevent any new tuples from being added to the parent
-	lock_guard<mutex> parent_lock(parent.append_lock);
+	lock_guard<mutex> parent_lock(parent.row_groups->GetAppendLock());
 
 	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
 
@@ -117,7 +117,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	// prevent any new tuples from being added to the parent
 	auto &local_storage = LocalStorage::Get(context, db);
-	lock_guard<mutex> parent_lock(parent.append_lock);
+	lock_guard<mutex> parent_lock(parent.row_groups->GetAppendLock());
 
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
@@ -167,7 +167,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, BoundConstraint 
 	info->BindIndexes(context);
 
 	auto &local_storage = LocalStorage::Get(context, db);
-	lock_guard<mutex> parent_lock(parent.append_lock);
+	lock_guard<mutex> parent_lock(parent.row_groups->GetAppendLock());
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -186,7 +186,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 	auto &transaction = DuckTransaction::Get(context, db);
 	auto &local_storage = LocalStorage::Get(transaction);
 	// prevent any tuples from being added to the parent
-	lock_guard<mutex> parent_lock(parent.append_lock);
+	lock_guard<mutex> parent_lock(parent.row_groups->GetAppendLock());
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -1051,7 +1051,7 @@ void DataTable::LocalAppend(DuckTableEntry &table, ClientContext &context, Colum
 }
 
 void DataTable::AppendLock(DuckTransaction &transaction, TableAppendState &state) {
-	state.append_lock = unique_lock<mutex>(append_lock);
+	state.append_lock = unique_lock<mutex>(row_groups->GetAppendLock());
 	if (!IsMainTable()) {
 		throw TransactionException("Transaction conflict: attempting to insert into table \"%s\" but it has been %s by "
 		                           "a different transaction",
@@ -1208,7 +1208,7 @@ void DataTable::WriteToLog(DuckTransaction &transaction, WriteAheadLog &log, idx
 }
 
 void DataTable::CommitAppend(transaction_t commit_id, idx_t row_start, idx_t count) {
-	lock_guard<mutex> lock(append_lock);
+	lock_guard<mutex> lock(row_groups->GetAppendLock());
 	row_groups->CommitAppend(commit_id, row_start, count);
 }
 
@@ -1219,7 +1219,7 @@ void DataTable::RevertAppendInternal(idx_t start_row) {
 }
 
 void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_t count) {
-	lock_guard<mutex> lock(append_lock);
+	lock_guard<mutex> lock(row_groups->GetAppendLock());
 
 	// revert any appends to indexes
 	if (!info->indexes.Empty()) {
@@ -1576,13 +1576,13 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	TableStatistics global_stats;
 	CollectionCheckpointSnapshot snapshot;
 	{
-		lock_guard<mutex> lock(append_lock);
+		lock_guard<mutex> lock(row_groups->GetAppendLock());
 		snapshot = row_groups->SnapshotForCheckpoint(writer);
 	}
 	// checkpoint each individual row group
 	auto result = row_groups->Checkpoint(writer, global_stats, snapshot);
 	{
-		lock_guard<mutex> lock(append_lock);
+		lock_guard<mutex> lock(row_groups->GetAppendLock());
 		row_groups->InstallCheckpoint(std::move(result), global_stats);
 		row_groups->SetRowGroupAppendMode(RowGroupAppendMode::SUGGEST_NEW);
 	}

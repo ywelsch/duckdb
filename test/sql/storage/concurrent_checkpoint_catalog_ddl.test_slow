@@ -351,6 +351,21 @@ statement ok con1
 BEGIN TRANSACTION
 
 statement ok con1
+ALTER TABLE u ALTER COLUMN i SET NOT NULL
+
+statement ok
+INSERT INTO t2 VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
 DROP VIEW v_new
 
 statement ok
@@ -467,24 +482,6 @@ BEGIN TRANSACTION
 
 statement ok con1
 ALTER TABLE u ALTER i TYPE BIGINT
-
-statement ok
-INSERT INTO t2 VALUES (1, 1)
-
-statement error
-CHECKPOINT
-----
-Cannot CHECKPOINT
-
-statement ok con1
-ROLLBACK
-
-# SET NOT NULL builds new table storage that shares the row groups of the old one
-statement ok con1
-BEGIN TRANSACTION
-
-statement ok con1
-ALTER TABLE u ALTER COLUMN i SET NOT NULL
 
 statement ok
 INSERT INTO t2 VALUES (1, 1)
