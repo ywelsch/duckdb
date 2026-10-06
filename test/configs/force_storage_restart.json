@@ -56,6 +56,12 @@
       ]
     },
     {
+      "reason": "Test checks which blocks stay loaded between statements",
+      "paths": [
+        "test/sql/storage/test_persistent_block_memory_tags.test"
+      ]
+    },
+    {
       "reason": "In-memory ART assertions incompatible with force_restart.",
       "paths": [
         "test/sql/transactions/concurrent_drop_table.test"

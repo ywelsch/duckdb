@@ -21,7 +21,7 @@ shared_ptr<BlockHandle> UncompressedStringSegmentState::GetHandle(BlockManager &
 		return entry->second;
 	}
 	auto &manager = block_manager ? *block_manager : manager_p;
-	auto result = manager.RegisterBlock(block_id);
+	auto result = manager.RegisterBlock(block_id, MemoryTag::OVERFLOW_STRINGS);
 	handles.insert(make_pair(block_id, result));
 	return result;
 }
@@ -34,7 +34,7 @@ void UncompressedStringSegmentState::RegisterBlock(BlockManager &manager_p, bloc
 		                        block_id);
 	}
 	auto &manager = block_manager ? *block_manager : manager_p;
-	auto result = manager.RegisterBlock(block_id);
+	auto result = manager.RegisterBlock(block_id, MemoryTag::OVERFLOW_STRINGS);
 	handles.insert(make_pair(block_id, std::move(result)));
 	on_disk_blocks.push_back(block_id);
 }
