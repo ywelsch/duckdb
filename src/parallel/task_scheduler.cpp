@@ -38,7 +38,11 @@ struct SchedulerThread {
 };
 
 #ifndef DUCKDB_NO_THREADS
-typedef duckdb_moodycamel::ConcurrentQueue<shared_ptr<Task>> concurrent_queue_t;
+struct TaskQueueTraits : public duckdb_moodycamel::ConcurrentQueueDefaultTraits {
+	//! Consumers move on to the next producer after this many tasks (default: 256)
+	static constexpr uint32_t EXPLICIT_CONSUMER_CONSUMPTION_QUOTA_BEFORE_ROTATE = 16;
+};
+typedef duckdb_moodycamel::ConcurrentQueue<shared_ptr<Task>, TaskQueueTraits> concurrent_queue_t;
 typedef duckdb_moodycamel::LightweightSemaphore lightweight_semaphore_t;
 
 struct ConcurrentQueue {
@@ -50,7 +54,7 @@ struct ConcurrentQueue {
 	void Enqueue(ProducerToken &token, shared_ptr<Task> task);
 	void EnqueueBulk(ProducerToken &token, vector<shared_ptr<Task>> &tasks);
 	bool DequeueFromProducer(ProducerToken &token, shared_ptr<Task> &task);
-	bool Dequeue(shared_ptr<Task> &task);
+	bool Dequeue(duckdb_moodycamel::ConsumerToken &token, shared_ptr<Task> &task);
 	idx_t GetTasksInQueue() const;
 	idx_t GetApproxSize() const;
 	idx_t GetProducerCount() const;
@@ -105,8 +109,8 @@ bool ConcurrentQueue::DequeueFromProducer(ProducerToken &token, shared_ptr<Task>
 	return true;
 }
 
-bool ConcurrentQueue::Dequeue(shared_ptr<Task> &task) {
-	if (!q.try_dequeue(task)) {
+bool ConcurrentQueue::Dequeue(duckdb_moodycamel::ConsumerToken &token, shared_ptr<Task> &task) {
+	if (!q.try_dequeue(token, task)) {
 		return false;
 	}
 	--tasks_in_queue;
@@ -136,7 +140,6 @@ struct ConcurrentQueue {
 	void Enqueue(ProducerToken &token, shared_ptr<Task> task);
 	void EnqueueBulk(ProducerToken &token, vector<shared_ptr<Task>> &tasks);
 	bool DequeueFromProducer(ProducerToken &token, shared_ptr<Task> &task);
-	bool Dequeue(shared_ptr<Task> &task);
 	idx_t GetTasksInQueue() const;
 	idx_t GetApproxSize() const;
 	idx_t GetProducerCount() const;
@@ -170,10 +173,6 @@ bool ConcurrentQueue::DequeueFromProducer(ProducerToken &token, shared_ptr<Task>
 	it->second.pop();
 
 	return true;
-}
-
-bool ConcurrentQueue::Dequeue(shared_ptr<Task> &task) {
-	throw InternalException("Global dequeue not supported for no threads queue");
 }
 
 idx_t ConcurrentQueue::GetTasksInQueue() const {
@@ -274,6 +273,7 @@ void TaskScheduler::ExecuteForever(atomic<bool> *marker) {
 
 	const auto &block_allocator = BlockAllocator::Get(db);
 	const auto &config = DBConfig::GetConfig(db);
+	duckdb_moodycamel::ConsumerToken consumer(queue->GetQueue());
 
 	shared_ptr<Task> task;
 	// loop until the marker is set to false
@@ -299,7 +299,7 @@ void TaskScheduler::ExecuteForever(atomic<bool> *marker) {
 				}
 			}
 		}
-		if (queue->Dequeue(task)) {
+		if (queue->Dequeue(consumer, task)) {
 			auto process_mode = TaskExecutionMode::PROCESS_ALL;
 			if (Settings::Get<SchedulerProcessPartialSetting>(config)) {
 				process_mode = TaskExecutionMode::PROCESS_PARTIAL;
@@ -339,11 +339,12 @@ void TaskScheduler::ExecuteForever(atomic<bool> *marker) {
 
 idx_t TaskScheduler::ExecuteTasks(atomic<bool> *marker, idx_t max_tasks) {
 #ifndef DUCKDB_NO_THREADS
+	duckdb_moodycamel::ConsumerToken consumer(queue->GetQueue());
 	idx_t completed_tasks = 0;
 	// loop until the marker is set to false
 	while (*marker && completed_tasks < max_tasks) {
 		shared_ptr<Task> task;
-		if (!queue->Dequeue(task)) {
+		if (!queue->Dequeue(consumer, task)) {
 			return completed_tasks;
 		}
 		auto execute_result = task->Execute(TaskExecutionMode::PROCESS_ALL);
@@ -370,10 +371,11 @@ idx_t TaskScheduler::ExecuteTasks(atomic<bool> *marker, idx_t max_tasks) {
 
 void TaskScheduler::ExecuteTasks(idx_t max_tasks) {
 #ifndef DUCKDB_NO_THREADS
+	duckdb_moodycamel::ConsumerToken consumer(queue->GetQueue());
 	shared_ptr<Task> task;
 	for (idx_t i = 0; i < max_tasks; i++) {
 		queue->semaphore.wait(TASK_TIMEOUT_USECS);
-		if (!queue->Dequeue(task)) {
+		if (!queue->Dequeue(consumer, task)) {
 			return;
 		}
 		try {
