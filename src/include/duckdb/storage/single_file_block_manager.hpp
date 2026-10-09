@@ -222,6 +222,8 @@ private:
 	set<block_id_t> free_blocks_in_use;
 	//! Blocks in use that no written header includes yet, by commit id (MAX_TRANSACTION_ID while uncommitted)
 	unordered_map<block_id_t, transaction_t> newly_used_blocks;
+	//! Blocks added to the free list outside of a release of freed blocks, which the next release trims
+	set<block_id_t> free_blocks_to_trim;
 	//! The list of multi-use blocks (i.e. blocks that have >1 reference in the file)
 	//! When a multi-use block is marked as modified, the reference count is decreased by 1 instead of directly
 	//! Appending the block to the modified_blocks list
