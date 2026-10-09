@@ -39,28 +39,81 @@ void CommitDropState::DropBlock(block_id_t block_id) {
 	dropped_block_ids.push_back(block_id);
 }
 
-void CommitDropState::RemoveIndex(TableIndexList &indexes, Identifier name) {
-	pending_index_removals.push_back(PendingIndexRemoval {indexes, std::move(name)});
+void CommitDropState::DropIndex(shared_ptr<DataTableInfo> info, Identifier name) {
+	pending_index_removals.push_back(PendingIndexRemoval {std::move(info), std::move(name), nullptr});
 }
 
-void CommitDropState::FinalizeCommit() {
+void CommitDropState::DropTable(shared_ptr<DataTable> table) {
+	dropped_tables.push_back(std::move(table));
+}
+
+void CommitDropState::DropColumn(shared_ptr<DataTable> table, idx_t column_index) {
+	dropped_columns.emplace_back(std::move(table), column_index);
+}
+
+void CommitDropState::DetachIndexes() {
+	for (auto &removal : pending_index_removals) {
+		removal.detached_entry = removal.info->GetIndexes().DetachIndex(removal.name);
+	}
+}
+
+struct DroppedBlockVisitor : public BlockIdVisitor {
+	explicit DroppedBlockVisitor(BlockManager &block_manager) : block_manager(block_manager) {
+	}
+
+	void Visit(block_id_t block_id) override {
+		block_manager.MarkBlockAsDropped(block_id);
+	}
+
+	BlockManager &block_manager;
+};
+
+void CommitDropState::ExcludeFromCheckpoints() {
+	if (excluded_from_checkpoints) {
+		return;
+	}
+	excluded_from_checkpoints = true;
+	// nothing uses the detached indexes any more
+	for (auto &removal : pending_index_removals) {
+		if (removal.detached_entry) {
+			removal.info->GetIndexes().RemoveDetachedIndex(*removal.detached_entry);
+		}
+	}
+	pending_index_removals.clear();
+	// collected now: a checkpoint that wrote the table frees the blocks it replaced itself
+	for (auto &table : dropped_tables) {
+		table->CommitDropTable(*this);
+	}
+	for (auto &column : dropped_columns) {
+		column.first->CommitDropColumn(column.second, *this);
+	}
+	if (!block_manager) {
+		return;
+	}
+	for (auto block_id : dropped_block_ids) {
+		block_manager->MarkBlockAsDropped(block_id);
+	}
+	// the indexes stay usable for older snapshots, and free their blocks when they are destroyed
+	DroppedBlockVisitor visitor(*block_manager);
+	for (auto &table : dropped_tables) {
+		table->GetDataTableInfo()->GetIndexes().VisitBlockIds(visitor);
+	}
+}
+
+void CommitDropState::Free() {
+	ExcludeFromCheckpoints();
 	if (block_manager) {
 		for (auto block_id : dropped_block_ids) {
-			block_manager->MarkBlockAsModified(block_id);
+			block_manager->MarkDroppedBlockAsModified(block_id);
 		}
 	}
 	// assert that !block_manager -> dropped_block_ids.empty()
 	D_ASSERT(block_manager || dropped_block_ids.empty());
-
-	for (auto &removal : pending_index_removals) {
-		removal.indexes.get().RemoveIndex(removal.name);
-	}
 	dropped_block_ids.clear();
-	pending_index_removals.clear();
 }
 
 bool CommitDropState::Empty() const {
-	return dropped_block_ids.empty() && pending_index_removals.empty();
+	return dropped_tables.empty() && dropped_columns.empty() && pending_index_removals.empty();
 }
 
 //===--------------------------------------------------------------------===//

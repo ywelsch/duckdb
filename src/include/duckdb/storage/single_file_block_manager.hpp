@@ -100,6 +100,8 @@ public:
 	void MarkBlockAsUsed(block_id_t block_id) override;
 	//! Mark a block as modified (re-writeable after a checkpoint)
 	void MarkBlockAsModified(block_id_t block_id) override;
+	void MarkBlockAsDropped(block_id_t block_id) override;
+	void MarkDroppedBlockAsModified(block_id_t block_id) override;
 	//! Increase the reference count of a block. The block should hold at least one reference
 	void IncreaseBlockReferenceCount(block_id_t block_id) override;
 	//! UnregisterBlock, only accepts non-temporary block ids
@@ -191,6 +193,9 @@ private:
 	void TrimFreeBlockRange(block_id_t start, block_id_t end);
 
 	void IncreaseBlockReferenceCountInternal(block_id_t block_id);
+	void MarkBlockAsModifiedInternal(unique_lock<mutex> &lock, block_id_t block_id);
+	//! The number of uses of a block in use, while the lock is held
+	idx_t UseCount(block_id_t block_id) const;
 
 	//! Verify the block usage count
 	void VerifyBlocks(const unordered_map<block_id_t, idx_t> &block_usage_count) override;
@@ -229,6 +234,8 @@ private:
 	unordered_set<block_id_t> awaiting_reader_blocks;
 	//! Whether blocks_awaiting_readers is non-empty, readable without the lock
 	atomic<bool> has_blocks_awaiting_readers {false};
+	//! The uses of blocks that are free on disk, but still in use: storage a checkpoint no longer writes
+	unordered_map<block_id_t, idx_t> free_on_disk_blocks;
 	//! The current meta block id
 	idx_t meta_block;
 	//! The current maximum block id, this id will be given away first after the free_list runs out
