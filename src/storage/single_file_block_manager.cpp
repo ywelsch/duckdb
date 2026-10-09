@@ -971,6 +971,38 @@ void SingleFileBlockManager::MarkBlockAsUsed(block_id_t block_id) {
 
 void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 	unique_lock<mutex> lock(single_file_block_lock);
+	MarkBlockAsModifiedInternal(lock, block_id);
+}
+
+void SingleFileBlockManager::MarkBlockAsDropped(block_id_t block_id) {
+	lock_guard<mutex> lock(single_file_block_lock);
+	D_ASSERT(block_id >= 0);
+	D_ASSERT(block_id < max_block);
+	// only a block in use can be free on disk only
+	D_ASSERT(free_list.find(block_id) == free_list.end());
+	D_ASSERT(modified_blocks.find(block_id) == modified_blocks.end());
+	free_on_disk_blocks[block_id]++;
+	// a use is marked as dropped at most once
+	D_ASSERT(free_on_disk_blocks[block_id] <= UseCount(block_id));
+}
+
+idx_t SingleFileBlockManager::UseCount(block_id_t block_id) const {
+	auto entry = multi_use_blocks.find(block_id);
+	return entry == multi_use_blocks.end() ? 1 : entry->second;
+}
+
+void SingleFileBlockManager::MarkDroppedBlockAsModified(block_id_t block_id) {
+	unique_lock<mutex> lock(single_file_block_lock);
+	auto entry = free_on_disk_blocks.find(block_id);
+	// marked as dropped, unless a header already listed it as free and it became a newly used block
+	D_ASSERT(entry != free_on_disk_blocks.end() || newly_used_blocks.find(block_id) != newly_used_blocks.end());
+	if (entry != free_on_disk_blocks.end() && --entry->second == 0) {
+		free_on_disk_blocks.erase(entry);
+	}
+	MarkBlockAsModifiedInternal(lock, block_id);
+}
+
+void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &lock, block_id_t block_id) {
 	D_ASSERT(block_id >= 0);
 	D_ASSERT(block_id < max_block);
 
@@ -993,6 +1025,8 @@ void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 	if (free_list.find(block_id) != free_list.end()) {
 		throw InternalException("MarkBlockAsModified called with already freed block id %d", block_id);
 	}
+	// the last use of the block is freed, so none of its uses is free on disk only
+	free_on_disk_blocks.erase(block_id);
 	auto newly_used_entry = newly_used_blocks.find(block_id);
 	if (newly_used_entry != newly_used_blocks.end()) {
 		// this block was newly used - and now we are labeling it as no longer being required
@@ -1032,17 +1066,20 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 			                        max_block);
 		}
 		referenced_blocks.insert(block.first);
-		if (block.second > 1) {
+		// uses that are free on disk are still counted in multi_use_blocks
+		auto free_on_disk = free_on_disk_blocks.find(block.first);
+		idx_t uses = block.second + (free_on_disk == free_on_disk_blocks.end() ? 0 : free_on_disk->second);
+		if (uses > 1) {
 			// multi-use block
 			auto entry = multi_use_blocks.find(block.first);
 			if (entry == multi_use_blocks.end()) {
 				throw InternalException("Block %lld was used %llu times, but not present in multi_use_blocks",
-				                        block.first, block.second);
+				                        block.first, uses);
 			}
-			if (entry->second != block.second) {
+			if (entry->second != uses) {
 				throw InternalException(
 				    "Block %lld was used %llu times, but multi_use_blocks says it is used %llu times", block.first,
-				    block.second, entry->second);
+				    uses, entry->second);
 			}
 		} else {
 			D_ASSERT(block.second > 0);
@@ -1054,6 +1091,14 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 	}
 	for (auto &newly_used_block : newly_used_blocks) {
 		referenced_blocks.insert(newly_used_block);
+	}
+	for (auto &free_on_disk : free_on_disk_blocks) {
+		auto block_id = free_on_disk.first;
+		if (free_list.find(block_id) != free_list.end() || modified_blocks.find(block_id) != modified_blocks.end() ||
+		    free_blocks_in_use.find(block_id) != free_blocks_in_use.end()) {
+			throw InternalException("Block %lld is marked as dropped, but it is free", block_id);
+		}
+		referenced_blocks.insert(block_id);
 	}
 	for (auto &free_block : free_list) {
 		referenced_blocks.insert(free_block);
@@ -1264,8 +1309,8 @@ vector<MetadataHandle> SingleFileBlockManager::GetFreeListBlocks() {
 		idx_t multi_use_blocks_count;
 		{
 			lock_guard<mutex> guard(single_file_block_lock);
-			free_list_count =
-			    free_list.size() + modified_blocks.size() + free_blocks_in_use.size() + newly_used_blocks.size();
+			free_list_count = free_list.size() + modified_blocks.size() + free_blocks_in_use.size() +
+			                  newly_used_blocks.size() + free_on_disk_blocks.size();
 			multi_use_blocks_count = multi_use_blocks.size();
 		}
 		auto free_list_size = sizeof(uint64_t) + sizeof(block_id_t) * free_list_count;
@@ -1309,6 +1354,8 @@ bool SingleFileBlockManager::AddFreeBlock(unique_lock<mutex> &lock, block_id_t b
 	if (!lock.owns_lock()) {
 		throw InternalException("AddFreeBlock must be called while holding the lock");
 	}
+	// a free block has no uses left that are marked as dropped
+	D_ASSERT(free_on_disk_blocks.find(block_id) == free_on_disk_blocks.end());
 	shared_ptr<BlockHandle> block = TryGetBlock(block_id);
 	if (!block) {
 		// the block does not exist
@@ -1347,6 +1394,23 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	for (auto &newly_used_block : newly_used_blocks) {
 		all_free_blocks.insert(newly_used_block);
 		written_multi_use_blocks.erase(newly_used_block);
+	}
+	// uses that are free on disk belong to storage that this checkpoint no longer writes
+	set<block_id_t> written_free_on_disk;
+	for (auto &free_on_disk : free_on_disk_blocks) {
+		auto block_id = free_on_disk.first;
+		auto multi_use_entry = written_multi_use_blocks.find(block_id);
+		idx_t uses = multi_use_entry == written_multi_use_blocks.end() ? 1 : multi_use_entry->second;
+		if (free_on_disk.second >= uses) {
+			// every use is free on disk
+			all_free_blocks.insert(block_id);
+			written_free_on_disk.insert(block_id);
+			written_multi_use_blocks.erase(block_id);
+		} else if (uses - free_on_disk.second == 1) {
+			written_multi_use_blocks.erase(multi_use_entry);
+		} else {
+			multi_use_entry->second = NumericCast<uint32_t>(uses - free_on_disk.second);
+		}
 	}
 
 	if (!free_list_blocks.empty()) {
@@ -1423,6 +1487,12 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 			modified_blocks.erase(block);
 			if (AddFreeBlock(release_lock, block)) {
 				fully_freed_blocks.insert(block);
+			}
+		}
+		// the header lists these as free: like newly used blocks, they can be reused once their last use is freed
+		for (auto &block : written_free_on_disk) {
+			if (free_on_disk_blocks.erase(block)) {
+				newly_used_blocks.insert(block);
 			}
 		}
 	}

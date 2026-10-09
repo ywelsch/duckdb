@@ -17,6 +17,7 @@
 
 namespace duckdb {
 
+struct BlockIdVisitor;
 class ConflictManager;
 class ConflictInfo;
 class IndexEntry;
@@ -51,6 +52,8 @@ public:
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
 	//! Adds an index entry to the list of index entries, and returns it.
 	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, ConstraintCheckMode check_mode);
+	//! Visits the on-disk blocks of every index, once per use
+	void VisitBlockIds(BlockIdVisitor &visitor);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.
@@ -69,6 +72,10 @@ public:
 	                       optional_idx active_checkpoint = optional_idx());
 	//! Removes an index entry from the list of index entries and release any storage the index owns.
 	void RemoveIndex(const Identifier &name);
+	//! Removes an index entry without releasing it: checkpoints still write it until RemoveDetachedIndex
+	shared_ptr<IndexEntry> DetachIndex(const Identifier &name);
+	//! Removes an index entry detached by DetachIndex and releases any storage the index owns.
+	void RemoveDetachedIndex(const IndexEntry &entry);
 	//! Returns true, if the index name does not exist.
 	bool NameIsUnique(const string &name) const;
 	//! Returns true if an index with the given name exists.
@@ -151,6 +158,9 @@ public:
 	                                vector<StorageIndex> &mapped_column_ids);
 
 private:
+	//! Removes an index entry from the list of index entries, and returns it.
+	shared_ptr<IndexEntry> ExtractIndex(const Identifier &name) DUCKDB_REQUIRES(index_entries_lock);
+
 	template <class>
 	friend class TableIndexIterationHelper;
 
@@ -160,6 +170,8 @@ private:
 	vector<shared_ptr<IndexEntry>> index_entries DUCKDB_GUARDED_BY(index_entries_lock);
 	//! Contains the number of unbound indexes.
 	idx_t unbound_count DUCKDB_GUARDED_BY(index_entries_lock) = 0;
+	//! Index entries detached by a commit, which checkpoints with an earlier bound still write
+	vector<shared_ptr<IndexEntry>> detached_index_entries DUCKDB_GUARDED_BY(index_entries_lock);
 };
 
 template <class T>
