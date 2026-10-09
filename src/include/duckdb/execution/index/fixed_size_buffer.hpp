@@ -87,8 +87,6 @@ private:
 	uint32_t AllocateSegment(const idx_t bitmask_count, const idx_t available_segments);
 	//! Frees the slot at the given offset in the current buffer.
 	void FreeSegment(const idx_t offset, const idx_t available_segments);
-	//! Hands the on-disk block over to the caller, who frees it: the buffer no longer does.
-	void ReleaseBlock(vector<block_id_t> &block_ids);
 	//! Sets the allocation size, if dirty
 	void SetAllocationSize(const idx_t available_segments, const idx_t segment_size, const idx_t bitmask_offset);
 
@@ -110,8 +108,6 @@ private:
 	bool vacuum;
 	//! True: has been loaded from disk.
 	bool loaded;
-	//! True: the on-disk block was handed over by ReleaseBlock.
-	bool block_released = false;
 
 	//! Partial block id and offset
 	BlockPointer block_pointer;

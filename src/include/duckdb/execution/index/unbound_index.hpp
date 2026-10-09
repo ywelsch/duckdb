@@ -86,8 +86,6 @@ public:
 
 public:
 	void ResetStorage() override;
-	//! Hands the on-disk blocks of the index over to the caller, who frees them.
-	void ReleaseStorageBlocks(vector<block_id_t> &block_ids);
 
 	bool IsBound() const override {
 		return false;

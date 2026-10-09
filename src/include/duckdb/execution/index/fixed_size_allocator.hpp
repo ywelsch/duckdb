@@ -148,8 +148,6 @@ public:
 	FixedSizeAllocatorInfo GetInfo() const;
 	//! Serializes all in-memory buffers
 	void SerializeBuffers(PartialBlockManager &partial_block_manager);
-	//! Hands the on-disk blocks of the buffers over to the caller, who frees them.
-	void ReleaseBlocks(vector<block_id_t> &block_ids);
 	//! Sets the allocation sizes and returns data to serialize each buffer
 	vector<IndexBufferInfo> InitSerializationToWAL();
 	//! Initialize a fixed-size allocator from allocator storage information

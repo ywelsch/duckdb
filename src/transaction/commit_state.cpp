@@ -36,12 +36,7 @@ CommitDropState::CommitDropState(optional_ptr<BlockManager> block_manager) : blo
 }
 
 void CommitDropState::DropBlock(block_id_t block_id) {
-	D_ASSERT(block_manager);
-	if (!block_manager) {
-		return;
-	}
-	dropped_blocks.push_back(block_manager->RegisterBlock(block_id));
-	block_manager->MarkBlockAsModified(block_id);
+	dropped_block_ids.push_back(block_id);
 }
 
 void CommitDropState::RemoveIndex(shared_ptr<DataTableInfo> info, Identifier name) {
@@ -62,13 +57,17 @@ void CommitDropState::DetachIndexes() {
 	}
 }
 
-void CommitDropState::FinalizeCommit() {
+void CommitDropState::RetireIndexes() {
 	for (auto &removal : pending_index_removals) {
 		if (removal.removed_entry) {
 			removal.info->GetIndexes().ReleaseKeptIndex(*removal.removed_entry);
 			removal.removed_entry->Retire();
 		}
 	}
+	pending_index_removals.clear();
+}
+
+void CommitDropState::CollectBlocks() {
 	// collected now: a checkpoint that wrote the table frees the blocks it replaced itself
 	for (auto &table : dropped_tables) {
 		table->CommitDropTable(*this);
@@ -76,6 +75,48 @@ void CommitDropState::FinalizeCommit() {
 	for (auto &column : dropped_columns) {
 		column.first->CommitDropColumn(column.second, *this);
 	}
+}
+
+void CommitDropState::FreeOnDisk() {
+	if (freed_on_disk) {
+		return;
+	}
+	freed_on_disk = true;
+	RetireIndexes();
+	CollectBlocks();
+	if (!block_manager) {
+		return;
+	}
+	for (auto block_id : dropped_block_ids) {
+		block_manager->MarkBlockAsFreeOnDisk(block_id);
+	}
+	for (auto &table : dropped_tables) {
+		// the indexes stay usable for older snapshots, and free their blocks when they are destroyed
+		vector<block_id_t> index_blocks;
+		table->GetDataTableInfo()->GetIndexes().GetStorageBlocks(index_blocks);
+		for (auto block_id : index_blocks) {
+			block_manager->MarkBlockAsFreeOnDisk(block_id);
+		}
+	}
+}
+
+void CommitDropState::FinalizeCommit() {
+	RetireIndexes();
+	if (!freed_on_disk) {
+		CollectBlocks();
+	}
+	if (block_manager) {
+		for (auto block_id : dropped_block_ids) {
+			if (freed_on_disk) {
+				block_manager->MarkFreeOnDiskBlockAsModified(block_id);
+			} else {
+				block_manager->MarkBlockAsModified(block_id);
+			}
+		}
+	}
+	// assert that !block_manager -> dropped_block_ids.empty()
+	D_ASSERT(block_manager || dropped_block_ids.empty());
+	dropped_block_ids.clear();
 }
 
 bool CommitDropState::Empty() const {

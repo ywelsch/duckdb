@@ -123,8 +123,8 @@ private:
 	unique_ptr<StorageLockKey> checkpoint_lock;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
-	//! The storage this transaction dropped, freed when it is cleaned up or by a later checkpoint. The transaction
-	//! manager references it until then.
+	//! The storage this transaction dropped, freed when it is cleaned up, and before on disk by a checkpoint past the
+	//! commit. The transaction manager references it until then.
 	unique_ptr<CommitDropState> dropped_storage;
 	//! Lock for accessing sequence_usage
 	mutex sequence_lock;

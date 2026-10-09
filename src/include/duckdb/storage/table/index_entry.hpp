@@ -137,8 +137,8 @@ public:
 	string GetIndexType() const;
 	//! Destroys the physical index.
 	void Retire();
-	//! Hands the on-disk blocks of the index over to the caller, who frees them; the index stays usable.
-	void ReleaseStorageBlocks(vector<block_id_t> &block_ids);
+	//! Adds the on-disk blocks of the physical index, once per use
+	void GetStorageBlocks(vector<block_id_t> &block_ids);
 	//! Binds the unbound physical index without replacing it.
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types);
 	//! Replaces the unbound physical index with its bound representation.
@@ -211,8 +211,6 @@ private:
 	//! Whether the enforced constraint is deferred. Derived from the catalog constraint, not serialized.
 	const ConstraintCheckMode check_mode;
 	IndexDeltas deltas;
-	//! Whether the on-disk blocks were handed over, also those of an index bound later
-	bool storage_released = false;
 };
 
 template <class TARGET>

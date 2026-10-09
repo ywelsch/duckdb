@@ -54,20 +54,6 @@ void UnboundIndex::ResetStorage() {
 	}
 }
 
-void UnboundIndex::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
-	if (storage_reclaimed) {
-		return;
-	}
-	storage_reclaimed = true;
-	for (auto &info : storage_info.allocator_infos) {
-		for (auto &block : info.block_pointers) {
-			if (block.IsValid()) {
-				block_ids.push_back(block.block_id);
-			}
-		}
-	}
-}
-
 IndexStorageInfo UnboundIndex::CopyStorageInfo() const {
 	IndexStorageInfo result(storage_info.name);
 	result.root = storage_info.root;

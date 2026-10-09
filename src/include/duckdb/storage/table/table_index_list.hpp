@@ -51,8 +51,8 @@ public:
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
 	//! Adds an index entry to the list of index entries, and returns it.
 	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, ConstraintCheckMode check_mode);
-	//! Hands the on-disk blocks of every index over to the caller, who frees them; the indexes stay usable.
-	void ReleaseStorageBlocks(vector<block_id_t> &block_ids);
+	//! Adds the on-disk blocks of every index, once per use
+	void GetStorageBlocks(vector<block_id_t> &block_ids);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.

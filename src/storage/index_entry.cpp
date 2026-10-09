@@ -345,31 +345,31 @@ void IndexEntry::Retire() {
 	bind_state = IndexBindState::RETIRED;
 }
 
+void IndexEntry::GetStorageBlocks(vector<block_id_t> &block_ids) {
+	auto entry_lock = lock.GetSharedLock();
+	if (!owned_index) {
+		return;
+	}
+	if (owned_index->IsBound()) {
+		owned_index->Cast<BoundIndex>().GetStorageBlocks(block_ids);
+		return;
+	}
+	for (auto &info : owned_index->Cast<UnboundIndex>().GetStorageInfo().allocator_infos) {
+		for (auto &block_pointer : info.block_pointers) {
+			if (block_pointer.IsValid()) {
+				block_ids.push_back(block_pointer.block_id);
+			}
+		}
+	}
+}
+
 unique_ptr<BoundIndex> IndexEntry::Bind(IndexBinder &binder, const vector<LogicalType> &table_types) {
 	auto entry_lock = lock.GetExclusiveLock();
 	return owned_index->Cast<UnboundIndex>().Bind(binder, table_types);
 }
 
-void IndexEntry::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
-	auto entry_lock = lock.GetExclusiveLock();
-	storage_released = true;
-	if (!owned_index) {
-		return;
-	}
-	if (owned_index->IsBound()) {
-		owned_index->Cast<BoundIndex>().ReleaseStorageBlocks(block_ids);
-	} else {
-		owned_index->Cast<UnboundIndex>().ReleaseStorageBlocks(block_ids);
-	}
-}
-
 void IndexEntry::CommitBind(unique_ptr<BoundIndex> bound_index) {
 	auto entry_lock = lock.GetExclusiveLock();
-	if (storage_released) {
-		// the blocks were handed over while the index was unbound
-		vector<block_id_t> released_blocks;
-		bound_index->ReleaseStorageBlocks(released_blocks);
-	}
 	owned_index = std::move(bound_index);
 	bind_state = IndexBindState::BOUND;
 }

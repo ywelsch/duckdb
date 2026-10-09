@@ -680,10 +680,14 @@ void ART::ResetStorage(IndexLock &index_lock) {
 	root_ptr.Clear();
 }
 
-void ART::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
+void ART::GetStorageBlocks(vector<block_id_t> &block_ids) {
 	IndexLock index_lock(*this);
 	for (auto &allocator : *allocators) {
-		allocator->ReleaseBlocks(block_ids);
+		for (auto &block_pointer : allocator->GetInfo().block_pointers) {
+			if (block_pointer.IsValid()) {
+				block_ids.push_back(block_pointer.block_id);
+			}
+		}
 	}
 }
 

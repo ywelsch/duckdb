@@ -72,8 +72,9 @@ public:
 	//! Detaches the indexes a commit dropped. Its storage is freed when the transaction is cleaned up, or earlier by a
 	//! checkpoint whose bound is past the commit
 	void DropStorage(CommitDropState &drop_state);
-	//! Frees the storage dropped by commits below the bound: of a starting checkpoint, which does not write it, or of
-	//! the cleanup, after which no snapshot reads it
+	//! Frees the storage dropped by commits below the bound of a starting checkpoint on disk, as it does not write it
+	void FreeDroppedStorageOnDisk(VisibilityBound visibility_bound);
+	//! Frees the storage dropped by commits below the bound of a cleanup, after which no snapshot reads it
 	void FreeDroppedStorage(VisibilityBound visibility_bound);
 
 	bool IsDuckTransactionManager() override {

@@ -126,6 +126,15 @@ void DuckTransactionManager::DropStorage(CommitDropState &drop_state) {
 	dropped_storage.push_back(drop_state);
 }
 
+void DuckTransactionManager::FreeDroppedStorageOnDisk(VisibilityBound visibility_bound) {
+	lock_guard<mutex> guard(dropped_storage_lock);
+	for (auto &drop_state : dropped_storage) {
+		if (drop_state.get().commit_id < visibility_bound) {
+			drop_state.get().FreeOnDisk();
+		}
+	}
+}
+
 void DuckTransactionManager::FreeDroppedStorage(VisibilityBound visibility_bound) {
 	lock_guard<mutex> guard(dropped_storage_lock);
 	for (idx_t i = 0; i < dropped_storage.size();) {
@@ -134,7 +143,6 @@ void DuckTransactionManager::FreeDroppedStorage(VisibilityBound visibility_bound
 			i++;
 			continue;
 		}
-		// older snapshots can still read the storage: the dropping transaction keeps its blocks from reuse
 		drop_state.FinalizeCommit();
 		dropped_storage.erase_at(i);
 	}

@@ -17,7 +17,6 @@
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
-class BlockHandle;
 class BlockManager;
 class CatalogEntry;
 class TableIndexList;
@@ -50,7 +49,7 @@ public:
 	explicit CommitDropState(optional_ptr<BlockManager> block_manager);
 
 public:
-	//! Marks an on-disk block as modified. The block is not reused while this state exists.
+	//! Register an on-disk block to mark as modified during FinalizeCommit.
 	void DropBlock(block_id_t block_id);
 	//! Register an index to be removed from a table's index list by DetachIndexes. FinalizeCommit drops the in memory
 	//! index data, which marks its blocks on disk as free.
@@ -61,6 +60,9 @@ public:
 	void DropColumn(shared_ptr<DataTable> table, idx_t column_index);
 	//! Removes the registered indexes from their tables, which keep them for checkpoints until FinalizeCommit.
 	void DetachIndexes();
+	//! Frees the registered tables and columns on disk: checkpoint headers list their blocks as free, while they stay
+	//! in use until FinalizeCommit. Destroys the registered indexes.
+	void FreeOnDisk();
 	//! Frees the registered tables, columns and indexes.
 	void FinalizeCommit();
 	//! True if no work has been queued.
@@ -70,12 +72,18 @@ public:
 	transaction_t commit_id = 0;
 
 private:
+	//! Destroys the detached indexes, which nothing uses any more
+	void RetireIndexes();
+	//! Collects the blocks of the dropped tables and columns
+	void CollectBlocks();
+
 	optional_ptr<BlockManager> block_manager;
-	//! Handles to the dropped blocks: the blocks are not reused while a handle exists
-	vector<shared_ptr<BlockHandle>> dropped_blocks;
+	vector<block_id_t> dropped_block_ids;
 	vector<shared_ptr<DataTable>> dropped_tables;
 	vector<pair<shared_ptr<DataTable>, idx_t>> dropped_columns;
 	vector<PendingIndexRemoval> pending_index_removals;
+	//! Whether FreeOnDisk ran
+	bool freed_on_disk = false;
 };
 
 struct IndexDataRemover {

@@ -93,10 +93,10 @@ shared_ptr<IndexEntry> TableIndexList::AddIndex(unique_ptr<Index> index, const C
 	return index_entry;
 }
 
-void TableIndexList::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
+void TableIndexList::GetStorageBlocks(vector<block_id_t> &block_ids) {
 	annotated_lock_guard lock(index_entries_lock);
 	for (auto &entry : index_entries) {
-		entry->ReleaseStorageBlocks(block_ids);
+		entry->GetStorageBlocks(block_ids);
 	}
 }
 

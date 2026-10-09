@@ -56,7 +56,7 @@ void BoundIndex::VerifyConstraint(DataChunk &chunk, IndexAppendInfo &info, Confl
 	throw NotImplementedException("this implementation of VerifyConstraint does not exist.");
 }
 
-void BoundIndex::ReleaseStorageBlocks(vector<block_id_t> &block_ids) {
+void BoundIndex::GetStorageBlocks(vector<block_id_t> &block_ids) {
 }
 
 void BoundIndex::ResetStorage() {
