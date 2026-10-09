@@ -303,7 +303,13 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	header.meta_block = meta_block.block_pointer;
 	header.block_alloc_size = block_manager.GetBlockAllocSize();
 	header.vector_size = STANDARD_VECTOR_SIZE;
-	block_manager.WriteHeader(context, header, options.visibility_bound);
+	// the blocks the header frees wait for older transactions, except this checkpoint and the one waiting for it
+	block_manager.WriteHeader(context, header, options.visibility_bound, transaction_manager.NextStartTimestamp());
+	optional_ptr<Transaction> caller;
+	if (context && context->transaction.HasActiveTransaction()) {
+		caller = Transaction::TryGet(*context, db);
+	}
+	block_manager.ReuseFreedBlocks(transaction_manager.LowestActiveStart(caller));
 
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(db.GetDatabase());
 	if (debug_verify_blocks) {

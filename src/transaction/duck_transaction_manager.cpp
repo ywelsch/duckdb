@@ -11,6 +11,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/block_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -117,6 +118,37 @@ void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
 
 void DuckTransactionManager::ResetActiveCheckpoint() {
 	active_checkpoint = 0;
+}
+
+transaction_t DuckTransactionManager::NextStartTimestamp() {
+	lock_guard<mutex> lock(transaction_lock);
+	return current_start_timestamp;
+}
+
+transaction_t DuckTransactionManager::LowestActiveStart(optional_ptr<Transaction> exclude) {
+	lock_guard<mutex> lock(transaction_lock);
+	auto lowest_start = current_start_timestamp;
+	for (auto &transaction : active_transactions) {
+		if (transaction->IsCheckpointTransaction() || transaction.get() == exclude.get()) {
+			continue;
+		}
+		lowest_start = MinValue(lowest_start, transaction->start_time);
+	}
+	return lowest_start;
+}
+
+void DuckTransactionManager::ReuseFreedBlocks() noexcept {
+	if (!db.HasStorageManager()) {
+		return;
+	}
+	try {
+		auto &block_manager = db.GetStorageManager().GetBlockManager();
+		if (block_manager.HasBlocksAwaitingReaders()) {
+			block_manager.ReuseFreedBlocks(LowestActiveStart());
+		}
+	} catch (std::exception &) {
+		// the blocks stay unused until a later transaction or checkpoint reuses them
+	}
 }
 
 DuckTransactionManager::CheckpointDecision::CheckpointDecision(string reason_p)
@@ -536,6 +568,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	CleanupTransactions();
+	ReuseFreedBlocks();
 
 	if (checkpoint_decision.can_checkpoint && (undo_properties.has_updates || undo_properties.has_dropped_entries) &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
@@ -590,6 +623,7 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	}
 
 	CleanupTransactions();
+	ReuseFreedBlocks();
 
 	if (error.HasError()) {
 		throw FatalException("Failed to rollback transaction. Cannot continue operation.\nError: %s", error.Message());

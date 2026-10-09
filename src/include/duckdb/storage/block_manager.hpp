@@ -82,8 +82,16 @@ public:
 	void Write(Block &block) {
 		Write(block, block.id);
 	}
-	//! Write the header of a checkpoint with the given bound; should be the final step of a checkpoint
-	virtual void WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound) = 0;
+	//! Write a checkpoint's header for the given bound; the blocks it frees wait for transactions before read_stamp
+	virtual void WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
+	                         transaction_t read_stamp) = 0;
+	//! Whether blocks that written headers free wait for transactions that may still read them
+	virtual bool HasBlocksAwaitingReaders() {
+		return false;
+	}
+	//! Reuse the blocks freed by headers whose read stamp is at most the start of every active transaction
+	virtual void ReuseFreedBlocks(transaction_t lowest_active_start) {
+	}
 
 	//! Returns the number of total blocks
 	virtual idx_t TotalBlocks() = 0;
