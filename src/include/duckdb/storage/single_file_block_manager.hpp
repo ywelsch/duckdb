@@ -215,6 +215,8 @@ private:
 	set<block_id_t> free_blocks_in_use;
 	//! The list of blocks that are in-use, but haven't been written as part of a checkpoint yet
 	set<block_id_t> newly_used_blocks;
+	//! Blocks added to the free list outside of a header, which the next header trims
+	set<block_id_t> free_blocks_to_trim;
 	//! The list of multi-use blocks (i.e. blocks that have >1 reference in the file)
 	//! When a multi-use block is marked as modified, the reference count is decreased by 1 instead of directly
 	//! Appending the block to the modified_blocks list

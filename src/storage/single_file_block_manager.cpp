@@ -1032,7 +1032,9 @@ void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &loc
 		// this block was newly used - and now we are labeling it as no longer being required
 		// we can directly add it back to the free list
 		newly_used_blocks.erase(block_id);
-		AddFreeBlock(lock, block_id);
+		if (AddFreeBlock(lock, block_id) && DBConfig::Get(db).options.trim_free_blocks) {
+			free_blocks_to_trim.insert(block_id);
+		}
 	} else {
 		// this block was used in storage, we cannot directly re-use it
 		// add it to the modified blocks indicating it will be re-usable after the next checkpoint
@@ -1495,6 +1497,9 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 				newly_used_blocks.insert(block);
 			}
 		}
+		// added to the free list since the last header: trimmed unless handed out again in the meantime
+		fully_freed_blocks.insert(free_blocks_to_trim.begin(), free_blocks_to_trim.end());
+		free_blocks_to_trim.clear();
 	}
 	// Release the free fully freed blocks to the filesystem.
 	TrimFreeBlocks(fully_freed_blocks);
@@ -1514,6 +1519,9 @@ void SingleFileBlockManager::UnregisterBlock(block_id_t id) {
 		// it is! move it to the regular free list so the block can be re-used
 		free_list.insert(id);
 		free_blocks_in_use.erase(entry);
+		if (DBConfig::Get(db).options.trim_free_blocks) {
+			free_blocks_to_trim.insert(id);
+		}
 	}
 }
 
