@@ -167,8 +167,7 @@ void DuckTransactionManager::LoadDroppedTables(VisibilityBound visibility_bound)
 	{
 		lock_guard<mutex> guard(dropped_storage_lock);
 		for (auto &drop_state : dropped_storage) {
-			// an excluded drop was loaded when it was excluded
-			if (drop_state.get().commit_id < visibility_bound && !drop_state.get().IsExcludedFromCheckpoints()) {
+			if (drop_state.get().commit_id < visibility_bound) {
 				auto &dropped_tables = drop_state.get().GetDroppedTables();
 				tables.insert(tables.end(), dropped_tables.begin(), dropped_tables.end());
 			}
@@ -178,16 +177,6 @@ void DuckTransactionManager::LoadDroppedTables(VisibilityBound visibility_bound)
 	for (auto &table : tables) {
 		for (auto &row_group : table->GetRowGroupCollection()->GetRowGroups()->Segments()) {
 			row_group.LoadMetadata();
-		}
-	}
-}
-
-void DuckTransactionManager::ExcludeDroppedStorage(VisibilityBound visibility_bound) {
-	LoadDroppedTables(visibility_bound);
-	lock_guard<mutex> guard(dropped_storage_lock);
-	for (auto &drop_state : dropped_storage) {
-		if (drop_state.get().commit_id < visibility_bound) {
-			drop_state.get().ExcludeFromCheckpoints();
 		}
 	}
 }

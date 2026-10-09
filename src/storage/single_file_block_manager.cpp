@@ -980,11 +980,6 @@ void SingleFileBlockManager::MarkBlockAsUsed(block_id_t block_id) {
 	}
 }
 
-void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
-	unique_lock<mutex> lock(single_file_block_lock);
-	MarkBlockAsModifiedInternal(lock, block_id);
-}
-
 void SingleFileBlockManager::MarkBlockAsDropped(block_id_t block_id) {
 	lock_guard<mutex> lock(single_file_block_lock);
 	D_ASSERT(block_id >= 0);
@@ -1002,18 +997,8 @@ idx_t SingleFileBlockManager::UseCount(block_id_t block_id) const {
 	return entry == multi_use_blocks.end() ? 1 : entry->second;
 }
 
-void SingleFileBlockManager::MarkDroppedBlockAsModified(block_id_t block_id) {
+void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 	unique_lock<mutex> lock(single_file_block_lock);
-	auto entry = free_on_disk_blocks.find(block_id);
-	// marked as dropped, unless a header already listed it as free and it became a newly used block
-	D_ASSERT(entry != free_on_disk_blocks.end() || newly_used_blocks.find(block_id) != newly_used_blocks.end());
-	if (entry != free_on_disk_blocks.end() && --entry->second == 0) {
-		free_on_disk_blocks.erase(entry);
-	}
-	MarkBlockAsModifiedInternal(lock, block_id);
-}
-
-void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &lock, block_id_t block_id) {
 	D_ASSERT(block_id >= 0);
 	D_ASSERT(block_id < max_block);
 

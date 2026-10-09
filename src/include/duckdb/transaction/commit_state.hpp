@@ -57,17 +57,12 @@ public:
 	void DropColumn(shared_ptr<DataTable> table, idx_t column_index);
 	//! Removes the dropped indexes from their tables, which keep them for checkpoints until they are destroyed.
 	void DetachIndexes();
-	//! Excludes the dropped storage from checkpoints while it stays in use until Free, and destroys the dropped indexes
-	void ExcludeFromCheckpoints();
-	//! Excludes the dropped storage from checkpoints, if that was not done yet, and frees it
+	//! Frees the dropped storage and destroys the dropped indexes, once no checkpoint writes the storage any more
 	void Free();
 	//! True if no work has been queued.
 	bool Empty() const;
 	const vector<shared_ptr<DataTable>> &GetDroppedTables() const {
 		return dropped_tables;
-	}
-	bool IsExcludedFromCheckpoints() const {
-		return excluded_from_checkpoints;
 	}
 
 	//! The commit id of the transaction that dropped the storage
@@ -79,8 +74,6 @@ private:
 	vector<shared_ptr<DataTable>> dropped_tables;
 	vector<pair<shared_ptr<DataTable>, idx_t>> dropped_columns;
 	vector<PendingIndexRemoval> pending_index_removals;
-	//! Whether ExcludeFromCheckpoints ran
-	bool excluded_from_checkpoints = false;
 };
 
 struct IndexDataRemover {

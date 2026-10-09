@@ -68,11 +68,7 @@ struct DroppedBlockVisitor : public BlockIdVisitor {
 	BlockManager &block_manager;
 };
 
-void CommitDropState::ExcludeFromCheckpoints() {
-	if (excluded_from_checkpoints) {
-		return;
-	}
-	excluded_from_checkpoints = true;
+void CommitDropState::Free() {
 	// nothing uses the detached indexes any more
 	for (auto &removal : pending_index_removals) {
 		if (removal.detached_entry) {
@@ -87,29 +83,21 @@ void CommitDropState::ExcludeFromCheckpoints() {
 	for (auto &column : dropped_columns) {
 		column.first->CommitDropColumn(column.second, *this);
 	}
+	// assert that !block_manager -> dropped_block_ids.empty()
+	D_ASSERT(block_manager || dropped_block_ids.empty());
 	if (!block_manager) {
 		return;
 	}
+	// older snapshots still read these: the block manager reuses them once those have ended
 	for (auto block_id : dropped_block_ids) {
-		block_manager->MarkBlockAsDropped(block_id);
+		block_manager->MarkBlockAsModified(block_id);
 	}
+	dropped_block_ids.clear();
 	// the indexes stay usable for older snapshots, and free their blocks when they are destroyed
 	DroppedBlockVisitor visitor(*block_manager);
 	for (auto &table : dropped_tables) {
 		table->GetDataTableInfo()->GetIndexes().VisitBlockIds(visitor);
 	}
-}
-
-void CommitDropState::Free() {
-	ExcludeFromCheckpoints();
-	if (block_manager) {
-		for (auto block_id : dropped_block_ids) {
-			block_manager->MarkDroppedBlockAsModified(block_id);
-		}
-	}
-	// assert that !block_manager -> dropped_block_ids.empty()
-	D_ASSERT(block_manager || dropped_block_ids.empty());
-	dropped_block_ids.clear();
 }
 
 bool CommitDropState::Empty() const {

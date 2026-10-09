@@ -68,10 +68,6 @@ public:
 	//! Mark a use of a block as dropped: checkpoints no longer include it, but it stays in use until marked as modified
 	virtual void MarkBlockAsDropped(block_id_t block_id) {
 	}
-	//! Mark a use of a block that was marked as dropped as modified
-	virtual void MarkDroppedBlockAsModified(block_id_t block_id) {
-		MarkBlockAsModified(block_id);
-	}
 	//! Increase the reference count of a block. The block should hold at least one reference before this method is
 	//! called.
 	virtual void IncreaseBlockReferenceCount(block_id_t block_id) = 0;

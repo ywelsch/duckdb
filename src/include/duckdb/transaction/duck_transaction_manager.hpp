@@ -75,9 +75,7 @@ public:
 	transaction_t LowestActiveStart(optional_ptr<Transaction> exclude = nullptr);
 	//! Detaches the indexes a commit dropped, and keeps its storage until FreeDroppedStorage frees it
 	void AddDroppedStorage(CommitDropState &drop_state);
-	//! Excludes the storage dropped by commits below the bound of a starting checkpoint, which does not write it
-	void ExcludeDroppedStorage(VisibilityBound visibility_bound);
-	//! Frees the storage dropped by commits below the bound of a cleanup, after which no snapshot reads it
+	//! Frees the storage dropped by commits below the bound of a starting checkpoint or of a cleanup
 	void FreeDroppedStorage(VisibilityBound visibility_bound);
 
 	bool IsDuckTransactionManager() override {
