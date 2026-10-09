@@ -21,6 +21,7 @@
 
 namespace duckdb {
 
+struct BlockIdVisitor;
 class ConflictManager;
 class IndexEntry;
 class IndexBinder;
@@ -137,6 +138,8 @@ public:
 	string GetIndexType() const;
 	//! Destroys the physical index.
 	void Retire();
+	//! Visits the on-disk blocks of the physical index, once per use
+	void VisitBlockIds(BlockIdVisitor &visitor);
 	//! Binds the unbound physical index without replacing it.
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types);
 	//! Replaces the unbound physical index with its bound representation.

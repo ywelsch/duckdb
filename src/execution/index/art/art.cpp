@@ -680,6 +680,17 @@ void ART::ResetStorage(IndexLock &index_lock) {
 	root_ptr.Clear();
 }
 
+void ART::VisitBlockIds(BlockIdVisitor &visitor) {
+	IndexLock index_lock(*this);
+	for (auto &allocator : *allocators) {
+		for (auto &block_pointer : allocator->GetInfo().block_pointers) {
+			if (block_pointer.IsValid()) {
+				visitor.Visit(block_pointer.block_id);
+			}
+		}
+	}
+}
+
 idx_t ART::TryDelete(IndexLock &state, DataChunk &entries, Vector &row_ids, optional_ptr<SelectionVector> deleted_sel,
                      optional_ptr<SelectionVector> non_deleted_sel) {
 	state.AssertHeld(*this);
