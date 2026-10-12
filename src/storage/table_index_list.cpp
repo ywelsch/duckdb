@@ -476,6 +476,11 @@ void TableIndexList::Bind(ClientContext &context, DataTableInfo &table_info, con
 		lock.lock();
 		auto current_entry = std::find(index_entries.begin(), index_entries.end(), index_entry);
 		if (current_entry == index_entries.end()) {
+			// a drop detached it meanwhile: the bound index now owns the storage that checkpoints still write
+			if (std::find(detached_index_entries.begin(), detached_index_entries.end(), index_entry) !=
+			    detached_index_entries.end()) {
+				index_entry->CommitBind(std::move(bound_idx));
+			}
 			continue;
 		}
 		index_entry->CommitBind(std::move(bound_idx));
