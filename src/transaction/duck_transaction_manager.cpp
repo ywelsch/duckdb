@@ -13,9 +13,6 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/commit_state.hpp"
-#include "duckdb/storage/data_table.hpp"
-#include "duckdb/storage/table/row_group_collection.hpp"
-#include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection_manager.hpp"
@@ -132,61 +129,40 @@ CommitDropState &DuckTransactionManager::AddDroppedStorage(unique_ptr<CommitDrop
 	return result;
 }
 
-void DuckTransactionManager::LoadDroppedTables(const vector<shared_ptr<DataTable>> &tables) {
-	for (auto &table : tables) {
-		for (auto &row_group : table->GetRowGroupCollection()->GetRowGroups()->Segments()) {
-			row_group.LoadMetadata();
-		}
-	}
-}
-
 void DuckTransactionManager::ExcludeDroppedStorage(VisibilityBound visibility_bound) {
-	vector<shared_ptr<DataTable>> tables;
+	lock_guard<mutex> free_guard(free_dropped_storage_lock);
+	vector<reference<CommitDropState>> drop_states;
 	{
 		lock_guard<mutex> guard(dropped_storage_lock);
 		for (auto &drop_state : dropped_storage) {
-			// an excluded drop was loaded when it was excluded
-			if (drop_state->commit_id < visibility_bound && !drop_state->IsExcludedFromCheckpoints()) {
-				auto &dropped_tables = drop_state->GetDroppedTables();
-				tables.insert(tables.end(), dropped_tables.begin(), dropped_tables.end());
+			if (drop_state->commit_id < visibility_bound) {
+				drop_states.push_back(*drop_state);
 			}
 		}
 	}
-	// reads from disk without the lock, which the commit of a drop takes
-	LoadDroppedTables(tables);
-	lock_guard<mutex> guard(dropped_storage_lock);
-	for (auto &drop_state : dropped_storage) {
-		if (drop_state->commit_id < visibility_bound) {
-			drop_state->ExcludeFromCheckpoints();
-		}
+	for (auto &drop_state : drop_states) {
+		drop_state.get().ExcludeFromCheckpoints();
 	}
 }
 
 void DuckTransactionManager::FreeDroppedStorage(CommitDropState &drop_state) {
-	vector<shared_ptr<DataTable>> tables;
+	lock_guard<mutex> free_guard(free_dropped_storage_lock);
+	unique_ptr<CommitDropState> owned_state;
 	{
 		lock_guard<mutex> guard(dropped_storage_lock);
-		if (!drop_state.IsExcludedFromCheckpoints()) {
-			tables = drop_state.GetDroppedTables();
+		for (idx_t i = 0; i < dropped_storage.size(); i++) {
+			if (dropped_storage[i].get() == &drop_state) {
+				owned_state = std::move(dropped_storage[i]);
+				dropped_storage.erase_at(i);
+				break;
+			}
 		}
 	}
-	try {
-		LoadDroppedTables(tables);
-	} catch (std::exception &) {
-		// Free loads what it still needs under the lock, and fails there
+	if (!owned_state) {
+		throw InternalException("FreeDroppedStorage called with storage that is not registered");
 	}
-	lock_guard<mutex> guard(dropped_storage_lock);
-	for (idx_t i = 0; i < dropped_storage.size(); i++) {
-		if (dropped_storage[i].get() != &drop_state) {
-			continue;
-		}
-		// removed first: if freeing fails, the state is destroyed while unwinding
-		auto owned_state = std::move(dropped_storage[i]);
-		dropped_storage.erase_at(i);
-		owned_state->Free();
-		return;
-	}
-	throw InternalException("FreeDroppedStorage called with storage that is not registered");
+	// removed first: if freeing fails, the state is destroyed while unwinding
+	owned_state->Free();
 }
 
 DuckTransactionManager::CheckpointDecision::CheckpointDecision(string reason_p)

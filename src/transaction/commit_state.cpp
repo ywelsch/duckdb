@@ -25,6 +25,8 @@
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
+#include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
@@ -72,6 +74,12 @@ void CommitDropState::ExcludeFromCheckpoints() {
 	if (excluded_from_checkpoints) {
 		return;
 	}
+	// older snapshots still read the dropped tables, whose metadata the checkpoint frees
+	for (auto &table : dropped_tables) {
+		for (auto &row_group : table->GetRowGroupCollection()->GetRowGroups()->Segments()) {
+			row_group.LoadMetadata();
+		}
+	}
 	excluded_from_checkpoints = true;
 	Collect();
 	if (!block_manager) {
@@ -106,6 +114,7 @@ void CommitDropState::Collect() {
 
 void CommitDropState::Free() {
 	if (!excluded_from_checkpoints) {
+		// no snapshot reads the dropped tables any more
 		Collect();
 	}
 	if (block_manager) {
