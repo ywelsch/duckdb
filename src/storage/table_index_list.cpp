@@ -562,25 +562,24 @@ unordered_set<column_t> TableIndexList::GetUniqueIndexColumns() const {
 }
 
 IndexSerializationResult TableIndexList::SerializeToDisk(QueryContext context, const IndexSerializationInfo &info) {
-	annotated_lock_guard<annotated_mutex> lock(index_entries_lock);
+	vector<shared_ptr<IndexEntry>> entries;
+	{
+		annotated_lock_guard<annotated_mutex> lock(index_entries_lock);
+		entries = index_entries;
+		// dropped after the checkpoint's bound
+		entries.insert(entries.end(), detached_index_entries.begin(), detached_index_entries.end());
+	}
 
+	// written without the list lock, which a drop that commits meanwhile takes to detach its indexes
 	IndexSerializationResult result;
-
-	result.owned_infos.reserve(index_entries.size() + detached_index_entries.size());
-	auto serialize = [&](const shared_ptr<IndexEntry> &entry) {
+	result.owned_infos.reserve(entries.size());
+	for (const auto &entry : entries) {
+		// retired only once it leaves the lists
+		D_ASSERT(entry->GetBindState() != IndexBindState::RETIRED);
 		auto storage_info = entry->SerializeToDisk(context, info.options);
 		D_ASSERT(!storage_info.name.empty());
 		result.owned_infos.push_back(std::move(storage_info));
 		result.ordered_infos.push_back(result.owned_infos.back());
-	};
-	for (const auto &entry : index_entries) {
-		serialize(entry);
-	}
-	// dropped after the checkpoint's bound
-	for (const auto &entry : detached_index_entries) {
-		// destroyed only once it leaves the list
-		D_ASSERT(entry->GetBindState() != IndexBindState::RETIRED);
-		serialize(entry);
 	}
 
 	return result;
@@ -598,8 +597,13 @@ unique_ptr<IndexStorageInfo> TableIndexList::SerializeToWAL(const Identifier &na
 }
 
 void TableIndexList::MergeCheckpointDeltas(const optional_idx checkpoint_id) const {
-	annotated_lock_guard lock(index_entries_lock);
-	for (const auto &entry : index_entries) {
+	vector<shared_ptr<IndexEntry>> entries;
+	{
+		annotated_lock_guard lock(index_entries_lock);
+		entries = index_entries;
+	}
+	// merged without the list lock, which a drop that commits meanwhile takes to detach its indexes
+	for (const auto &entry : entries) {
 		entry->MergeCheckpointDeltas(checkpoint_id);
 	}
 }
