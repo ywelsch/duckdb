@@ -191,7 +191,7 @@ private:
 		uint32_t uses = 1;
 		//! The uses that headers no longer list: storage that a checkpoint no longer writes
 		uint32_t dropped_uses = 0;
-		//! No header lists the block as used, so freeing its last use returns it to the free list
+		//! Not yet written by a checkpoint: headers list it as free, and its last use returns it to the free list
 		bool newly_used = false;
 
 		//! The uses that the next header lists

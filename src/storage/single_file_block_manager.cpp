@@ -1397,14 +1397,10 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	}
 	// newly used blocks and dropped storage are still free blocks for this checkpoint
 	vector<pair<block_id_t, uint32_t>> written_multi_use_blocks;
-	vector<block_id_t> written_free_on_disk;
 	for (auto &entry : block_uses) {
 		auto written_uses = entry.second.WrittenUses();
 		if (written_uses == 0) {
 			all_free_blocks.insert(entry.first);
-			if (!entry.second.newly_used) {
-				written_free_on_disk.push_back(entry.first);
-			}
 		} else if (written_uses > 1) {
 			written_multi_use_blocks.emplace_back(entry.first, NumericCast<uint32_t>(written_uses));
 		}
@@ -1484,13 +1480,6 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 			modified_blocks.erase(block);
 			if (AddFreeBlock(release_lock, block)) {
 				fully_freed_blocks.insert(block);
-			}
-		}
-		// the header lists these as free: like newly used blocks, they can be reused once their last use is freed
-		for (auto &block : written_free_on_disk) {
-			auto entry = block_uses.find(block);
-			if (entry != block_uses.end()) {
-				entry->second.newly_used = true;
 			}
 		}
 		// added to the free list since the last header: trimmed unless handed out again in the meantime
