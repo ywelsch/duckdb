@@ -133,6 +133,8 @@ public:
 	void ResetStorage(IndexLock &index_lock) override DUCKDB_REQUIRES(index_lock);
 	//! Visits the on-disk blocks of the ART, once per use
 	void VisitBlockIds(BlockIdVisitor &visitor) DUCKDB_EXCLUDES(lock);
+	//! Gives up the on-disk blocks of the ART: their owner frees them instead
+	void ReleaseBlocks() DUCKDB_EXCLUDES(lock);
 
 	//! Build an ART from a vector of sorted keys and their row IDs.
 	ARTConflictType Build(unsafe_vector<ARTKey> &keys, unsafe_vector<ARTKey> &row_ids, const idx_t row_count);

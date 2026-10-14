@@ -59,15 +59,15 @@ void CommitDropState::DetachIndexes() {
 	}
 }
 
-struct DroppedBlockVisitor : public BlockIdVisitor {
-	explicit DroppedBlockVisitor(BlockManager &block_manager) : block_manager(block_manager) {
+struct DroppedBlockCollector : public BlockIdVisitor {
+	explicit DroppedBlockCollector(CommitDropState &drop_state) : drop_state(drop_state) {
 	}
 
 	void Visit(block_id_t block_id) override {
-		block_manager.MarkBlockAsDropped(block_id);
+		drop_state.DropBlock(block_id);
 	}
 
-	BlockManager &block_manager;
+	CommitDropState &drop_state;
 };
 
 void CommitDropState::ExcludeFromCheckpoints() {
@@ -88,11 +88,6 @@ void CommitDropState::ExcludeFromCheckpoints() {
 	for (auto block_id : dropped_block_ids) {
 		block_manager->MarkBlockAsDropped(block_id);
 	}
-	// the indexes stay usable for older snapshots, and free their blocks when they are destroyed
-	DroppedBlockVisitor visitor(*block_manager);
-	for (auto &table : dropped_tables) {
-		table->GetDataTableInfo()->GetIndexes().VisitBlockIds(visitor);
-	}
 }
 
 void CommitDropState::Collect() {
@@ -104,8 +99,11 @@ void CommitDropState::Collect() {
 	}
 	pending_index_removals.clear();
 	// collected now: a checkpoint that wrote the table frees the blocks it replaced itself
+	DroppedBlockCollector collector(*this);
 	for (auto &table : dropped_tables) {
 		table->CommitDropTable(*this);
+		// the indexes stay usable for older snapshots until Free
+		table->GetDataTableInfo()->GetIndexes().VisitBlockIds(collector);
 	}
 	for (auto &column : dropped_columns) {
 		column.first->CommitDropColumn(column.second, *this);
@@ -116,6 +114,10 @@ void CommitDropState::Free() {
 	if (!excluded_from_checkpoints) {
 		// no snapshot reads the dropped tables any more
 		Collect();
+	}
+	// the indexes no longer free their blocks when they are destroyed: they are freed with the others
+	for (auto &table : dropped_tables) {
+		table->GetDataTableInfo()->GetIndexes().ReleaseBlocks();
 	}
 	if (block_manager) {
 		for (auto block_id : dropped_block_ids) {
