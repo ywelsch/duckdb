@@ -683,11 +683,7 @@ void ART::ResetStorage(IndexLock &index_lock) {
 void ART::VisitBlockIds(BlockIdVisitor &visitor) {
 	IndexLock index_lock(*this);
 	for (auto &allocator : *allocators) {
-		for (auto &block_pointer : allocator->GetInfo().block_pointers) {
-			if (block_pointer.IsValid()) {
-				visitor.Visit(block_pointer.block_id);
-			}
-		}
+		allocator->VisitBlockIds(visitor);
 	}
 }
 
