@@ -100,6 +100,13 @@ void TableIndexList::VisitBlockIds(BlockIdVisitor &visitor) {
 	}
 }
 
+void TableIndexList::ReleaseBlocks() {
+	annotated_lock_guard lock(index_entries_lock);
+	for (auto &entry : index_entries) {
+		entry->ReleaseBlocks();
+	}
+}
+
 void TableIndexList::InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const {
 	D_ASSERT(this != &delete_indexes);
 	D_ASSERT(this != &append_indexes);

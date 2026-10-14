@@ -1016,11 +1016,9 @@ void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &loc
 	auto entry = block_uses.find(block_id);
 	if (entry != block_uses.end() && entry->second.uses > 1) {
 		// it is! reduce the reference count of the block
-		if (entry->second.dropped_uses == entry->second.uses) {
-			// every use is dropped, so this one is too: a dropped index frees its blocks when it is destroyed
-			entry->second.dropped_uses--;
-		}
 		entry->second.uses--;
+		// MarkDroppedBlockAsModified frees the dropped uses, so they are among the others
+		D_ASSERT(entry->second.dropped_uses <= entry->second.uses);
 		EraseIfDefault(entry);
 		return;
 	}
@@ -1034,6 +1032,8 @@ void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &loc
 	// the last use of the block is freed
 	bool newly_used = false;
 	if (entry != block_uses.end()) {
+		// MarkDroppedBlockAsModified frees the dropped uses
+		D_ASSERT(entry->second.dropped_uses == 0);
 		newly_used = entry->second.newly_used;
 		block_uses.erase(entry);
 	}
