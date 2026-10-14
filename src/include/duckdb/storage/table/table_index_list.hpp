@@ -54,8 +54,8 @@ public:
 	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, ConstraintCheckMode check_mode);
 	//! Visits the on-disk blocks of every index, once per use
 	void VisitBlockIds(BlockIdVisitor &visitor);
-	//! Gives up the on-disk blocks of every index: their owner frees them instead
-	void ReleaseBlocks();
+	//! Disowns the on-disk blocks of every index: destroying an index no longer frees them
+	void DisownBlocks();
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.

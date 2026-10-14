@@ -164,7 +164,7 @@ private:
 	//! Lock for dropped_storage
 	mutex dropped_storage_lock;
 	//! Held while excluding or freeing dropped storage: a checkpoint that starts waits for storage freed at cleanup
-	mutex free_dropped_storage_lock;
+	mutex exclude_or_free_lock;
 	//! Storage dropped by committed transactions that are not cleaned up yet
 	vector<unique_ptr<CommitDropState>> dropped_storage;
 	//! Source of checkpoint identities

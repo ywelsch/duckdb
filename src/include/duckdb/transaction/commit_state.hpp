@@ -33,8 +33,8 @@ struct UpdateInfo;
 
 enum class CommitMode { COMMIT, REVERT_COMMIT };
 
-//! An index that has been marked for removal from a table's index list once the commit chain succeeds.
-struct PendingIndexRemoval {
+//! An index that a commit drops, which is detached from its table's index list once the commit chain succeeds.
+struct DroppedIndex {
 	shared_ptr<DataTableInfo> info;
 	Identifier name;
 	//! The detached index entry, destroyed when the dropped storage is freed
@@ -75,9 +75,9 @@ private:
 	vector<block_id_t> dropped_block_ids;
 	vector<shared_ptr<DataTable>> dropped_tables;
 	vector<pair<shared_ptr<DataTable>, idx_t>> dropped_columns;
-	vector<PendingIndexRemoval> pending_index_removals;
+	vector<DroppedIndex> dropped_indexes;
 	//! Whether ExcludeFromCheckpoints ran
-	bool excluded_from_checkpoints = false;
+	bool excluded = false;
 };
 
 struct IndexDataRemover {

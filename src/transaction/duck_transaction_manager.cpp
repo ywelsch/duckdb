@@ -130,7 +130,7 @@ CommitDropState &DuckTransactionManager::AddDroppedStorage(unique_ptr<CommitDrop
 }
 
 void DuckTransactionManager::ExcludeDroppedStorage(VisibilityBound visibility_bound) {
-	lock_guard<mutex> free_guard(free_dropped_storage_lock);
+	lock_guard<mutex> exclude_or_free_guard(exclude_or_free_lock);
 	vector<reference<CommitDropState>> drop_states;
 	{
 		lock_guard<mutex> guard(dropped_storage_lock);
@@ -146,7 +146,7 @@ void DuckTransactionManager::ExcludeDroppedStorage(VisibilityBound visibility_bo
 }
 
 void DuckTransactionManager::FreeDroppedStorage(CommitDropState &drop_state) {
-	lock_guard<mutex> free_guard(free_dropped_storage_lock);
+	lock_guard<mutex> exclude_or_free_guard(exclude_or_free_lock);
 	unique_ptr<CommitDropState> owned_state;
 	{
 		lock_guard<mutex> guard(dropped_storage_lock);

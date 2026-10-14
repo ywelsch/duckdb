@@ -914,9 +914,9 @@ block_id_t SingleFileBlockManager::GetFreeBlockIdInternal(FreeBlockType type) {
 	} else {
 		block_id = max_block++;
 	}
-	// add the entry to the list of newly used blocks
+	// a newly used block is free on disk until a checkpoint writes it
 	if (type == FreeBlockType::NEWLY_USED_BLOCK) {
-		block_uses[block_id].newly_used = true;
+		block_uses[block_id].free_on_disk = true;
 	}
 	if (BlockIsRegistered(block_id)) {
 		throw InternalException("Free block %d is already registered", block_id);
@@ -946,7 +946,7 @@ void SingleFileBlockManager::MarkBlockAsCheckpointed(block_id_t block_id) {
 	D_ASSERT(block_id >= 0);
 	auto entry = block_uses.find(block_id);
 	if (entry != block_uses.end()) {
-		entry->second.newly_used = false;
+		entry->second.free_on_disk = false;
 		EraseIfDefault(entry);
 	}
 }
@@ -978,27 +978,27 @@ void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 	MarkBlockAsModifiedInternal(lock, block_id);
 }
 
-void SingleFileBlockManager::MarkBlockAsDropped(block_id_t block_id) {
+void SingleFileBlockManager::MarkBlockAsExcluded(block_id_t block_id) {
 	lock_guard<mutex> lock(single_file_block_lock);
 	D_ASSERT(block_id >= 0);
 	D_ASSERT(block_id < max_block);
-	// only a block in use can be free on disk only
+	// only a block in use can have excluded uses
 	D_ASSERT(free_list.find(block_id) == free_list.end());
 	D_ASSERT(modified_blocks.find(block_id) == modified_blocks.end());
 	auto &entry = block_uses[block_id];
-	entry.dropped_uses++;
-	// a use is marked as dropped at most once
-	D_ASSERT(entry.dropped_uses <= entry.uses);
+	entry.excluded_uses++;
+	// a use is excluded at most once
+	D_ASSERT(entry.excluded_uses <= entry.uses);
 }
 
-void SingleFileBlockManager::MarkDroppedBlockAsModified(block_id_t block_id) {
+void SingleFileBlockManager::MarkExcludedBlockAsModified(block_id_t block_id) {
 	unique_lock<mutex> lock(single_file_block_lock);
 	auto entry = block_uses.find(block_id);
-	if (entry == block_uses.end() || entry->second.dropped_uses == 0) {
-		throw InternalException("MarkDroppedBlockAsModified called with block id %d that has no dropped uses",
+	if (entry == block_uses.end() || entry->second.excluded_uses == 0) {
+		throw InternalException("MarkExcludedBlockAsModified called with block id %d that has no excluded uses",
 		                        block_id);
 	}
-	entry->second.dropped_uses--;
+	entry->second.excluded_uses--;
 	MarkBlockAsModifiedInternal(lock, block_id);
 }
 
@@ -1017,8 +1017,8 @@ void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &loc
 	if (entry != block_uses.end() && entry->second.uses > 1) {
 		// it is! reduce the reference count of the block
 		entry->second.uses--;
-		// MarkDroppedBlockAsModified frees the dropped uses, so they are among the others
-		D_ASSERT(entry->second.dropped_uses <= entry->second.uses);
+		// MarkExcludedBlockAsModified frees the excluded uses, so they are among the others
+		D_ASSERT(entry->second.excluded_uses <= entry->second.uses);
 		EraseIfDefault(entry);
 		return;
 	}
@@ -1030,16 +1030,15 @@ void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &loc
 		throw InternalException("MarkBlockAsModified called with already freed block id %d", block_id);
 	}
 	// the last use of the block is freed
-	bool newly_used = false;
+	bool free_on_disk = false;
 	if (entry != block_uses.end()) {
-		// MarkDroppedBlockAsModified frees the dropped uses
-		D_ASSERT(entry->second.dropped_uses == 0);
-		newly_used = entry->second.newly_used;
+		// MarkExcludedBlockAsModified frees the excluded uses
+		D_ASSERT(entry->second.excluded_uses == 0);
+		free_on_disk = entry->second.free_on_disk;
 		block_uses.erase(entry);
 	}
-	if (newly_used) {
-		// this block was newly used - and now we are labeling it as no longer being required
-		// we can directly add it back to the free list
+	if (free_on_disk) {
+		// no header lists this block as used - we can directly add it back to the free list
 		if (AddFreeBlock(lock, block_id) && DBConfig::Get(db).options.trim_free_blocks) {
 			free_blocks_to_trim.insert(block_id);
 		}
@@ -1071,9 +1070,9 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 			                        max_block);
 		}
 		referenced_blocks.insert(block.first);
-		// the dropped uses are still counted, but not visited
+		// the excluded uses are still counted, but not visited
 		auto entry = block_uses.find(block.first);
-		idx_t uses = block.second + (entry == block_uses.end() ? 0 : entry->second.dropped_uses);
+		idx_t uses = block.second + (entry == block_uses.end() ? 0 : entry->second.excluded_uses);
 		if (uses > 1) {
 			// multi-use block
 			if (entry == block_uses.end() || entry->second.uses == 1) {
@@ -1092,9 +1091,9 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 			}
 		}
 	}
-	// newly used blocks and dropped storage are in use, but not visited
+	// blocks free on disk and excluded uses are in use, but not visited
 	for (auto &entry : block_uses) {
-		if (!entry.second.newly_used && entry.second.dropped_uses == 0) {
+		if (!entry.second.free_on_disk && entry.second.excluded_uses == 0) {
 			continue;
 		}
 		auto block_id = entry.first;
@@ -1136,12 +1135,12 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 			block_usage_str += to_string(entry.first);
 		}
 		string multi_use_blocks_str;
-		string newly_used_blocks_str;
+		string free_on_disk_blocks_str;
 		for (auto &entry : block_uses) {
-			if (!entry.second.newly_used && entry.second.uses == 1) {
+			if (!entry.second.free_on_disk && entry.second.uses == 1) {
 				continue;
 			}
-			auto &str = entry.second.newly_used ? newly_used_blocks_str : multi_use_blocks_str;
+			auto &str = entry.second.free_on_disk ? free_on_disk_blocks_str : multi_use_blocks_str;
 			if (!str.empty()) {
 				str += ", ";
 			}
@@ -1150,8 +1149,8 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 
 		throw InternalException(
 		    "Block verification failed - blocks \"%s\" were not found as being used OR marked as free\nMax block: "
-		    "%d\nBlock usage: %s\nFree list: %s\nMulti-use blocks: %s\nNewly used blocks: %s",
-		    missing_blocks, max_block, block_usage_str, free_list_str, multi_use_blocks_str, newly_used_blocks_str);
+		    "%d\nBlock usage: %s\nFree list: %s\nMulti-use blocks: %s\nBlocks free on disk: %s",
+		    missing_blocks, max_block, block_usage_str, free_list_str, multi_use_blocks_str, free_on_disk_blocks_str);
 	}
 }
 
@@ -1395,15 +1394,15 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	for (auto &block : checkpoint_freed_blocks) {
 		all_free_blocks.insert(block);
 	}
-	// newly used blocks and dropped storage are still free blocks for this checkpoint
+	// blocks free on disk and fully excluded blocks are still free blocks for this checkpoint
 	vector<pair<block_id_t, uint32_t>> written_multi_use_blocks;
-	vector<block_id_t> written_free_on_disk;
+	vector<block_id_t> fully_excluded_blocks;
 	for (auto &entry : block_uses) {
 		auto written_uses = entry.second.WrittenUses();
 		if (written_uses == 0) {
 			all_free_blocks.insert(entry.first);
-			if (!entry.second.newly_used) {
-				written_free_on_disk.push_back(entry.first);
+			if (!entry.second.free_on_disk) {
+				fully_excluded_blocks.push_back(entry.first);
 			}
 		} else if (written_uses > 1) {
 			written_multi_use_blocks.emplace_back(entry.first, NumericCast<uint32_t>(written_uses));
@@ -1486,11 +1485,11 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 				fully_freed_blocks.insert(block);
 			}
 		}
-		// the header lists these as free: like newly used blocks, they can be reused once their last use is freed
-		for (auto &block : written_free_on_disk) {
+		// the header lists these as free, so they can be reused once their last use is freed
+		for (auto &block : fully_excluded_blocks) {
 			auto entry = block_uses.find(block);
 			if (entry != block_uses.end()) {
-				entry->second.newly_used = true;
+				entry->second.free_on_disk = true;
 			}
 		}
 		// added to the free list since the last header: trimmed unless handed out again in the meantime

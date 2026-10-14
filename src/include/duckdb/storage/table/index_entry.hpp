@@ -140,8 +140,8 @@ public:
 	void Retire();
 	//! Visits the on-disk blocks of the physical index, once per use
 	void VisitBlockIds(BlockIdVisitor &visitor);
-	//! Gives up the on-disk blocks of the physical index: their owner frees them instead
-	void ReleaseBlocks();
+	//! Disowns the on-disk blocks of the physical index: destroying it no longer frees them
+	void DisownBlocks();
 	//! Binds the unbound physical index without replacing it.
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types);
 	//! Replaces the unbound physical index with its bound representation.

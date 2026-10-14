@@ -140,7 +140,7 @@ void FixedSizeAllocator::VisitBlockIds(BlockIdVisitor &visitor) const {
 	}
 }
 
-void FixedSizeAllocator::ReleaseBlocks() {
+void FixedSizeAllocator::DisownBlocks() {
 	for (auto &buffer : buffers) {
 		buffer.second->block_pointer = BlockPointer();
 	}

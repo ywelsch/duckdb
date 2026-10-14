@@ -355,13 +355,13 @@ void IndexEntry::VisitBlockIds(BlockIdVisitor &visitor) {
 	owned_index->Cast<ART>().VisitBlockIds(visitor);
 }
 
-void IndexEntry::ReleaseBlocks() {
+void IndexEntry::DisownBlocks() {
 	auto entry_lock = lock.GetSharedLock();
 	if (!owned_index) {
 		return;
 	}
 	D_ASSERT(owned_index->IsBound() && GetIndexType() == ART::TYPE_NAME);
-	owned_index->Cast<ART>().ReleaseBlocks();
+	owned_index->Cast<ART>().DisownBlocks();
 }
 
 unique_ptr<BoundIndex> IndexEntry::Bind(IndexBinder &binder, const vector<LogicalType> &table_types) {

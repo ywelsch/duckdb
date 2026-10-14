@@ -61,11 +61,11 @@ public:
 	//! Mark a block as "modified"; modified blocks are added to the free list after a checkpoint (i.e. their data is
 	//! assumed to be rewritten)
 	virtual void MarkBlockAsModified(block_id_t block_id) = 0;
-	//! Mark a use of a block as dropped: checkpoints no longer include it, but it stays in use until marked as modified
-	virtual void MarkBlockAsDropped(block_id_t block_id) {
+	//! Mark a use of a block as excluded: checkpoints no longer write it, but it stays in use until marked as modified
+	virtual void MarkBlockAsExcluded(block_id_t block_id) {
 	}
-	//! Mark a use of a block that was marked as dropped as modified
-	virtual void MarkDroppedBlockAsModified(block_id_t block_id) {
+	//! Mark an excluded use of a block as modified
+	virtual void MarkExcludedBlockAsModified(block_id_t block_id) {
 		MarkBlockAsModified(block_id);
 	}
 	//! Increase the reference count of a block. The block should hold at least one reference before this method is

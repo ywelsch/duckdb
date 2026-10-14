@@ -96,8 +96,8 @@ public:
 	void MarkBlockAsUsed(block_id_t block_id) override;
 	//! Mark a block as modified (re-writeable after a checkpoint)
 	void MarkBlockAsModified(block_id_t block_id) override;
-	void MarkBlockAsDropped(block_id_t block_id) override;
-	void MarkDroppedBlockAsModified(block_id_t block_id) override;
+	void MarkBlockAsExcluded(block_id_t block_id) override;
+	void MarkExcludedBlockAsModified(block_id_t block_id) override;
 	//! Increase the reference count of a block. The block should hold at least one reference
 	void IncreaseBlockReferenceCount(block_id_t block_id) override;
 	//! UnregisterBlock, only accepts non-temporary block ids
@@ -189,17 +189,17 @@ private:
 	struct BlockUses {
 		//! The uses of the block in memory
 		uint32_t uses = 1;
-		//! The uses that headers no longer list: storage that a checkpoint no longer writes
-		uint32_t dropped_uses = 0;
+		//! The uses that checkpoints no longer write, which headers no longer list
+		uint32_t excluded_uses = 0;
 		//! No header lists the block as used, so freeing its last use returns it to the free list
-		bool newly_used = false;
+		bool free_on_disk = false;
 
 		//! The uses that the next header lists
 		idx_t WrittenUses() const {
-			return newly_used ? 0 : uses - dropped_uses;
+			return free_on_disk ? 0 : uses - excluded_uses;
 		}
 		bool IsDefault() const {
-			return uses == 1 && dropped_uses == 0 && !newly_used;
+			return uses == 1 && excluded_uses == 0 && !free_on_disk;
 		}
 	};
 
@@ -233,7 +233,7 @@ private:
 	set<block_id_t> free_blocks_in_use;
 	//! Blocks added to the free list outside of a header, which the next header trims
 	set<block_id_t> free_blocks_to_trim;
-	//! The blocks in use that have more than one use, uses that are dropped, or no header that lists them
+	//! The blocks in use that have more than one use, excluded uses, or no header that lists them
 	//! When a multi-use block is marked as modified, the reference count is decreased by 1 instead of directly
 	//! Appending the block to the modified_blocks list
 	unordered_map<block_id_t, BlockUses> block_uses;

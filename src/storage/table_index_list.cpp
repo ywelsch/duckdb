@@ -100,10 +100,10 @@ void TableIndexList::VisitBlockIds(BlockIdVisitor &visitor) {
 	}
 }
 
-void TableIndexList::ReleaseBlocks() {
+void TableIndexList::DisownBlocks() {
 	annotated_lock_guard lock(index_entries_lock);
 	for (auto &entry : index_entries) {
-		entry->ReleaseBlocks();
+		entry->DisownBlocks();
 	}
 }
 

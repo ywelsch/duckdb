@@ -687,10 +687,10 @@ void ART::VisitBlockIds(BlockIdVisitor &visitor) {
 	}
 }
 
-void ART::ReleaseBlocks() {
+void ART::DisownBlocks() {
 	IndexLock index_lock(*this);
 	for (auto &allocator : *allocators) {
-		allocator->ReleaseBlocks();
+		allocator->DisownBlocks();
 	}
 }
 
