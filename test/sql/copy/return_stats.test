@@ -269,3 +269,16 @@ query IIIIII
 COPY decimal128_multi_rg TO '{TEST_DIR}/decimal128_multi_rg.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, RETURN_STATS);
 ----
 <REGEX>:.*decimal128_multi_rg.parquet	4096	<REGEX>:\d+	<REGEX>:\d+	<REGEX>:{'"c"'={column_size_bytes=\d+, max=126619, min=19308, null_count=0, num_values=4096}}	NULL
+
+# an all-NULL row group has no min/max, which must not drop the file-level min/max of the other row groups
+statement ok
+CREATE TABLE all_null_row_groups AS
+SELECT CASE WHEN r < 5000 THEN NULL ELSE r END::INTEGER AS i,
+       NULL::INTEGER AS n,
+       CASE WHEN r < 5000 THEN NULL ELSE 'x' || r END AS s
+FROM range(10000) t(r);
+
+query IIIIII
+COPY all_null_row_groups TO '{TEST_DIR}/all_null_row_groups.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, RETURN_STATS);
+----
+<REGEX>:.*all_null_row_groups.parquet	10000	<REGEX>:\d+	<REGEX>:\d+	<REGEX>:{'"i"'={column_size_bytes=\d+, max=9999, min=5000, null_count=5000, num_values=10000}, '"n"'={column_size_bytes=\d+, null_count=10000, num_values=10000}, '"s"'={column_size_bytes=\d+, max=x9999, min=x5000, null_count=5000, num_values=10000}}	NULL
