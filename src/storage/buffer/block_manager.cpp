@@ -46,6 +46,7 @@ shared_ptr<BlockHandle> BlockManager::RegisterBlock(block_id_t block_id, MemoryT
 		auto existing_ptr = entry->second.lock();
 		if (existing_ptr) {
 			//! it hasn't! return it
+			D_ASSERT(existing_ptr->GetMemory().GetMemoryTag() == tag);
 			return existing_ptr;
 		}
 	}
@@ -54,6 +55,13 @@ shared_ptr<BlockHandle> BlockManager::RegisterBlock(block_id_t block_id, MemoryT
 	// register the block pointer in the set of blocks as a weak pointer
 	blocks[block_id] = weak_ptr<BlockHandle>(result);
 	return result;
+}
+
+shared_ptr<BlockHandle> BlockManager::ConvertToPersistent(QueryContext context, block_id_t block_id,
+                                                          shared_ptr<BlockHandle> old_block, BufferHandle old_handle,
+                                                          ConvertToPersistentMode mode) {
+	auto tag = old_block->GetMemory().GetMemoryTag();
+	return ConvertToPersistent(context, block_id, std::move(old_block), std::move(old_handle), mode, tag);
 }
 
 shared_ptr<BlockHandle> BlockManager::ConvertToPersistent(QueryContext context, block_id_t block_id,
@@ -115,6 +123,13 @@ shared_ptr<BlockHandle> BlockManager::ConvertToPersistent(QueryContext context, 
 		buffer_manager.GetBufferPool().PurgeQueue(*new_block);
 	}
 	return new_block;
+}
+
+shared_ptr<BlockHandle> BlockManager::ConvertToPersistent(QueryContext context, block_id_t block_id,
+                                                          shared_ptr<BlockHandle> old_block,
+                                                          ConvertToPersistentMode mode) {
+	auto tag = old_block->GetMemory().GetMemoryTag();
+	return ConvertToPersistent(context, block_id, std::move(old_block), mode, tag);
 }
 
 shared_ptr<BlockHandle> BlockManager::ConvertToPersistent(QueryContext context, block_id_t block_id,

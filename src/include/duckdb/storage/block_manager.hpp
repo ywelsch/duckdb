@@ -102,20 +102,25 @@ public:
 	//! Truncate the underlying database file after a checkpoint
 	virtual void Truncate();
 
-	//! Register a block with the given block id in the base file, the tag is ignored if it is already registered
+	//! Register a block with the given block id in the base file, an already registered block must have the same tag
 	shared_ptr<BlockHandle> RegisterBlock(block_id_t block_id, MemoryTag tag = MemoryTag::BASE_TABLE);
 	//! Convert an existing in-memory buffer into a persistent disk-backed block
 	//! If mode is set to destructive (default) - the old_block will be destroyed as part of this method
 	//! This can only be safely used when there is no other (lingering) usage of old_block
 	//! If there is concurrent usage of the block elsewhere - use the THREAD_SAFE mode which creates an extra copy
+	//! The new block keeps the memory tag of old_block, unless a tag is given
 	shared_ptr<BlockHandle> ConvertToPersistent(QueryContext context, block_id_t block_id,
 	                                            shared_ptr<BlockHandle> old_block, BufferHandle old_handle,
-	                                            ConvertToPersistentMode mode = ConvertToPersistentMode::DESTRUCTIVE,
-	                                            MemoryTag tag = MemoryTag::BASE_TABLE);
+	                                            ConvertToPersistentMode mode = ConvertToPersistentMode::DESTRUCTIVE);
+	shared_ptr<BlockHandle> ConvertToPersistent(QueryContext context, block_id_t block_id,
+	                                            shared_ptr<BlockHandle> old_block, BufferHandle old_handle,
+	                                            ConvertToPersistentMode mode, MemoryTag tag);
 	shared_ptr<BlockHandle> ConvertToPersistent(QueryContext context, block_id_t block_id,
 	                                            shared_ptr<BlockHandle> old_block,
-	                                            ConvertToPersistentMode mode = ConvertToPersistentMode::DESTRUCTIVE,
-	                                            MemoryTag tag = MemoryTag::BASE_TABLE);
+	                                            ConvertToPersistentMode mode = ConvertToPersistentMode::DESTRUCTIVE);
+	shared_ptr<BlockHandle> ConvertToPersistent(QueryContext context, block_id_t block_id,
+	                                            shared_ptr<BlockHandle> old_block, ConvertToPersistentMode mode,
+	                                            MemoryTag tag);
 
 	void UnregisterPersistentBlock(BlockHandle &block);
 	//! UnregisterBlock, only accepts non-temporary block ids
