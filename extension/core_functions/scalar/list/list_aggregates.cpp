@@ -477,7 +477,10 @@ unique_ptr<FunctionData> ListAggregatesBind(ClientContext &context, ScalarFuncti
 	// found a matching function, bind it as an aggregate
 	auto best_function = func.functions.GetFunctionByOffset(best_function_idx.GetIndex());
 	if (IS_AGGR) {
-		bound_function.SetErrorMode(best_function.GetErrorMode());
+		if (best_function.GetErrorMode() == FunctionErrors::CAN_THROW_RUNTIME_ERROR) {
+			// never clear the error mode here - executing the aggregate can throw regardless of how it is declared
+			bound_function.SetErrorMode(FunctionErrors::CAN_THROW_RUNTIME_ERROR);
+		}
 		return ListAggregatesBindFunction<IS_AGGR>(context, bound_function, child_type, best_function, arguments);
 	}
 

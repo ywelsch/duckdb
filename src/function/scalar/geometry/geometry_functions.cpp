@@ -13,6 +13,8 @@ static void FromWKBFunction(DataChunk &input, ExpressionState &state, Vector &re
 
 ScalarFunction StGeomfromwkbFun::GetFunction() {
 	ScalarFunction function({LogicalType::BLOB}, LogicalType::GEOMETRY(), FromWKBFunction);
+	// throws when the input is not valid WKB
+	function.SetFallible();
 	return function;
 }
 

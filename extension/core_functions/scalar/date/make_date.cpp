@@ -178,6 +178,8 @@ ScalarFunctionSet MakeTimestampNsFun::GetFunctions() {
 	ScalarFunctionSet operator_set("make_timestamp_ns");
 	operator_set.AddFunction(
 	    ScalarFunction({LogicalType::BIGINT}, LogicalType::TIMESTAMP_NS, ExecuteMakeTimestampNs<int64_t>));
+	// throws if the nanoseconds are out of range for a timestamp
+	operator_set.SetFallible();
 	return operator_set;
 }
 

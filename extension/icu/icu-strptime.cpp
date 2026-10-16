@@ -474,6 +474,8 @@ struct ICUStrftime : public ICUDateFunc {
 		ScalarFunctionSet set(name);
 		set.AddFunction(ScalarFunction({LogicalType::TIMESTAMP_TZ, LogicalType::VARCHAR}, LogicalType::VARCHAR,
 		                               ICUStrftimeFunction, Bind));
+		// throws for unsupported format specifiers
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 

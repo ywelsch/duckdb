@@ -117,6 +117,10 @@ struct BoundCastInfo {
 
 public:
 	BoundCastInfo Copy() const;
+	bool IsNopCast() const;
+	//! Whether this is the fallback cast used when no cast exists between the types
+	//! It throws for any non-NULL value, regardless of the types involved
+	bool IsNullCast() const;
 };
 
 struct BindCastInput {

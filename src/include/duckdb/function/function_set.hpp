@@ -81,6 +81,13 @@ public:
 	DUCKDB_API explicit ScalarFunctionSet(ScalarFunction fun);
 
 	DUCKDB_API ScalarFunction GetFunctionByArguments(ClientContext &context, const vector<LogicalType> &arguments);
+
+	//! Mark every overload in the set as fallible (can throw runtime errors)
+	void SetFallible() {
+		for (auto &fun : functions) {
+			fun.SetFallible();
+		}
+	}
 };
 
 class AggregateFunctionSet : public FunctionSet<AggregateFunction> {

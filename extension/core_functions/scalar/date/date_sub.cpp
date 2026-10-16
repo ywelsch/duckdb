@@ -451,6 +451,8 @@ ScalarFunctionSet DateSubFun::GetFunctions() {
 	                                    LogicalType::BIGINT, DateSubFunction<timestamp_t>));
 	date_sub.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIME, LogicalType::TIME},
 	                                    LogicalType::BIGINT, DateSubFunction<dtime_t>));
+	// throws for unsupported date parts, and when the difference overflows
+	date_sub.SetFallible();
 	return date_sub;
 }
 

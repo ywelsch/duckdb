@@ -299,6 +299,8 @@ ScalarFunctionSet StrfTimeFun::GetFunctions() {
 	                                    StrfTimeFunctionTimestamp<false>, StrfTimeBindFunction<false>));
 	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIMESTAMP_TZ}, LogicalType::VARCHAR,
 	                                    StrfTimeFunctionTimestamp<true>, StrfTimeBindFunction<true>));
+	// throws for unsupported format specifiers
+	strftime.SetFallible();
 	return strftime;
 }
 ScalarFunctionSet StrpTimeFun::GetFunctions() {

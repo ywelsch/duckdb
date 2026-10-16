@@ -253,6 +253,8 @@ unique_ptr<FunctionData> BindAggregateState(ClientContext &context, ScalarFuncti
 		bound_function.SetReturnType(arg_return_type);
 	}
 
+	// these run the finalize/combine of the underlying aggregate, which can throw, e.g. skewness of a large sum
+	bound_function.SetFallible();
 	return make_uniq<ExportAggregateBindData>(bound_aggr, bound_aggr.GetStateSizeCallback()(bound_aggr));
 }
 

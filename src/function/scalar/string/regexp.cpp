@@ -408,6 +408,8 @@ ScalarFunctionSet RegexpReplaceFun::GetFunctions() {
 	regexp_replace.AddFunction(ScalarFunction(
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	    RegexReplaceFunction, RegexReplaceBind, nullptr, nullptr, RegexInitLocalState));
+	// throws for invalid replacement strings
+	regexp_replace.SetFallible();
 	return (regexp_replace);
 }
 
@@ -466,6 +468,8 @@ ScalarFunctionSet RegexpExtractAllFun::GetFunctions() {
 	    RegexpExtractAllStruct::Execute, RegexpExtractAllStruct::Bind, nullptr, nullptr,
 	    RegexpExtractAllStruct::InitLocalState, LogicalType::INVALID, FunctionStability::CONSISTENT,
 	    FunctionNullHandling::SPECIAL_HANDLING));
+	// throws when accessing a group that the pattern does not have
+	regexp_extract_all.SetFallible();
 	return (regexp_extract_all);
 }
 

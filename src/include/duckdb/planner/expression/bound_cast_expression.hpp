@@ -48,6 +48,9 @@ public:
 	//! boolean casts, because that can be e.g. -1 -> TRUE -> 1. This is necessary to prevent some optimizer bugs.
 	static bool CastIsInvertible(const LogicalType &source_type, const LogicalType &target_type);
 
+	//! Returns true if a cast from source_type to target_type can throw a runtime error
+	static bool CastCanThrow(const LogicalType &source_type, const LogicalType &target_type, bool try_cast);
+
 	string ToString() const override;
 
 	bool Equals(const BaseExpression &other) const override;
