@@ -248,6 +248,10 @@ public:
 
 	//! The amount of tuples considered by a scan, before applying filters
 	idx_t rows_scanned = 0;
+	//! Whether prefetch_blocks holds the block manager's prefetch decision for this scan
+	bool prefetch_resolved = false;
+	//! Whether to prefetch the blocks of each vector before scanning it
+	bool prefetch_blocks = false;
 
 	//! Optional state for custom row group ordering
 	unique_ptr<RowGroupReorderer> reorderer;

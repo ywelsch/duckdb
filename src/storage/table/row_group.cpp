@@ -732,7 +732,12 @@ void RowGroup::Scan(ScanOptions options, CollectionScanState &state, DataChunk &
 		state.rows_scanned += count;
 
 		auto &block_manager = GetBlockManager();
-		if (block_manager.Prefetch()) {
+		if (!state.prefetch_resolved) {
+			// Prefetch() parses the storage_block_prefetch setting, so decide once per scan instead of per vector
+			state.prefetch_blocks = block_manager.Prefetch();
+			state.prefetch_resolved = true;
+		}
+		if (state.prefetch_blocks) {
 			PrefetchState prefetch_state;
 			for (idx_t i = 0; i < column_ids.size(); i++) {
 				const auto &column = column_ids[i];
