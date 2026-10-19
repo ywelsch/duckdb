@@ -783,6 +783,32 @@ void ColumnData::FetchRows(TransactionData transaction, ColumnFetchState &state,
 //! Runs of at least this many consecutive rows are scanned instead of fetched row by row
 static constexpr idx_t FETCH_SCAN_RUN_THRESHOLD = 4;
 
+#ifdef D_ASSERT_IS_ENABLED
+//! Verify that no scanned string points into the segment's block, which is unpinned once the fetch is done
+static void VerifyStringsCopied(ColumnSegment &segment, Vector &result, idx_t result_offset, idx_t count) {
+	if (result.GetType().InternalType() != PhysicalType::VARCHAR || !segment.GetBlockHandle()) {
+		return;
+	}
+	auto &buffer_manager = segment.GetBlockHandle()->GetMemory().GetBufferManager();
+	auto handle = buffer_manager.Pin(segment.GetBlockHandle());
+	auto block_start = handle.Ptr();
+	// transient segments can be smaller than a block, so bound by the pinned buffer rather than the block size
+	auto block_end = block_start + handle.GetFileBuffer().Size();
+	auto strings = FlatVector::GetData<string_t>(result);
+	auto &validity = FlatVector::Validity(result);
+	for (idx_t i = result_offset; i < result_offset + count; i++) {
+		if (!validity.RowIsValid(i) || strings[i].IsInlined()) {
+			continue;
+		}
+		auto str_ptr = const_data_ptr_cast(strings[i].GetData());
+		if (str_ptr >= block_start && str_ptr < block_end) {
+			throw InternalException("FetchRowsAtSegmentLevel: scanned string points into the segment's block, "
+			                        "the compression function ignored StringScanType::COPY_STRINGS");
+		}
+	}
+}
+#endif
+
 void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetchState &state, const idx_t *offsets,
                                          const SelectionVector &sel, idx_t fetch_count, Vector &result,
                                          idx_t result_offset) {
@@ -827,6 +853,9 @@ void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetc
 				ColumnData::InitializeScanWithOffset(*scan_state, offset);
 			}
 			ScanVector(*scan_state, result, run_count, ScanVectorType::SCAN_FLAT_VECTOR, result_offset + idx);
+#ifdef D_ASSERT_IS_ENABLED
+			VerifyStringsCopied(current_segment->GetNode(), result, result_offset + idx, run_count);
+#endif
 		} else {
 			for (idx_t i = 0; i < run_count; i++) {
 				current_segment->GetNode().FetchRow(state, NumericCast<row_t>(offset + i - segment_start), result,
