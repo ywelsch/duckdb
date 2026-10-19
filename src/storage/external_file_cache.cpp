@@ -11,8 +11,9 @@ namespace duckdb {
 
 class ExternalFileCache::ExternalFileCacheObjectCacheEntry : public ObjectCacheEntry {
 public:
-	ExternalFileCacheObjectCacheEntry(ExternalFileCache &cache_p, string path_p, idx_t generation_p)
-	    : cache(cache_p), cached_file(make_shared_ptr<CachedFile>(std::move(path_p), generation_p)) {
+	ExternalFileCacheObjectCacheEntry(ExternalFileCache &cache_p, string path_p, string catalog_p, idx_t generation_p)
+	    : cache(cache_p),
+	      cached_file(make_shared_ptr<CachedFile>(std::move(path_p), std::move(catalog_p), generation_p)) {
 		cache.InsertCachedFileKey(cached_file->path);
 	}
 
@@ -90,8 +91,8 @@ void ExternalFileCache::CachedFileRange::VerifyCheckSum() {
 #endif
 }
 
-ExternalFileCache::CachedFile::CachedFile(string path_p, idx_t generation_p)
-    : path(std::move(path_p)), generation(generation_p), file_size(0), last_modified(0), can_seek(false),
+ExternalFileCache::CachedFile::CachedFile(string path_p, string catalog_p, idx_t generation_p)
+    : path(std::move(path_p)), catalog(std::move(catalog_p)), generation(generation_p), file_size(0), last_modified(0), can_seek(false),
       on_disk_file(false) {
 }
 
@@ -247,25 +248,31 @@ void ExternalFileCache::DeleteObjectCacheEntries(const vector<string> &paths) {
 	}
 }
 
-shared_ptr<ExternalFileCache::CachedFile> ExternalFileCache::GetOrCreateCachedFile(const string &path) {
+shared_ptr<ExternalFileCache::CachedFile> ExternalFileCache::GetOrCreateCachedFile(const string &path,
+                                                                                   const string &catalog) {
+	const auto key = catalog.empty() ? path : to_string(catalog.size()) + ":" + catalog + ":" + path;
 	auto &object_cache = buffer_manager.GetDatabase().GetObjectCache();
 	while (true) {
 		const auto current_generation = generation.load();
 		if (!enable) {
-			return make_shared_ptr<CachedFile>(path, current_generation);
+			return make_shared_ptr<CachedFile>(key, catalog, current_generation);
 		}
 
-		auto entry = object_cache.GetOrCreateWithTypePrefix<ExternalFileCacheObjectCacheEntry>(path, *this, path,
+		auto entry = object_cache.GetOrCreateWithTypePrefix<ExternalFileCacheObjectCacheEntry>(key, *this, key, catalog,
 		                                                                                       current_generation);
 		auto cached_file = entry->GetCachedFile();
 
 		if (!enable) {
-			object_cache.DeleteWithTypePrefix<ExternalFileCacheObjectCacheEntry>(path);
-			return make_shared_ptr<CachedFile>(path, current_generation);
+			object_cache.DeleteWithTypePrefix<ExternalFileCacheObjectCacheEntry>(key);
+			return make_shared_ptr<CachedFile>(key, catalog, current_generation);
 		}
 		if (cached_file->generation != current_generation) {
-			object_cache.DeleteWithTypePrefix<ExternalFileCacheObjectCacheEntry>(path);
+			object_cache.DeleteWithTypePrefix<ExternalFileCacheObjectCacheEntry>(key);
 			continue;
+		}
+		// a path that spells another catalog's key must not reach that catalog's ranges, so it goes uncached
+		if (cached_file->catalog != catalog) {
+			return make_shared_ptr<CachedFile>(key, catalog, current_generation);
 		}
 		return cached_file;
 	}

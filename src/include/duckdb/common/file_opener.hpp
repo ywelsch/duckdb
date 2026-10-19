@@ -22,7 +22,17 @@ class Value;
 class Logger;
 
 struct FileOpenerInfo {
+	FileOpenerInfo() = default;
+	// Not explicit: callers write `FileOpenerInfo info = {path};`
+	FileOpenerInfo(string file_path_p) : file_path(std::move(file_path_p)) { // NOLINT: allow implicit conversion
+	}
+	FileOpenerInfo(string file_path_p, string catalog_p)
+	    : file_path(std::move(file_path_p)), catalog(std::move(catalog_p)) {
+	}
+
 	string file_path;
+	//! The catalog on whose behalf the file is accessed, if any (see BaseSecret::catalog)
+	string catalog;
 };
 
 //! Abstract type that provide client-specific context to FileSystem.

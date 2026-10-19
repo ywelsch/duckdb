@@ -56,7 +56,7 @@ public:
 	//! Cached files
 	struct CachedFile {
 	public:
-		CachedFile(string path_p, idx_t generation_p);
+		CachedFile(string path_p, string catalog_p, idx_t generation_p);
 
 	public:
 		//! Verifies that none of the ranges fully overlap (must hold the lock)
@@ -74,7 +74,10 @@ public:
 		map<idx_t, shared_ptr<CachedFileRange>> &Ranges(const unique_ptr<StorageLockKey> &guard);
 
 	public:
+		//! The cache key: the path, prefixed by the catalog for a catalog's opens
 		const string path;
+		//! The catalog whose opens read this file's ranges (empty: none)
+		const string catalog;
 		const idx_t generation;
 		StorageLock lock;
 
@@ -103,9 +106,10 @@ public:
 	idx_t GetCachedFileCount() const;
 
 	BufferManager &GetBufferManager() const;
-	//! Gets the shared cached file for the given path, creating it if not yet present.
+	//! Gets the shared cached file for the given path and catalog, creating it if not yet present.
+	//! A catalog's opens get entries of their own, so ranges read with its secrets are not served to other opens.
 	//! When caching is disabled, returns a transient CachedFile that is not tracked in the cached file map.
-	shared_ptr<CachedFile> GetOrCreateCachedFile(const string &path);
+	shared_ptr<CachedFile> GetOrCreateCachedFile(const string &path, const string &catalog = string());
 
 	DUCKDB_API static bool IsValid(bool validate, const string &cached_version_tag, timestamp_t cached_last_modified,
 	                               const string &current_version_tag, timestamp_t current_last_modified);

@@ -59,6 +59,11 @@ public:
 	//! Get best match
 	virtual SecretMatch LookupSecret(const string &path, const string &type,
 	                                 optional_ptr<CatalogTransaction> transaction = nullptr) = 0;
+	//! Get the best match for a file operation that presents `catalog` (empty: none). Secrets scoped to `catalog`
+	//! are preferred over global ones; secrets scoped to another catalog never match. The default refuses a
+	//! catalog-scoped result of LookupSecret so that a storage unaware of catalogs fails closed.
+	virtual SecretMatch LookupSecretForCatalog(const string &path, const string &type, const string &catalog,
+	                                           optional_ptr<CatalogTransaction> transaction = nullptr);
 	//! Get a secret by name
 	virtual unique_ptr<SecretEntry> GetSecretByName(const string &name,
 	                                                optional_ptr<CatalogTransaction> transaction = nullptr) = 0;
@@ -77,6 +82,12 @@ protected:
 	//! by secret name by default.
 	static SecretMatch SelectBestMatch(SecretEntry &secret_entry, const string &path, int64_t offset,
 	                                   SecretMatch &current_best);
+	//! As above for a file operation that presents `catalog`: a secret scoped to another catalog is skipped, a
+	//! secret scoped to `catalog` outranks every global match
+	static SecretMatch SelectBestMatch(SecretEntry &secret_entry, const string &path, const string &catalog,
+	                                   int64_t offset, SecretMatch &current_best);
+	//! Added to the score of a secret scoped to the presented catalog; larger than any path-length score
+	static constexpr int64_t CATALOG_MATCH_BONUS = int64_t(1) << 40;
 
 	//! Name of the storage backend (e.g. temporary, file, etc)
 	string storage_name;
@@ -115,6 +126,8 @@ public:
 	                      optional_ptr<CatalogTransaction> transaction = nullptr) override;
 	SecretMatch LookupSecret(const string &path, const string &type,
 	                         optional_ptr<CatalogTransaction> transaction = nullptr) override;
+	SecretMatch LookupSecretForCatalog(const string &path, const string &type, const string &catalog,
+	                                   optional_ptr<CatalogTransaction> transaction = nullptr) override;
 	unique_ptr<SecretEntry> GetSecretByName(const string &name,
 	                                        optional_ptr<CatalogTransaction> transaction = nullptr) override;
 

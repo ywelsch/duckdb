@@ -25,6 +25,8 @@ struct OpenFileInfo {
 	}
 
 	string path;
+	//! The catalog on whose behalf the file is opened: secrets scoped to that catalog apply (see BaseSecret::catalog)
+	string catalog;
 	shared_ptr<ExtendedOpenFileInfo> extended_info;
 
 public:

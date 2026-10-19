@@ -107,7 +107,7 @@ public:
 	}
 	BaseSecret(const BaseSecret &other)
 	    : prefix_paths(other.prefix_paths), type(other.type), provider(other.provider), name(other.name),
-	      serializable(other.serializable) {
+	      serializable(other.serializable), catalog(other.catalog) {
 		D_ASSERT(!type.empty());
 	}
 	virtual ~BaseSecret() = default;
@@ -141,6 +141,13 @@ public:
 	bool IsSerializable() const {
 		return serializable;
 	}
+	const string &GetCatalog() const {
+		return catalog;
+	}
+	//! Scope the secret to a catalog (set before the secret is registered; registered secrets are immutable)
+	void SetCatalog(string catalog_p) {
+		catalog = std::move(catalog_p);
+	}
 
 protected:
 	//! Helper function to serialize the base BaseSecret class variables
@@ -157,6 +164,9 @@ protected:
 	string name;
 	//! Whether the secret can be serialized/deserialized
 	bool serializable;
+	//! The catalog this secret is scoped to, or empty. A catalog-scoped secret is never matched by path alone: it
+	//! resolves only for file operations that present this catalog, and then it beats any global secret.
+	string catalog;
 };
 
 //! The KeyValueSecret is a class that implements a Secret as a set of key -> values. This class can be used
@@ -170,12 +180,14 @@ public:
 	}
 	explicit KeyValueSecret(const BaseSecret &secret)
 	    : BaseSecret(secret.GetScope(), secret.GetType(), secret.GetProvider(), secret.GetName()) {
+		catalog = secret.GetCatalog();
 		serializable = true;
 	};
 	KeyValueSecret(const KeyValueSecret &secret)
 	    : BaseSecret(secret.GetScope(), secret.GetType(), secret.GetProvider(), secret.GetName()) {
 		secret_map = secret.secret_map;
 		redact_keys = secret.redact_keys;
+		catalog = secret.catalog;
 		serializable = true;
 	};
 	KeyValueSecret(KeyValueSecret &&secret) noexcept
@@ -183,6 +195,7 @@ public:
 	                 std::move(secret.name)) {
 		secret_map = std::move(secret.secret_map);
 		redact_keys = std::move(secret.redact_keys);
+		catalog = std::move(secret.catalog);
 		serializable = true;
 	};
 
@@ -330,6 +343,8 @@ protected:
 	optional_ptr<ClientContext> context;
 
 	string path;
+	//! The catalog the file operation presents on its FileOpenerInfo, or empty
+	string catalog;
 };
 
 } // namespace duckdb

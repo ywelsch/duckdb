@@ -31,6 +31,10 @@ int64_t BaseSecret::MatchScore(const string &path) const {
 }
 
 void BaseSecret::SerializeBaseSecret(Serializer &serializer) const {
+	// The serialized form carries no catalog, so a scoped secret is refused rather than persisted as a global one
+	if (!catalog.empty()) {
+		throw NotImplementedException("Secret '%s' is scoped to catalog '%s' and cannot be serialized", name, catalog);
+	}
 	serializer.WriteProperty(100, "type", type);
 	serializer.WriteProperty(101, "provider", provider);
 	serializer.WriteProperty(102, "name", name);
@@ -151,7 +155,7 @@ void KeyValueSecretReader::Initialize(const char **secret_types, idx_t secret_ty
 	SecretMatch secret_match;
 	for (idx_t i = 0; i < secret_types_len; i++) {
 		auto &secret_type = secret_types[i];
-		secret_match = secret_manager.LookupSecret(transaction, path, secret_type);
+		secret_match = secret_manager.LookupSecret(transaction, path, secret_type, catalog);
 		if (secret_match.HasMatch()) {
 			break;
 		}
@@ -175,6 +179,7 @@ KeyValueSecretReader::KeyValueSecretReader(FileOpener &opener_p, optional_ptr<Fi
 
 	if (info) {
 		path = info->file_path;
+		catalog = info->catalog;
 	}
 
 	Initialize(secret_types, secret_types_len);

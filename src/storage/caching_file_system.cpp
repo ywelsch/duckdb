@@ -87,7 +87,7 @@ shared_ptr<CachingFileHandle::CachedFile> CachingFileHandle::EnsureCachedFileCur
 	if (needs_reopen) {
 		file_handle.reset();
 	}
-	cached_file = external_file_cache.GetOrCreateCachedFile(path.path);
+	cached_file = external_file_cache.GetOrCreateCachedFile(path.path, path.catalog);
 	if (needs_reopen) {
 		GetFileHandle();
 	}
@@ -102,7 +102,7 @@ CachingFileHandle::CachingFileHandle(QueryContext context, CachingFileSystem &ca
       validate(
           ExternalFileCacheUtil::GetCacheValidationMode(path_p, context.GetClientContext(), caching_file_system_p.db)),
       cached_file(nullptr), position(0) {
-	cached_file = external_file_cache.GetOrCreateCachedFile(path_p.path);
+	cached_file = external_file_cache.GetOrCreateCachedFile(path_p.path, path_p.catalog);
 	if (!external_file_cache.IsEnabled() || Validate()) {
 		// If caching is disabled, or if we must validate cache entries, we always have to open the file
 		GetFileHandle();

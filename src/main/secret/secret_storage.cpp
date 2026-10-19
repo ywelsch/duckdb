@@ -17,6 +17,29 @@ namespace duckdb {
 
 SecretMatch SecretStorage::SelectBestMatch(SecretEntry &secret_entry, const string &path, int64_t offset,
                                            SecretMatch &current_best) {
+	return SelectBestMatch(secret_entry, path, string(), offset, current_best);
+}
+
+SecretMatch SecretStorage::LookupSecretForCatalog(const string &path, const string &type, const string &catalog,
+                                                  optional_ptr<CatalogTransaction> transaction) {
+	auto match = LookupSecret(path, type, transaction);
+	if (match.HasMatch()) {
+		auto &secret_catalog = match.GetSecret().GetCatalog();
+		if (!secret_catalog.empty() && secret_catalog != catalog) {
+			return SecretMatch();
+		}
+	}
+	return match;
+}
+
+SecretMatch SecretStorage::SelectBestMatch(SecretEntry &secret_entry, const string &path, const string &catalog,
+                                           int64_t offset, SecretMatch &current_best) {
+	// A catalog-scoped secret is only a candidate for the catalog it is scoped to
+	auto &secret_catalog = secret_entry.secret->GetCatalog();
+	if (!secret_catalog.empty() && secret_catalog != catalog) {
+		return current_best;
+	}
+
 	// Get secret match score
 	auto match_score = secret_entry.secret->MatchScore(path);
 
@@ -30,6 +53,10 @@ SecretMatch SecretStorage::SelectBestMatch(SecretEntry &secret_entry, const stri
 
 	// Apply storage tie-break offset
 	match_score = 100 * match_score - offset;
+	// The presented catalog's own secrets outrank every global one
+	if (!secret_catalog.empty()) {
+		match_score += CATALOG_MATCH_BONUS;
+	}
 
 	// Choose the best matching score, tie-breaking on secret name when necessary
 	if (match_score > current_best.score) {
@@ -102,12 +129,18 @@ void CatalogSetSecretStorage::DropSecretByName(const string &name, OnEntryNotFou
 
 SecretMatch CatalogSetSecretStorage::LookupSecret(const string &path, const string &type,
                                                   optional_ptr<CatalogTransaction> transaction) {
+	return LookupSecretForCatalog(path, type, string(), transaction);
+}
+
+SecretMatch CatalogSetSecretStorage::LookupSecretForCatalog(const string &path, const string &type,
+                                                            const string &catalog,
+                                                            optional_ptr<CatalogTransaction> transaction) {
 	auto best_match = SecretMatch();
 
 	const std::function<void(CatalogEntry &)> callback = [&](CatalogEntry &entry) {
 		auto &cast_entry = entry.Cast<SecretCatalogEntry>();
 		if (StringUtil::CIEquals(cast_entry.secret->secret->GetType(), type)) {
-			best_match = SelectBestMatch(*cast_entry.secret, path, tie_break_offset, best_match);
+			best_match = SelectBestMatch(*cast_entry.secret, path, catalog, tie_break_offset, best_match);
 		}
 	};
 	secrets->Scan(GetTransactionOrDefault(transaction), callback);

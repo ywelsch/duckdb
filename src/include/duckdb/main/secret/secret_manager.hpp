@@ -124,8 +124,11 @@ public:
 	DUCKDB_API unique_ptr<SecretEntry> CreateSecret(ClientContext &context, const CreateSecretInput &info);
 	//! The Bind for create secret is done by the secret manager
 	DUCKDB_API BoundStatement BindCreateSecret(CatalogTransaction transaction, CreateSecretInput &info);
-	//! Lookup the best matching secret by matching the secret scopes to the path
-	DUCKDB_API SecretMatch LookupSecret(CatalogTransaction transaction, const string &path, const string &type);
+	//! Lookup the best matching secret by matching the secret scopes to the path. `catalog` is the catalog the file
+	//! operation presents (empty: none): secrets scoped to it are preferred, secrets scoped to another catalog are
+	//! never returned.
+	DUCKDB_API SecretMatch LookupSecret(CatalogTransaction transaction, const string &path, const string &type,
+	                                    const string &catalog = string());
 	//! Get a secret by name, optionally from a specific storage
 	DUCKDB_API unique_ptr<SecretEntry> GetSecretByName(CatalogTransaction transaction, const string &name,
 	                                                   const string &storage = "");

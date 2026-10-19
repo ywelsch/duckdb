@@ -311,7 +311,8 @@ BoundStatement SecretManager::BindCreateSecret(CatalogTransaction transaction, C
 	return result;
 }
 
-SecretMatch SecretManager::LookupSecret(CatalogTransaction transaction, const string &path, const string &type) {
+SecretMatch SecretManager::LookupSecret(CatalogTransaction transaction, const string &path, const string &type,
+                                        const string &catalog) {
 	InitializeSecrets(transaction);
 
 	int64_t best_match_score = NumericLimits<int64_t>::Minimum();
@@ -321,7 +322,7 @@ SecretMatch SecretManager::LookupSecret(CatalogTransaction transaction, const st
 		if (!storage_ref.get().IncludeInLookups()) {
 			continue;
 		}
-		auto match = storage_ref.get().LookupSecret(path, StringUtil::Lower(type), &transaction);
+		auto match = storage_ref.get().LookupSecretForCatalog(path, StringUtil::Lower(type), catalog, &transaction);
 		if (match.HasMatch() && match.score > best_match_score) {
 			best_match = std::move(match.secret_entry);
 			best_match_score = match.score;
@@ -333,6 +334,14 @@ SecretMatch SecretManager::LookupSecret(CatalogTransaction transaction, const st
 	}
 
 	return SecretMatch();
+}
+
+//! A catalog-scoped secret resolves only for file operations that present its catalog, never by its name
+static unique_ptr<SecretEntry> UnlessCatalogScoped(unique_ptr<SecretEntry> entry) {
+	if (entry && !entry->secret->GetCatalog().empty()) {
+		return nullptr;
+	}
+	return entry;
 }
 
 unique_ptr<SecretEntry> SecretManager::GetSecretByName(CatalogTransaction transaction, const string &name,
@@ -349,11 +358,11 @@ unique_ptr<SecretEntry> SecretManager::GetSecretByName(CatalogTransaction transa
 			throw InvalidInputException("Unknown secret storage found: '%s'", storage);
 		}
 
-		return storage_lookup->GetSecretByName(name, &transaction);
+		return UnlessCatalogScoped(storage_lookup->GetSecretByName(name, &transaction));
 	}
 
 	for (const auto &storage_ref : GetSecretStorages()) {
-		auto lookup = storage_ref.get().GetSecretByName(name, &transaction);
+		auto lookup = UnlessCatalogScoped(storage_ref.get().GetSecretByName(name, &transaction));
 		if (lookup) {
 			if (found) {
 				throw InvalidConfigurationException(
@@ -381,7 +390,11 @@ void SecretManager::DropSecretByName(CatalogTransaction transaction, const strin
 		if (!storage_lookup) {
 			throw InvalidInputException("Unknown storage type found for drop secret: '%s'", storage);
 		}
-		matches.push_back(*storage_lookup.get());
+		// a catalog-scoped secret is dropped like a missing one
+		auto lookup = storage_lookup->GetSecretByName(name, &transaction);
+		if (!lookup || lookup->secret->GetCatalog().empty()) {
+			matches.push_back(*storage_lookup.get());
+		}
 	} else {
 		for (const auto &storage_ref : GetSecretStorages()) {
 			if (persist_type == SecretPersistType::PERSISTENT && !storage_ref.get().Persistent()) {
@@ -391,7 +404,7 @@ void SecretManager::DropSecretByName(CatalogTransaction transaction, const strin
 				continue;
 			}
 
-			auto lookup = storage_ref.get().GetSecretByName(name, &transaction);
+			auto lookup = UnlessCatalogScoped(storage_ref.get().GetSecretByName(name, &transaction));
 			if (lookup) {
 				matches.push_back(storage_ref.get());
 			}
