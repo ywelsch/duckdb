@@ -7,7 +7,6 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/function/compression_function.hpp"
 #include "duckdb/function/variant/variant_shredding.hpp"
@@ -432,16 +431,6 @@ idx_t ColumnData::ScanCount(ColumnScanState &state, Vector &result, idx_t scan_c
 	return ScanVector(state, result, scan_count, ScanVectorType::SCAN_FLAT_VECTOR, result_offset);
 }
 
-void ColumnData::ScanRange(const QueryContext &context, idx_t row_idx, idx_t count, Vector &result,
-                           idx_t result_offset) {
-	ColumnScanState scan_state(nullptr);
-	scan_state.Initialize(context, type, nullptr);
-	InitializeScanWithOffset(scan_state, row_idx);
-	Vector scanned(type, count);
-	ScanCount(scan_state, scanned, count);
-	VectorOperations::Copy(scanned, result, count, 0, result_offset);
-}
-
 void ColumnData::Filter(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
                         SelectionVector &sel, idx_t &s_count, const TableFilter &filter,
                         TableFilterState &filter_state) {
@@ -791,6 +780,9 @@ void ColumnData::FetchRows(TransactionData transaction, ColumnFetchState &state,
 	FetchRowsAtSegmentLevel(transaction, state, offsets, sel, fetch_count, result, result_offset);
 }
 
+//! Runs of at least this many consecutive rows are scanned instead of fetched row by row
+static constexpr idx_t FETCH_SCAN_RUN_THRESHOLD = 4;
+
 void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetchState &state, const idx_t *offsets,
                                          const SelectionVector &sel, idx_t fetch_count, Vector &result,
                                          idx_t result_offset) {
@@ -801,7 +793,10 @@ void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetc
 	optional_ptr<SegmentNode<ColumnSegment>> current_segment;
 	idx_t segment_start = 0;
 	idx_t segment_end = 0;
-	for (idx_t idx = 0; idx < fetch_count; idx++) {
+	// one scan per segment serves all runs in it, so their decoding work is shared
+	unique_ptr<ColumnScanState> scan_state;
+	idx_t idx = 0;
+	while (idx < fetch_count) {
 		const idx_t offset = offsets[sel.get_index(idx)];
 		if (offset > count) {
 			throw InternalException("ColumnData::FetchRowsAtSegmentLevel - row_id %lld out of range for count %lld",
@@ -812,8 +807,33 @@ void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetc
 			segment_start = current_segment->GetRowStart();
 			segment_end = segment_start + current_segment->GetNode().count;
 		}
-		const idx_t index_in_segment = offset - segment_start;
-		current_segment->GetNode().FetchRow(state, NumericCast<row_t>(index_in_segment), result, result_offset + idx);
+		idx_t run_count = 1;
+		while (idx + run_count < fetch_count && offset + run_count < segment_end &&
+		       offsets[sel.get_index(idx + run_count)] == offset + run_count) {
+			run_count++;
+		}
+		if (run_count >= FETCH_SCAN_RUN_THRESHOLD) {
+			// a single-row fetch can decode far more than its row, so runs of consecutive rows are scanned
+			if (!scan_state) {
+				scan_state = make_uniq<ColumnScanState>(nullptr);
+				scan_state->Initialize(state.context, type, nullptr);
+				// the scan state and its pins are gone after the fetch, so the result has to own its strings
+				scan_state->string_scan_type = StringScanType::COPY_STRINGS;
+			}
+			if (scan_state->current.get() == current_segment.get() && scan_state->offset_in_column <= offset) {
+				// continue the scan of this segment, skipping the rows in between
+				scan_state->offset_in_column = offset;
+			} else {
+				ColumnData::InitializeScanWithOffset(*scan_state, offset);
+			}
+			ScanVector(*scan_state, result, run_count, ScanVectorType::SCAN_FLAT_VECTOR, result_offset + idx);
+		} else {
+			for (idx_t i = 0; i < run_count; i++) {
+				current_segment->GetNode().FetchRow(state, NumericCast<row_t>(offset + i - segment_start), result,
+				                                    result_offset + idx + i);
+			}
+		}
+		idx += run_count;
 	}
 	{
 		const lock_guard<mutex> update_guard(update_lock);

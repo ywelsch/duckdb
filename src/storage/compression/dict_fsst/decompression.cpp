@@ -156,13 +156,15 @@ const SelectionVector &CompressedStringScanState::GetSelVec(idx_t start, idx_t s
 	}
 }
 
-void CompressedStringScanState::ScanToFlatVector(Vector &result, idx_t result_offset, idx_t start, idx_t scan_count) {
-	Select(result, result_offset, start, *FlatVector::IncrementalSelectionVector(), scan_count);
+void CompressedStringScanState::ScanToFlatVector(Vector &result, idx_t result_offset, idx_t start, idx_t scan_count,
+                                                 StringScanType string_scan_type) {
+	Select(result, result_offset, start, *FlatVector::IncrementalSelectionVector(), scan_count, string_scan_type);
 	result.Verify();
 }
 
 void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_t start, const SelectionVector &sel,
-                                       idx_t sel_count) {
+                                       idx_t sel_count, StringScanType string_scan_type) {
+	const bool copy_strings = string_scan_type == StringScanType::COPY_STRINGS;
 	const auto scan_count = sel_count == 0 ? 0 : sel.get_index(sel_count - 1) + 1;
 	auto &selvec = GetSelVec(start, scan_count);
 
@@ -180,7 +182,11 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 				result_data.WriteNull();
 				continue;
 			}
-			result_data.WriteStringRef(dictionary_values[string_number]);
+			if (copy_strings) {
+				result_data.WriteValue(dictionary_values[string_number]);
+			} else {
+				result_data.WriteStringRef(dictionary_values[string_number]);
+			}
 		}
 	} else {
 		for (idx_t i = 0; i < sel_count; i++) {
@@ -196,7 +202,13 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 			for (; decompress_position < string_number; decompress_position++) {
 				decompress_offset += string_lengths[decompress_position];
 			}
-			result_data.WriteStringRef(FetchStringFromDict(result, decompress_offset, string_number));
+			auto str = FetchStringFromDict(result, decompress_offset, string_number);
+			// only DICTIONARY mode points into the block, the FSST modes decompress into the result
+			if (copy_strings && mode == DictFSSTMode::DICTIONARY) {
+				result_data.WriteValue(str);
+			} else {
+				result_data.WriteStringRef(str);
+			}
 		}
 	}
 }
