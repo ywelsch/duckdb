@@ -188,7 +188,6 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 			}
 		}
 	} else {
-		// a scan only lacks the dictionary in FSST_ONLY mode, whose strings are decompressed into the result
 		for (idx_t i = 0; i < sel_count; i++) {
 			// Lookup dict offset in index buffer
 			auto string_number = selvec.get_index(start_offset + sel.get_index(i));
