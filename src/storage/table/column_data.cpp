@@ -819,7 +819,6 @@ void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetc
 	optional_ptr<SegmentNode<ColumnSegment>> current_segment;
 	idx_t segment_start = 0;
 	idx_t segment_end = 0;
-	// one scan per segment serves all runs in it, so their decoding work is shared
 	unique_ptr<ColumnScanState> scan_state;
 	idx_t idx = 0;
 	while (idx < fetch_count) {
@@ -839,15 +838,12 @@ void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetc
 			run_count++;
 		}
 		if (run_count >= FETCH_SCAN_RUN_THRESHOLD) {
-			// a single-row fetch can decode far more than its row, so runs of consecutive rows are scanned
 			if (!scan_state) {
 				scan_state = make_uniq<ColumnScanState>(nullptr);
 				scan_state->Initialize(state.context, type, nullptr);
-				// the scan state and its pins are gone after the fetch, so the result has to own its strings
 				scan_state->string_scan_type = StringScanType::COPY_STRINGS;
 			}
 			if (scan_state->current.get() == current_segment.get() && scan_state->offset_in_column <= offset) {
-				// continue the scan of this segment, skipping the rows in between
 				scan_state->offset_in_column = offset;
 			} else {
 				ColumnData::InitializeScanWithOffset(*scan_state, offset);
