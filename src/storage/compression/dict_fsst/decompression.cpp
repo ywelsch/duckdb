@@ -164,7 +164,6 @@ void CompressedStringScanState::ScanToFlatVector(Vector &result, idx_t result_of
 
 void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_t start, const SelectionVector &sel,
                                        idx_t sel_count, StringScanType string_scan_type) {
-	const bool copy_strings = string_scan_type == StringScanType::COPY_STRINGS;
 	const auto scan_count = sel_count == 0 ? 0 : sel.get_index(sel_count - 1) + 1;
 	auto &selvec = GetSelVec(start, scan_count);
 
@@ -182,13 +181,14 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 				result_data.WriteNull();
 				continue;
 			}
-			if (copy_strings) {
+			if (string_scan_type == StringScanType::COPY_STRINGS) {
 				result_data.WriteValue(dictionary_values[string_number]);
 			} else {
 				result_data.WriteStringRef(dictionary_values[string_number]);
 			}
 		}
 	} else {
+		// a scan only lacks the dictionary in FSST_ONLY mode, whose strings are decompressed into the result
 		for (idx_t i = 0; i < sel_count; i++) {
 			// Lookup dict offset in index buffer
 			auto string_number = selvec.get_index(start_offset + sel.get_index(i));
@@ -202,13 +202,7 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 			for (; decompress_position < string_number; decompress_position++) {
 				decompress_offset += string_lengths[decompress_position];
 			}
-			auto str = FetchStringFromDict(result, decompress_offset, string_number);
-			// only DICTIONARY mode points into the block, the FSST modes decompress into the result
-			if (copy_strings && mode == DictFSSTMode::DICTIONARY) {
-				result_data.WriteValue(str);
-			} else {
-				result_data.WriteStringRef(str);
-			}
+			result_data.WriteStringRef(FetchStringFromDict(result, decompress_offset, string_number));
 		}
 	}
 }
