@@ -112,6 +112,9 @@ private:
 	IndexPointer GetDeletedPointer() const;
 	IndexPointer GetInitializedInsertedPointer();
 	IndexPointer GetInitializedDeletedPointer();
+	//! Allocates per-row ids, set to id(row)
+	template <class F>
+	IndexPointer NewIds(F &&id);
 	//! Frees the per-row delete ids (if any)
 	void FreeDeleteData();
 	//! ARRAY -> MASKED: record alive rows as invalid bits, free the per-row delete array. mask_id is the

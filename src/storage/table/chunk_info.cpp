@@ -289,17 +289,28 @@ IndexPointer ChunkVectorInfo::GetDeletedPointer() const {
 	return deleted_data;
 }
 
+template <class F>
+IndexPointer ChunkVectorInfo::NewIds(F &&id) {
+	auto data = allocator.New();
+	data.SetMetadata(1);
+	try {
+		auto segment = allocator.GetHandle(data);
+		auto ids = segment.GetPtr<transaction_t>();
+		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
+			ids[i] = id(i);
+		}
+	} catch (...) {
+		// pinning the new segment can fail, as the buffers are unpinned while no handle reads them
+		allocator.Free(data);
+		throw;
+	}
+	return data;
+}
+
 IndexPointer ChunkVectorInfo::GetInitializedInsertedPointer() {
 	if (HasConstantInsertionId()) {
 		transaction_t constant_id = ConstantInsertId();
-
-		inserted_data = allocator.New();
-		inserted_data.SetMetadata(1);
-		auto segment = allocator.GetHandle(inserted_data);
-		auto inserted = segment.GetPtr<transaction_t>();
-		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			inserted[i] = constant_id;
-		}
+		inserted_data = NewIds([&](idx_t) { return constant_id; });
 	}
 	return inserted_data;
 }
@@ -311,14 +322,7 @@ IndexPointer ChunkVectorInfo::GetInitializedDeletedPointer() {
 	}
 	if (HasConstantDeleteId()) {
 		transaction_t constant_id = ConstantDeleteId();
-
-		deleted_data = allocator.New();
-		deleted_data.SetMetadata(1);
-		auto segment = allocator.GetHandle(deleted_data);
-		auto deleted = segment.GetPtr<transaction_t>();
-		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			deleted[i] = constant_id;
-		}
+		deleted_data = NewIds([&](idx_t) { return constant_id; });
 		delete_state = DeleteIdState::ARRAY;
 	}
 	return deleted_data;
@@ -357,15 +361,7 @@ void ChunkVectorInfo::CompressDeleteToMask(transaction_t mask_id) {
 void ChunkVectorInfo::DecompressDeleteMask() {
 	D_ASSERT(delete_state == DeleteIdState::MASKED);
 	// re-materialize the per-row array: deleted rows == mask_delete_id, alive rows == NOT_DELETED_ID
-	deleted_data = allocator.New();
-	deleted_data.SetMetadata(1);
-	{
-		auto segment = allocator.GetHandle(deleted_data);
-		auto deleted = segment.GetPtr<transaction_t>();
-		for (idx_t i = 0; i < STANDARD_VECTOR_SIZE; i++) {
-			deleted[i] = deleted_mask.RowIsValid(i) ? mask_delete_id : NOT_DELETED_ID;
-		}
-	}
+	deleted_data = NewIds([&](idx_t row) { return deleted_mask.RowIsValid(row) ? mask_delete_id : NOT_DELETED_ID; });
 	deleted_mask.Reset();
 	delete_state = DeleteIdState::ARRAY;
 	recheck_compression = true;
