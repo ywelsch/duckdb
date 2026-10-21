@@ -106,11 +106,14 @@ void CompressedStringScanState::Initialize(bool initialize_dictionary) {
 	string_lengths.resize(AlignValue<uint32_t, BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE>(dict_count));
 	BitpackingPrimitives::UnPackBuffer<uint32_t>(data_ptr_cast(string_lengths.data()),
 	                                             data_ptr_cast(string_lengths_ptr), dict_count, string_lengths_width);
-	if (!initialize_dictionary || mode == DictFSSTMode::FSST_ONLY) {
-		// Used by fetch, as fetch will never produce a DictionaryVector
-		return;
-	}
+	// Fetch will never produce a DictionaryVector, scans build the dictionary on first use
+	build_dictionary = initialize_dictionary && mode != DictFSSTMode::FSST_ONLY;
+}
 
+bool CompressedStringScanState::EnsureDictionary() {
+	if (dictionary || !build_dictionary) {
+		return dictionary != nullptr;
+	}
 	dictionary = DictionaryVector::CreateReusableDictionary(segment.GetType(), dict_count);
 	auto &dict_data = dictionary->data;
 	auto dict_child_data = FlatVector::GetDataMutable<string_t>(dict_data);
@@ -125,6 +128,19 @@ void CompressedStringScanState::Initialize(bool initialize_dictionary) {
 		dict_child_data[i] = FetchStringFromDict(dict_data, offset, i);
 		offset += string_len;
 	}
+	return true;
+}
+
+const vector<uint32_t> &CompressedStringScanState::GetStringOffsets() {
+	if (string_offsets.empty()) {
+		string_offsets.resize(dict_count);
+		uint32_t offset = 0;
+		for (uint32_t i = 0; i < dict_count; i++) {
+			string_offsets[i] = offset;
+			offset += string_lengths[i];
+		}
+	}
+	return string_offsets;
 }
 
 const SelectionVector &CompressedStringScanState::GetSelVec(idx_t start, idx_t scan_count) {
@@ -171,7 +187,17 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 	const idx_t start_offset = mode == DictFSSTMode::FSST_ONLY ? start + 1 : 0;
 
 	auto result_data = FlatVector::Writer<string_t>(result, sel_count, result_offset);
-	if (dictionary) {
+	if (string_scan_type == StringScanType::COPY_STRINGS) {
+		auto &offsets = GetStringOffsets();
+		for (idx_t i = 0; i < sel_count; i++) {
+			auto string_number = selvec.get_index(start_offset + sel.get_index(i));
+			if (string_number == 0) {
+				result_data.WriteNull();
+				continue;
+			}
+			result_data.WriteValue(FetchStringFromDict(result, offsets[string_number], string_number));
+		}
+	} else if (EnsureDictionary()) {
 		// We have prepared the full dictionary, we can reference these strings directly
 		auto dictionary_values = FlatVector::GetData<string_t>(dictionary->data);
 		for (idx_t i = 0; i < sel_count; i++) {
@@ -181,11 +207,7 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 				result_data.WriteNull();
 				continue;
 			}
-			if (string_scan_type == StringScanType::COPY_STRINGS) {
-				result_data.WriteValue(dictionary_values[string_number]);
-			} else {
-				result_data.WriteStringRef(dictionary_values[string_number]);
-			}
+			result_data.WriteStringRef(dictionary_values[string_number]);
 		}
 	} else {
 		for (idx_t i = 0; i < sel_count; i++) {
@@ -213,10 +235,7 @@ bool CompressedStringScanState::AllowDictionaryScan(idx_t scan_count) {
 	if (scan_count != STANDARD_VECTOR_SIZE) {
 		return false;
 	}
-	if (!dictionary) {
-		return false;
-	}
-	return true;
+	return EnsureDictionary();
 }
 
 void CompressedStringScanState::ScanToDictionaryVector(ColumnSegment &segment, Vector &result, idx_t result_offset,
