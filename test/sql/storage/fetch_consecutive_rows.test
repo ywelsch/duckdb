@@ -190,8 +190,8 @@ SELECT count(*), count(a), sum(a[1]) FROM arr WHERE s[1] = 'string_value_' || (i
 ----
 10000	9000	45000000
 
-# Each string compression, with runs below and above the scan threshold: an UPDATE of the key fetches every column
-# by row id. Scanned strings are copied into the result, since only the scan pins the blocks they point into.
+# Each string compression, with rows spread below and above the scan threshold: an UPDATE of the key fetches every
+# column by row id. Scanned strings are copied into the result, since only the scan pins the blocks they point into.
 # DICTIONARY and FSST are only written by older storage versions, DICT_FSST only by newer ones.
 foreach version v1.2.0 latest
 
@@ -214,6 +214,14 @@ FROM range(50000) r(i);
 statement ok con1
 CHECKPOINT cdb;
 
+# isolated rows
+statement ok con1
+UPDATE cdb.c SET id = id + 1000000 WHERE o % 4096 = 5;
+
+# single rows with gaps
+statement ok con1
+UPDATE cdb.c SET id = id + 1000000 WHERE o % 64 = 45;
+
 # runs of 2
 statement ok con1
 UPDATE cdb.c SET id = id + 1000000 WHERE o % 64 < 2;
@@ -235,7 +243,8 @@ FROM cdb.c;
 50000	0
 
 query I con1
-SELECT count(*) FILTER (WHERE id <> o + CASE WHEN o % 64 < 2 OR o % 64 BETWEEN 8 AND 39 THEN 2000000 ELSE 1000000 END)
+SELECT count(*) FILTER (WHERE id <> o + CASE WHEN o % 4096 = 5 OR o % 64 = 45 OR o % 64 < 2 OR o % 64 BETWEEN 8 AND 39
+                                              THEN 2000000 ELSE 1000000 END)
 FROM cdb.c;
 ----
 0
