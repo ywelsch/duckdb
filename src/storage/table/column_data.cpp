@@ -262,7 +262,7 @@ idx_t ColumnData::ScanVector(ColumnScanState &state, Vector &result, idx_t remai
 }
 
 void ColumnData::SelectVector(ColumnScanState &state, Vector &result, idx_t target_count, const SelectionVector &sel,
-                              idx_t sel_count, ScanVectorType scan_type) {
+                              idx_t sel_count, ScanVectorType scan_type, idx_t result_offset) {
 	BeginScanVectorInternal(state);
 	// scratch space to rebase the selection vector to the start of a segment scan
 	// this owns its data, as compression functions can retain the selection vector (e.g. by slicing the result)
@@ -301,10 +301,12 @@ void ColumnData::SelectVector(ColumnScanState &state, Vector &result, idx_t targ
 				for (idx_t i = 0; i < segment_sel_count; i++) {
 					ColumnFetchState fetch_state;
 					auto source_idx = state.offset_in_column + segment_sel.get().get_index(i) - current_start;
-					current.FetchRow(fetch_state, UnsafeNumericCast<row_t>(source_idx), result, sel_offset + i);
+					current.FetchRow(fetch_state, UnsafeNumericCast<row_t>(source_idx), result,
+					                 result_offset + sel_offset + i);
 				}
 			} else {
-				current.Select(state, scan_count, result, segment_sel.get(), segment_sel_count, sel_offset, scan_type);
+				current.Select(state, scan_count, result, segment_sel.get(), segment_sel_count,
+				               result_offset + sel_offset, scan_type);
 			}
 			segment_internal_index = state.offset_in_column + scan_count;
 		}
@@ -324,7 +326,7 @@ void ColumnData::SelectVector(ColumnScanState &state, Vector &result, idx_t targ
 	}
 	if (scan_type == ScanVectorType::SCAN_FLAT_VECTOR) {
 		// not every compression function sets the size of the result
-		FlatVector::SetSize(result, count_t(sel_count));
+		FlatVector::SetSize(result, count_t(result_offset + sel_count));
 	}
 	state.internal_index = segment_internal_index;
 }
@@ -786,7 +788,7 @@ static constexpr idx_t FETCH_SCAN_ROW_THRESHOLD = 4;
 #ifdef D_ASSERT_IS_ENABLED
 //! Verify that no scanned string points into the segment's block, which is unpinned once the fetch is done
 static void VerifyStringsCopied(ColumnSegment &segment, Vector &result, idx_t result_offset, idx_t count) {
-	if (result.GetType().InternalType() != PhysicalType::VARCHAR || !segment.GetBlockHandle()) {
+	if (segment.GetType().InternalType() != PhysicalType::VARCHAR || !segment.GetBlockHandle()) {
 		return;
 	}
 	auto &buffer_manager = segment.GetBlockHandle()->GetMemory().GetBufferManager();
@@ -871,12 +873,8 @@ void ColumnData::FetchRowsAtSegmentLevel(TransactionData transaction, ColumnFetc
 			for (idx_t i = 0; i < window_count; i++) {
 				window_sel.set_index(i, offsets[sel.get_index(idx + i)] - offset);
 			}
-			const idx_t window_rows = last_offset - offset + 1;
-			BeginScanVectorInternal(*scan_state);
-			segment.Select(*scan_state, window_rows, result, window_sel, window_count, result_offset + idx,
-			               ScanVectorType::SCAN_FLAT_VECTOR);
-			scan_state->offset_in_column += window_rows;
-			scan_state->internal_index = scan_state->offset_in_column;
+			SelectVector(*scan_state, result, last_offset - offset + 1, window_sel, window_count,
+			             ScanVectorType::SCAN_FLAT_VECTOR, result_offset + idx);
 		} else {
 			idx_t run_idx = 0;
 			while (run_idx < window_count) {
