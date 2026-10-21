@@ -93,8 +93,7 @@ public:
 public:
 	explicit FixedBatchCopyGlobalState(ClientContext &context_p, idx_t minimum_memory_per_thread)
 	    : output_lifecycle(context_p), memory_manager(context_p, minimum_memory_per_thread), rows_copied(0),
-	      scheduled_batch_index(0), flushed_batch_index(0), any_flushing(false), any_finished(false),
-	      minimum_memory_per_thread(minimum_memory_per_thread) {
+	      scheduled_batch_index(0), flushed_batch_index(0), any_flushing(false), any_finished(false) {
 	}
 
 	//! Destroy after global_state so its handle closes before cleanup.
@@ -120,8 +119,6 @@ public:
 	atomic<bool> any_flushing;
 	//! Whether or not any threads are finished
 	atomic<bool> any_finished;
-	//! Minimum memory per thread
-	idx_t minimum_memory_per_thread;
 	//! The files after the first one when the copy rotates files by size, finished as soon as the next one starts.
 	//! Batches are always prepared with the first file's state (global_state); only the flush goes to the file that
 	//! is being written.
@@ -207,10 +204,7 @@ public:
 	}
 
 	idx_t MaxThreads(idx_t source_max_threads) override {
-		// try to request 4MB per column per thread
-		memory_manager.SetMemorySize(source_max_threads * minimum_memory_per_thread);
-		// cap the concurrent threads working on this task based on the amount of available memory
-		return MinValue<idx_t>(source_max_threads, memory_manager.AvailableMemory() / minimum_memory_per_thread + 1);
+		return memory_manager.MaxThreads(source_max_threads);
 	}
 };
 
@@ -390,6 +384,7 @@ SinkFinalizeType PhysicalBatchCopyToFile::FinalFlush(ClientContext &context, Glo
 		throw InternalException("Not all batches were flushed to disk - incomplete file?");
 	}
 	gstate.memory_manager.FinalCheck();
+	gstate.memory_manager.Release();
 	if (function.copy_to_finalize && gstate.global_state) {
 		function.copy_to_finalize(context, *bind_data, *gstate.global_state);
 		if (!gstate.rotated_states.empty()) {
