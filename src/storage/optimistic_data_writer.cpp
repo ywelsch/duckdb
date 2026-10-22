@@ -164,12 +164,23 @@ void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
 	if (!PrepareWrite()) {
 		return;
 	}
+	if (column_compression_types.empty()) {
+		column_compression_types = GetCompressionTypes();
+	}
+	RowGroupWriteInfo info(*partial_manager, column_compression_types);
+	row_group.WriteColumnToDisk(info, column_idx);
+}
+
+vector<CompressionType> OptimisticDataWriter::GetCompressionTypes() const {
 	vector<CompressionType> compression_types;
 	for (auto &column : table.Columns()) {
 		compression_types.push_back(column.CompressionType());
 	}
-	RowGroupWriteInfo info(*partial_manager, compression_types);
-	row_group.WriteColumnToDisk(info, column_idx);
+	return compression_types;
+}
+
+bool OptimisticWriteCollection::IsFullyFlushed() const {
+	return unflushed_row_groups.empty() && complete_row_groups == collection->GetRowGroupCount();
 }
 
 void OptimisticWriteCollection::MergeStorage(OptimisticWriteCollection &merge_collection) {
@@ -209,11 +220,7 @@ void OptimisticDataWriter::FlushToDisk(OptimisticWriteCollection &collection,
                                        const vector<const_reference<RowGroup>> &row_groups,
                                        const vector<int64_t> &segment_indexes) {
 	//! The set of column compression types (if any)
-	vector<CompressionType> compression_types;
-	D_ASSERT(compression_types.empty());
-	for (auto &column : table.Columns()) {
-		compression_types.push_back(column.CompressionType());
-	}
+	auto compression_types = GetCompressionTypes();
 	RowGroupWriteInfo info(*partial_manager, compression_types, collection.partial_block_managers);
 	auto result = RowGroup::WriteToDisk(info, row_groups);
 	// move new (checkpointed) row groups to the row group collection

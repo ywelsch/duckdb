@@ -2032,6 +2032,9 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 
 			result_row_groups->AppendSegment(std::move(new_row_group));
 		}
+		if (writer) {
+			writer->FinalFlush();
+		}
 	} catch (...) {
 		if (writer) {
 			// release the blocks the new column was already written to
@@ -2112,6 +2115,9 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 			}
 			new_row_group->MergeIntoStatistics(changed_idx, changed_stats.Statistics());
 			result_row_groups->AppendSegment(std::move(new_row_group));
+		}
+		if (writer) {
+			writer->FinalFlush();
 		}
 	} catch (...) {
 		if (writer) {

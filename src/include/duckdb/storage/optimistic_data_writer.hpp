@@ -25,6 +25,8 @@ struct OptimisticWriteCollection {
 	vector<unique_ptr<PartialBlockManager>> partial_block_managers;
 
 	void MergeStorage(OptimisticWriteCollection &collection);
+	//! Whether all row groups of the collection have been written to disk
+	bool IsFullyFlushed() const;
 };
 
 enum class OptimisticWritePartialManagers { PER_COLUMN, GLOBAL };
@@ -67,6 +69,8 @@ private:
 	//! Flushes a specific row group to disk
 	void FlushToDisk(OptimisticWriteCollection &collection, const vector<const_reference<RowGroup>> &row_groups,
 	                 const vector<int64_t> &segment_indexes);
+	//! The compression type of each column of the table
+	vector<CompressionType> GetCompressionTypes() const;
 
 private:
 	//! The client context in which we're writing the data.
@@ -75,6 +79,8 @@ private:
 	DataTable &table;
 	//! The partial block manager, if any.
 	unique_ptr<PartialBlockManager> partial_manager;
+	//! The compression types of the table's columns, used for writing single columns
+	vector<CompressionType> column_compression_types;
 };
 
 } // namespace duckdb

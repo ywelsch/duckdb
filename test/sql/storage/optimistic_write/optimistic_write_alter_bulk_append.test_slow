@@ -14,9 +14,6 @@ ATTACH '__TEST_DIR__/optimistic_write_alter_bulk_append.db' AS db
 statement ok
 CREATE TABLE db.t (i BIGINT)
 
-statement ok
-CHECKPOINT db
-
 # buffering one uncompressed BIGINT column of 10M rows takes ~100MB, which does not fit
 statement ok
 SET memory_limit='32MB'

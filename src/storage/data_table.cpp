@@ -98,7 +98,6 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 
 	OptimisticDataWriter writer(context, *this);
 	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor, writer);
-	writer.FinalFlush();
 	written_column = column_definitions.size() - 1;
 
 	// also add this column to client local storage
@@ -205,7 +204,6 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 	// the column that had its type changed will have the new statistics computed during conversion
 	OptimisticDataWriter writer(context, *this);
 	row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr, writer);
-	writer.FinalFlush();
 	written_column = changed_idx;
 
 	// scan the original table, and fill the new column with the transformed value
