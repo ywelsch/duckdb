@@ -236,3 +236,14 @@ query I
 SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
 ----
 0
+
+# ... also when a volatile expression converts the row groups in order
+statement error
+ALTER TABLE db.u ALTER v TYPE DOUBLE USING v::DOUBLE + random() * 0
+----
+Could not convert
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0

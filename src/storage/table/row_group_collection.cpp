@@ -2421,44 +2421,36 @@ void RowGroupCollection::AlterRowGroups(
 		nodes.push_back(node);
 	}
 	vector<unique_ptr<RowGroup>> new_row_groups(nodes.size());
-	auto lock = result.stats.GetLock();
-	auto &column_stats = result.stats.GetStats(*lock, column_idx);
+	vector<shared_ptr<ColumnStatistics>> new_stats(nodes.size());
 	auto &column_type = result.GetTypes()[column_idx];
-	mutex stats_lock;
 	std::function<void(idx_t)> alter_row_group = [&](idx_t index) {
 		auto &node = nodes[index].get();
-		auto row_group_stats = ColumnStatistics::CreateEmptyStats(column_type);
-		auto row_group = alter(node, *row_group_stats);
+		new_stats[index] = ColumnStatistics::CreateEmptyStats(column_type);
+		new_row_groups[index] = alter(node, *new_stats[index]);
 		// a row group that is not on disk yet is written as a whole later, together with its new column
 		if (writer && node.GetNode().IsPersistent()) {
-			writer->WriteColumn(*row_group, column_idx);
+			writer->WriteColumn(*new_row_groups[index], column_idx);
 		}
-		lock_guard<mutex> guard(stats_lock);
-		row_group->MergeIntoStatistics(column_idx, column_stats.Statistics());
-		column_stats.Merge(*row_group_stats);
-		new_row_groups[index] = std::move(row_group);
 	};
 	try {
-		if (!parallel) {
-			for (idx_t index = 0; index < nodes.size(); index++) {
+		// leaving the scope waits for the scheduled tasks, so that they never outlive the state they refer to
+		TaskExecutor executor(context);
+		for (idx_t index = 0; index < nodes.size(); index++) {
+			if (parallel) {
+				executor.ScheduleTask(make_uniq<AlterRowGroupTask>(executor, alter_row_group, index));
+			} else {
+				// volatile values are produced in row order
 				alter_row_group(index);
 			}
-		} else {
-			TaskExecutor executor(context);
-			try {
-				for (idx_t index = 0; index < nodes.size(); index++) {
-					executor.ScheduleTask(make_uniq<AlterRowGroupTask>(executor, alter_row_group, index));
-				}
-			} catch (const std::exception &ex) {
-				// the scheduled tasks refer to this frame, so wait for them before rethrowing
-				executor.PushError(ErrorData(ex));
-				executor.WorkOnTasks();
-				throw;
-			}
-			executor.WorkOnTasks();
 		}
+		executor.WorkOnTasks();
+
+		auto lock = result.stats.GetLock();
+		auto &column_stats = result.stats.GetStats(*lock, column_idx);
 		auto result_row_groups = result.GetRowGroups();
 		for (idx_t index = 0; index < nodes.size(); index++) {
+			new_row_groups[index]->MergeIntoStatistics(column_idx, column_stats.Statistics());
+			column_stats.Merge(*new_stats[index]);
 			result_row_groups->AppendSegment(std::move(new_row_groups[index]), nodes[index].get().GetRowStart());
 		}
 		if (writer) {

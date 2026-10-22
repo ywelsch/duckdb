@@ -190,11 +190,7 @@ bool OptimisticDataWriter::PrepareWriteColumn(const RowGroupCollection &collecti
 		// a column of less than a row group would waste most of its block, the checkpoint packs it instead
 		return false;
 	}
-	if (!PrepareWrite()) {
-		return false;
-	}
-	column_compression_types = GetCompressionTypes();
-	return true;
+	return PrepareWrite();
 }
 
 void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
@@ -202,7 +198,8 @@ void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
 	// a partial block manager of its own keeps a failed write from leaving segments behind in shared blocks
 	auto &block_manager = table.GetTableIOManager().GetBlockManagerForRowData();
 	PartialBlockManager column_manager(QueryContext(context), block_manager, PartialBlockType::APPEND_TO_TABLE);
-	RowGroupWriteInfo info(column_manager, column_compression_types);
+	auto compression_types = GetCompressionTypes();
+	RowGroupWriteInfo info(column_manager, compression_types);
 	row_group.WriteColumnToDisk(info, column_idx);
 
 	lock_guard<mutex> guard(write_column_lock);

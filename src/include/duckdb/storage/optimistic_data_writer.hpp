@@ -82,8 +82,6 @@ private:
 	DataTable &table;
 	//! The partial block manager, if any.
 	unique_ptr<PartialBlockManager> partial_manager;
-	//! The compression types of the table's columns, used for writing single columns
-	vector<CompressionType> column_compression_types;
 	//! Protects merging the blocks of single written columns into the partial block manager
 	mutex write_column_lock;
 	//! The number of single columns written so far
