@@ -41,8 +41,9 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_data
       optimistic_writer(new_data_table, parent.optimistic_writer) {
 	// Alter the column type.
 	auto &parent_collection = *parent.row_groups->collection;
+	optional_ptr<OptimisticDataWriter> writer = parent.deleted_rows == 0 ? &optimistic_writer : nullptr;
 	auto new_collection = parent_collection.AlterType(context, alter_column_index, target_type, bound_columns,
-	                                                  cast_expr, transaction, nullptr);
+	                                                  cast_expr, transaction, writer);
 	parent_collection.CommitDropColumn(alter_column_index);
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
@@ -75,7 +76,8 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_dt, 
       optimistic_collections(std::move(parent.optimistic_collections)),
       optimistic_writer(new_dt, parent.optimistic_writer) {
 	auto &parent_collection = *parent.row_groups->collection;
-	auto new_collection = parent_collection.AddColumn(context, new_column, default_executor, nullptr);
+	optional_ptr<OptimisticDataWriter> writer = parent.deleted_rows == 0 ? &optimistic_writer : nullptr;
+	auto new_collection = parent_collection.AddColumn(context, new_column, default_executor, writer);
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
 	row_groups->ResetCollectionAccounting();
@@ -743,6 +745,8 @@ void LocalStorage::AlterStorage(DataTable &old_dt, DataTable &new_dt,
 	if (!storage) {
 		return;
 	}
+	// finish the blocks of the row groups that are written to disk, so that these stay written in the altered storage
+	storage->GetOptimisticWriter().FinalFlush();
 	auto new_storage = alter(*storage);
 	table_manager.MoveEntry(old_dt);
 	table_manager.InsertEntry(new_dt, std::move(new_storage));

@@ -1,0 +1,218 @@
+# name: test/sql/storage/optimistic_write/optimistic_write_alter_bulk_append.test_slow
+# description: ADD COLUMN and ALTER TYPE on rows bulk appended in the same transaction keep them on disk
+# group: [optimistic_write]
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+statement ok
+ATTACH '{TEST_DIR}/optimistic_write_alter_bulk_append.db' AS db
+
+statement ok
+CREATE TABLE db.t (i BIGINT)
+
+# buffering one uncompressed BIGINT column of 10M rows takes ~100MB, which does not fit
+statement ok
+SET memory_limit='32MB'
+
+statement ok
+SET max_temp_directory_size='16MB'
+
+# the ALTERs need about one row group of memory per thread
+statement ok
+SET threads=4
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t SELECT i FROM range(10000000) t(i)
+
+statement ok
+ALTER TABLE db.t ADD COLUMN c BIGINT DEFAULT 42
+
+# IF NOT EXISTS skips the rewrite of a volatile default into an UPDATE, so ADD COLUMN itself writes these values
+statement ok
+ALTER TABLE db.t ADD COLUMN IF NOT EXISTS d DOUBLE DEFAULT random()
+
+statement ok
+ALTER TABLE db.t ALTER i TYPE BIGINT USING i * 3
+
+statement ok
+INSERT INTO db.t SELECT i, 7, 0.5 FROM range(1000) t(i)
+
+statement ok
+COMMIT
+
+# the WAL holds block pointers instead of the rows
+query I
+SELECT size < 1000000 FROM read_blob('{TEST_DIR}/optimistic_write_alter_bulk_append.db.wal')
+----
+true
+
+query IIIII
+SELECT COUNT(*), SUM(i), SUM(c), COUNT(d), BOOL_AND(d >= 0 AND d < 1) FROM db.t
+----
+10001000	149999985499500	420007000	10001000	true
+
+statement ok
+DETACH db
+
+statement ok
+ATTACH '{TEST_DIR}/optimistic_write_alter_bulk_append.db' AS db
+
+query IIIII
+SELECT COUNT(*), SUM(i), SUM(c), COUNT(d), BOOL_AND(d >= 0 AND d < 1) FROM db.t
+----
+10001000	149999985499500	420007000	10001000	true
+
+statement ok
+CHECKPOINT db
+
+query IIIII
+SELECT COUNT(*), SUM(i), SUM(c), COUNT(d), BOOL_AND(d >= 0 AND d < 1) FROM db.t
+----
+10001000	149999985499500	420007000	10001000	true
+
+# a rolled back transaction gives back all blocks, including those of the altered columns
+statement ok
+CREATE TEMPORARY TABLE used_before AS SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t SELECT i, i, i FROM range(10000000) t(i)
+
+statement ok
+ALTER TABLE db.t ADD COLUMN IF NOT EXISTS e DOUBLE DEFAULT random()
+
+statement ok
+ALTER TABLE db.t ALTER d TYPE FLOAT
+
+statement ok
+ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+query IIIII
+SELECT COUNT(*), SUM(i), SUM(c), COUNT(d), BOOL_AND(d >= 0 AND d < 1) FROM db.t
+----
+10001000	149999985499500	420007000	10001000	true
+
+# an ALTER keeps later appends out of the row groups that are on disk, also after another ALTER
+statement ok
+CREATE TABLE db.t2 (i BIGINT)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t2 SELECT i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t2 ADD COLUMN c BIGINT
+
+statement ok
+ALTER TABLE db.t2 DROP COLUMN c
+
+statement ok
+INSERT INTO db.t2 VALUES (1)
+
+statement ok
+COMMIT
+
+query I
+SELECT size < 100000 FROM read_blob('{TEST_DIR}/optimistic_write_alter_bulk_append.db.wal')
+----
+true
+
+# appends that complete a row group after an ALTER keep the write accounting of the transaction intact
+statement ok
+SET threads=1
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t2 SELECT i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t2 ADD COLUMN c BIGINT
+
+statement ok
+INSERT INTO db.t2 SELECT i, 1 FROM range(200000) t(i)
+
+statement ok
+COMMIT
+
+query II
+SELECT COUNT(*), SUM(c) FROM db.t2
+----
+2200001	200000
+
+# an ALTER in the middle of loading keeps the row group that is being filled open
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE TABLE db.t3 (i BIGINT)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t3 SELECT i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t3 ADD COLUMN c BIGINT
+
+statement ok
+INSERT INTO db.t3 SELECT i, 1 FROM range(200000) t(i)
+
+statement ok
+COMMIT
+
+# 1.2M rows fit in 10 row groups, sealing the partly filled one at the ALTER would need 11
+query I
+SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('db.t3')
+----
+10
+
+# DROP COLUMN keeps the row groups that are on disk there, too
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE TABLE db.t4 (i BIGINT, j BIGINT)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t4 SELECT i, i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t4 DROP COLUMN j
+
+statement ok
+INSERT INTO db.t4 VALUES (1)
+
+statement ok
+COMMIT
+
+query I
+SELECT size < 100000 FROM read_blob('{TEST_DIR}/optimistic_write_alter_bulk_append.db.wal')
+----
+true
+
+query II
+SELECT COUNT(*), SUM(i) FROM db.t4
+----
+1000001	499999500001
