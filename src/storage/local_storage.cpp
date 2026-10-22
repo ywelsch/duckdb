@@ -52,8 +52,13 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_data
       optimistic_writer(new_data_table, parent.optimistic_writer) {
 	// Alter the column type.
 	auto &parent_collection = *parent.row_groups->collection;
+	optional_ptr<OptimisticDataWriter> writer = parent.IsFullyFlushed() ? &optimistic_writer : nullptr;
 	auto new_collection =
-	    parent_collection.AlterType(context, alter_column_index, target_type, bound_columns, cast_expr);
+	    parent_collection.AlterType(context, alter_column_index, target_type, bound_columns, cast_expr, writer);
+	if (writer) {
+		optimistic_writer.FinalFlush();
+		new_collection->SetRowGroupAppendMode(RowGroupAppendMode::REQUIRE_NEW);
+	}
 	parent_collection.CommitDropColumn(alter_column_index);
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
@@ -82,7 +87,12 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_dt, 
       optimistic_collections(std::move(parent.optimistic_collections)),
       optimistic_writer(new_dt, parent.optimistic_writer) {
 	auto &parent_collection = *parent.row_groups->collection;
-	auto new_collection = parent_collection.AddColumn(context, new_column, default_executor);
+	optional_ptr<OptimisticDataWriter> writer = parent.IsFullyFlushed() ? &optimistic_writer : nullptr;
+	auto new_collection = parent_collection.AddColumn(context, new_column, default_executor, writer);
+	if (writer) {
+		optimistic_writer.FinalFlush();
+		new_collection->SetRowGroupAppendMode(RowGroupAppendMode::REQUIRE_NEW);
+	}
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
 	append_indexes.Move(parent.append_indexes);
@@ -162,6 +172,11 @@ bool LocalTableStorage::WritesToDisk() const {
 bool LocalTableStorage::HasFlushedRowGroups() const {
 	// completed row groups that are no longer in the unflushed set have been written to disk
 	return row_groups->complete_row_groups > row_groups->unflushed_row_groups.size();
+}
+
+bool LocalTableStorage::IsFullyFlushed() const {
+	return row_groups->unflushed_row_groups.empty() &&
+	       row_groups->complete_row_groups == row_groups->collection->GetRowGroupCount();
 }
 
 bool LocalTableStorage::IsBulkAppend() const {
@@ -724,6 +739,10 @@ void LocalStorage::AddColumn(DataTable &old_dt, DataTable &new_dt, ColumnDefinit
 	if (!storage) {
 		return;
 	}
+	if (storage->IsBulkAppend()) {
+		// the row groups are merged into the table as written, so write them all out to write the new column with them
+		storage->FlushBlocks();
+	}
 	auto new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, new_column, default_executor);
 	table_manager.InsertEntry(new_dt, std::move(new_storage));
 }
@@ -744,6 +763,10 @@ void LocalStorage::ChangeType(DataTable &old_dt, DataTable &new_dt, idx_t change
 	auto storage = table_manager.MoveEntry(old_dt);
 	if (!storage) {
 		return;
+	}
+	if (storage->IsBulkAppend()) {
+		// the row groups are merged into the table as written, so write them all out to write the new column with them
+		storage->FlushBlocks();
 	}
 	auto new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, changed_idx, target_type,
 	                                                      bound_columns, cast_expr);

@@ -77,6 +77,8 @@ public:
 	bool WritesToDisk() const;
 	//! Whether this storage holds optimistically written (flushed) row groups
 	bool HasFlushedRowGroups() const;
+	//! Whether all row groups of this storage have been written to disk
+	bool IsFullyFlushed() const;
 	void Rollback();
 	idx_t EstimatedSize();
 
