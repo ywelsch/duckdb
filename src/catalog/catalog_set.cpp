@@ -1,5 +1,6 @@
 #include "duckdb/catalog/catalog_set.hpp"
 
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
@@ -313,6 +314,12 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const string &name, 
 		throw CatalogException("Cannot alter entry \"%s\" because it is an internal system entry", entry->name);
 	}
 
+	{
+		// detect a write-write conflict before building the altered entry, which can mean rewriting a whole column
+		unique_lock<mutex> read_lock(catalog_lock);
+		GetEntryInternal(transaction, name);
+	}
+
 	unique_ptr<CatalogEntry> value;
 	if (alter_info.type == AlterType::SET_COMMENT) {
 		// Copy the existing entry; we are only changing metadata here
@@ -340,9 +347,9 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const string &name, 
 	try {
 		entry = GetEntryInternal(transaction, name);
 	} catch (...) {
-		if (value->type == CatalogType::TABLE_ENTRY) {
-			// discard the altered table as a rollback would, e.g. release the blocks written for a new column
-			value->Rollback(*entry);
+		if (value->type == CatalogType::TABLE_ENTRY && value->Cast<TableCatalogEntry>().IsDuckTable()) {
+			// a conflict that arose while altering: release what the discarded altered table wrote to disk
+			value->Cast<DuckTableEntry>().RollbackWrittenColumn(*entry);
 		}
 		throw;
 	}
