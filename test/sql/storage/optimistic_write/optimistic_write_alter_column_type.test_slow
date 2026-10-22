@@ -199,6 +199,24 @@ SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_
 ----
 0
 
+# the conflict is found before the table is touched, so the table stays usable after the other ALTER commits
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE db.s ALTER v SET DEFAULT '1'
+
+statement error con2
+ALTER TABLE db.s ADD COLUMN y BIGINT
+----
+write-write conflict
+
+statement ok con1
+COMMIT
+
+statement ok
+INSERT INTO db.s VALUES ('2')
+
 # a conversion error in one row group gives back the blocks of the row groups converted in parallel
 statement ok
 CREATE TABLE db.u AS SELECT CASE WHEN i = 5000000 THEN 'x' ELSE random()::VARCHAR END AS v FROM range(10000000) t(i)
