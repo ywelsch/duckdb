@@ -124,3 +124,58 @@ query IIIII
 SELECT COUNT(*), SUM(j), SUM(s.bb), COUNT(s.c), MIN(j) FROM db.t
 ----
 10000000	49999995000000	99999990000000	0	0
+
+# an ALTER that fails after writing its column gives all blocks back: a cast error in bulk appended rows
+statement ok
+CREATE TABLE db.s AS SELECT i::VARCHAR AS v FROM range(10000000) t(i)
+
+statement ok
+CHECKPOINT db
+
+statement ok
+DELETE FROM used_before
+
+statement ok
+INSERT INTO used_before SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.s SELECT i::VARCHAR FROM range(1000000) t(i)
+
+statement ok
+INSERT INTO db.s VALUES ('not a number')
+
+statement error
+ALTER TABLE db.s ALTER v TYPE BIGINT
+----
+Could not convert
+
+statement ok
+ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+# ... and a write-write conflict with the ALTER of another transaction
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE db.s ADD COLUMN x BIGINT
+
+statement error con2
+ALTER TABLE db.s ALTER v TYPE BIGINT
+----
+write-write conflict
+
+statement ok con1
+ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0

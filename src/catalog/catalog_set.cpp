@@ -337,7 +337,15 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const string &name, 
 
 	// fetch the entry again before doing the modification
 	// this will catch any write-write conflicts between transactions
-	entry = GetEntryInternal(transaction, name);
+	try {
+		entry = GetEntryInternal(transaction, name);
+	} catch (...) {
+		if (value->type == CatalogType::TABLE_ENTRY) {
+			// discard the altered table as a rollback would, e.g. release the blocks written for a new column
+			value->Rollback(*entry);
+		}
+		throw;
+	}
 
 	// Mark this entry as being created by this transaction
 	value->timestamp = transaction.transaction_id;

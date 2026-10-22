@@ -730,7 +730,14 @@ void LocalStorage::AddColumn(DataTable &old_dt, DataTable &new_dt, ColumnDefinit
 		// commit merges these row groups as written, so write them all out to write the new column along with them
 		storage->FlushBlocks();
 	}
-	auto new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, new_column, default_executor);
+	shared_ptr<LocalTableStorage> new_storage;
+	try {
+		new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, new_column, default_executor);
+	} catch (...) {
+		// keep the appended rows so that the rollback of the transaction releases their blocks
+		table_manager.InsertEntry(old_dt, std::move(storage));
+		throw;
+	}
 	table_manager.InsertEntry(new_dt, std::move(new_storage));
 }
 
@@ -755,8 +762,15 @@ void LocalStorage::ChangeType(DataTable &old_dt, DataTable &new_dt, idx_t change
 		// commit merges these row groups as written, so write them all out to write the new column along with them
 		storage->FlushBlocks();
 	}
-	auto new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, changed_idx, target_type,
-	                                                      bound_columns, cast_expr);
+	shared_ptr<LocalTableStorage> new_storage;
+	try {
+		new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, changed_idx, target_type,
+		                                                 bound_columns, cast_expr);
+	} catch (...) {
+		// keep the appended rows so that the rollback of the transaction releases their blocks
+		table_manager.InsertEntry(old_dt, std::move(storage));
+		throw;
+	}
 	table_manager.InsertEntry(new_dt, std::move(new_storage));
 }
 

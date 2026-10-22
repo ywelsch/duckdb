@@ -101,7 +101,12 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	written_column = column_definitions.size() - 1;
 
 	// also add this column to client local storage
-	local_storage.AddColumn(parent, *this, new_column, default_executor);
+	try {
+		local_storage.AddColumn(parent, *this, new_column, default_executor);
+	} catch (...) {
+		RollbackWrittenColumn();
+		throw;
+	}
 
 	// this table replaces the previous table, hence the parent is no longer the root DataTable
 	parent.version = DataTableVersion::ALTERED;
@@ -207,7 +212,12 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 	written_column = changed_idx;
 
 	// scan the original table, and fill the new column with the transformed value
-	local_storage.ChangeType(parent, *this, changed_idx, target_type, bound_columns, cast_expr);
+	try {
+		local_storage.ChangeType(parent, *this, changed_idx, target_type, bound_columns, cast_expr);
+	} catch (...) {
+		RollbackWrittenColumn();
+		throw;
+	}
 
 	// this table replaces the previous table, hence the parent is no longer the root DataTable
 	parent.version = DataTableVersion::ALTERED;
