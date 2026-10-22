@@ -172,6 +172,12 @@ void RowGroupCollection::SetRowGroupAppendMode(RowGroupAppendMode mode) {
 	row_group_append_mode = mode;
 }
 
+void RowGroupCollection::CopyAppendModeTo(RowGroupCollection &target) const {
+	if (row_group_append_mode != RowGroupAppendMode::APPEND_TO_EXISTING) {
+		target.SetRowGroupAppendMode(row_group_append_mode);
+	}
+}
+
 void RowGroupCollection::InitializeEmpty() {
 	stats.InitializeEmpty(types);
 }
@@ -2010,6 +2016,7 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 	new_types.push_back(new_column.GetType());
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
 	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
+	CopyAppendModeTo(*result);
 
 	DataChunk dummy_chunk;
 	Vector default_vector(new_column.GetType());
@@ -2055,6 +2062,7 @@ shared_ptr<RowGroupCollection> RowGroupCollection::RemoveColumn(idx_t col_idx) {
 
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
 	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
+	CopyAppendModeTo(*result);
 	result->stats.InitializeRemoveColumn(stats, col_idx);
 
 	auto result_lock = result->stats.GetLock();
@@ -2079,6 +2087,7 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
 	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
+	CopyAppendModeTo(*result);
 	result->stats.InitializeAlterType(stats, changed_idx, target_type);
 
 	vector<LogicalType> scan_types;

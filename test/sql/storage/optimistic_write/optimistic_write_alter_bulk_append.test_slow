@@ -101,3 +101,54 @@ query IIIII
 SELECT COUNT(*), SUM(i), SUM(c), COUNT(d), BOOL_AND(d >= 0 AND d < 1) FROM db.t
 ----
 10001000	149999985499500	420007000	10001000	true
+
+# an ALTER keeps later appends out of the row groups that are on disk, also after another ALTER
+statement ok
+CREATE TABLE db.t2 (i BIGINT)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t2 SELECT i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t2 ADD COLUMN c BIGINT
+
+statement ok
+ALTER TABLE db.t2 DROP COLUMN c
+
+statement ok
+INSERT INTO db.t2 VALUES (1)
+
+statement ok
+COMMIT
+
+query I
+SELECT size < 100000 FROM read_blob('__TEST_DIR__/optimistic_write_alter_bulk_append.db.wal')
+----
+true
+
+# appends that complete a row group after an ALTER keep the write accounting of the transaction intact
+statement ok
+SET threads=1
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t2 SELECT i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t2 ADD COLUMN c BIGINT
+
+statement ok
+INSERT INTO db.t2 SELECT i, 1 FROM range(200000) t(i)
+
+statement ok
+COMMIT
+
+query II
+SELECT COUNT(*), SUM(c) FROM db.t2
+----
+2200001	200000

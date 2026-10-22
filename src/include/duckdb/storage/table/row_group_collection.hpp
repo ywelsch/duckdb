@@ -200,6 +200,8 @@ private:
 	                                                       idx_t count) const;
 
 	void SetRowGroups(shared_ptr<RowGroupSegmentTree> row_groups);
+	//! Carries a non-default append mode over to the collection that replaces this one after an ALTER
+	void CopyAppendModeTo(RowGroupCollection &target) const;
 
 private:
 	//! BlockManager

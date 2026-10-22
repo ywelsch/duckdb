@@ -179,6 +179,11 @@ vector<CompressionType> OptimisticDataWriter::GetCompressionTypes() const {
 	return compression_types;
 }
 
+void OptimisticWriteCollection::ReplaceCollection(shared_ptr<RowGroupCollection> new_collection) {
+	collection = std::move(new_collection);
+	prev_allocated_size = collection->GetAllocationSize();
+}
+
 bool OptimisticWriteCollection::IsFullyFlushed() const {
 	return unflushed_row_groups.empty() && complete_row_groups == collection->GetRowGroupCount();
 }

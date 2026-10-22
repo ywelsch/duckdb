@@ -55,12 +55,9 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_data
 	optional_ptr<OptimisticDataWriter> writer = parent.row_groups->IsFullyFlushed() ? &optimistic_writer : nullptr;
 	auto new_collection =
 	    parent_collection.AlterType(context, alter_column_index, target_type, bound_columns, cast_expr, writer);
-	if (writer) {
-		new_collection->SetRowGroupAppendMode(RowGroupAppendMode::REQUIRE_NEW);
-	}
 	parent_collection.CommitDropColumn(alter_column_index);
 	row_groups = std::move(parent.row_groups);
-	row_groups->collection = std::move(new_collection);
+	row_groups->ReplaceCollection(std::move(new_collection));
 
 	append_indexes.Move(parent.append_indexes);
 }
@@ -75,7 +72,7 @@ LocalTableStorage::LocalTableStorage(DataTable &new_data_table, LocalTableStorag
 	auto new_collection = parent_collection.RemoveColumn(drop_column_index);
 	parent_collection.CommitDropColumn(drop_column_index);
 	row_groups = std::move(parent.row_groups);
-	row_groups->collection = std::move(new_collection);
+	row_groups->ReplaceCollection(std::move(new_collection));
 
 	append_indexes.Move(parent.append_indexes);
 }
@@ -88,11 +85,8 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_dt, 
 	auto &parent_collection = *parent.row_groups->collection;
 	optional_ptr<OptimisticDataWriter> writer = parent.row_groups->IsFullyFlushed() ? &optimistic_writer : nullptr;
 	auto new_collection = parent_collection.AddColumn(context, new_column, default_executor, writer);
-	if (writer) {
-		new_collection->SetRowGroupAppendMode(RowGroupAppendMode::REQUIRE_NEW);
-	}
 	row_groups = std::move(parent.row_groups);
-	row_groups->collection = std::move(new_collection);
+	row_groups->ReplaceCollection(std::move(new_collection));
 	append_indexes.Move(parent.append_indexes);
 }
 

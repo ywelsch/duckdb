@@ -25,6 +25,8 @@ struct OptimisticWriteCollection {
 	vector<unique_ptr<PartialBlockManager>> partial_block_managers;
 
 	void MergeStorage(OptimisticWriteCollection &collection);
+	//! Replace the collection with the one an ALTER created from it
+	void ReplaceCollection(shared_ptr<RowGroupCollection> new_collection);
 	//! Whether all row groups of the collection have been written to disk
 	bool IsFullyFlushed() const;
 };
