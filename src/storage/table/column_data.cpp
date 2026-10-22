@@ -782,7 +782,7 @@ void ColumnData::FetchRows(TransactionData transaction, ColumnFetchState &state,
 	FetchRowsAtSegmentLevel(transaction, state, offsets, sel, fetch_count, result, result_offset);
 }
 
-//! When at least this many ascending rows fall within one vector of a segment, they are scanned instead of fetched
+//! When at least this many ascending rows of a segment lie within a vector's length, they are scanned, not fetched
 static constexpr idx_t FETCH_SCAN_ROW_THRESHOLD = 4;
 
 #ifdef D_ASSERT_IS_ENABLED

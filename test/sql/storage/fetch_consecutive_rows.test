@@ -1,5 +1,5 @@
 # name: test/sql/storage/fetch_consecutive_rows.test
-# description: Runs of consecutive row ids are scanned instead of fetched row by row; index maintenance and row id fetches stay correct
+# description: Rows that lie close together in a segment are scanned instead of fetched row by row; index maintenance and row id fetches stay correct
 # group: [storage]
 
 load {TEST_DIR}/fetch_consecutive_rows.db
