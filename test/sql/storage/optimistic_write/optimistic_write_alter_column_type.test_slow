@@ -24,6 +24,10 @@ SET memory_limit='32MB'
 statement ok
 SET max_temp_directory_size='16MB'
 
+# the ALTERs need about one row group of memory per thread
+statement ok
+SET threads=4
+
 statement ok
 ALTER TABLE db.t ALTER j TYPE BIGINT USING j * 3
 
@@ -174,6 +178,29 @@ write-write conflict
 
 statement ok con1
 ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+# a conversion error in one row group gives back the blocks of the row groups converted in parallel
+statement ok
+CREATE TABLE db.u AS SELECT CASE WHEN i = 5000000 THEN 'x' ELSE random()::VARCHAR END AS v FROM range(10000000) t(i)
+
+statement ok
+CHECKPOINT db
+
+statement ok
+DELETE FROM used_before
+
+statement ok
+INSERT INTO used_before SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+statement error
+ALTER TABLE db.u ALTER v TYPE DOUBLE
+----
+Could not convert
 
 query I
 SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'

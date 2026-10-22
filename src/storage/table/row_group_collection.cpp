@@ -2017,40 +2017,15 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
 	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
 	CopyAppendModeTo(*result);
-
-	DataChunk dummy_chunk;
-	Vector default_vector(new_column.GetType());
-
 	result->stats.InitializeAddColumn(stats, new_column.GetType());
-	auto lock = result->stats.GetLock();
-	auto &new_column_stats = result->stats.GetStats(*lock, new_column_idx);
 
 	// fill the column with its DEFAULT value, or NULL if none is specified
-	auto new_stats = make_uniq<SegmentStatistics>(new_column.GetType());
-	auto result_row_groups = result->GetRowGroups();
-	try {
-		for (auto &current_row_group : row_groups->Segments()) {
-			auto new_row_group = current_row_group.AddColumn(*result, new_column, default_executor, default_vector);
-			if (writer) {
-				writer->WriteColumn(*new_row_group, new_column_idx);
-			}
-			// merge in the statistics
-			new_row_group->MergeIntoStatistics(new_column_idx, new_column_stats.Statistics());
-
-			result_row_groups->AppendSegment(std::move(new_row_group));
-		}
-		if (writer) {
-			writer->FinalFlush();
-		}
-	} catch (...) {
-		if (writer) {
-			// release the blocks the new column was already written to
-			writer->Rollback();
-			result->CommitDropColumn(new_column_idx);
-		}
-		throw;
-	}
-
+	auto &default_value = *default_executor.expressions[0];
+	AlterRowGroups(context, *result, new_column_idx, default_value, writer, [&](SegmentNode<RowGroup> &node) {
+		ExpressionExecutor executor(context, default_value);
+		Vector default_vector(new_column.GetType());
+		return node.GetNode().AddColumn(*result, new_column, executor, default_vector);
+	});
 	return result;
 }
 
@@ -2098,45 +2073,105 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 			scan_types.push_back(types[bound_columns[i].GetPrimaryIndex()]);
 		}
 	}
-	DataChunk scan_chunk;
-	scan_chunk.Initialize(GetAllocator(), scan_types);
-
-	ExpressionExecutor executor(context);
-	executor.AddExpression(cast_expr);
-
-	TableScanState scan_state;
-	scan_state.Initialize(bound_columns);
-	scan_state.table_state.Initialize(context, GetTypes());
-	scan_state.table_state.max_row = row_groups->GetBaseRowId() + total_rows;
+	auto max_row = row_groups->GetBaseRowId() + total_rows;
 
 	// now alter the type of the column within all of the row_groups individually
-	auto lock = result->stats.GetLock();
-	auto &changed_stats = result->stats.GetStats(*lock, changed_idx);
-	auto result_row_groups = result->GetRowGroups();
+	AlterRowGroups(context, *result, changed_idx, cast_expr, writer, [&](SegmentNode<RowGroup> &node) {
+		DataChunk scan_chunk;
+		scan_chunk.Initialize(GetAllocator(), scan_types);
+		ExpressionExecutor executor(context, cast_expr);
+		TableScanState scan_state;
+		scan_state.Initialize(bound_columns);
+		scan_state.table_state.Initialize(context, GetTypes());
+		scan_state.table_state.max_row = max_row;
+		return node.GetNode().AlterType(*result, target_type, changed_idx, executor, scan_state.table_state, node,
+		                                scan_chunk);
+	});
+	return result;
+}
 
+class AlterRowGroupTask : public BaseExecutorTask {
+public:
+	AlterRowGroupTask(TaskExecutor &executor, const std::function<void(idx_t)> &alter_row_group, idx_t index)
+	    : BaseExecutorTask(executor), alter_row_group(alter_row_group), index(index) {
+	}
+
+	void ExecuteTask() override {
+		alter_row_group(index);
+	}
+
+	string TaskType() const override {
+		return "AlterRowGroupTask";
+	}
+
+private:
+	const std::function<void(idx_t)> &alter_row_group;
+	idx_t index;
+};
+
+void RowGroupCollection::AlterRowGroups(ClientContext &context, RowGroupCollection &result, idx_t column_idx,
+                                        const Expression &expression, optional_ptr<OptimisticDataWriter> writer,
+                                        const std::function<unique_ptr<RowGroup>(SegmentNode<RowGroup> &)> &alter) {
+	if (writer && !writer->PrepareWriteColumn(*this)) {
+		writer = nullptr;
+	}
+	vector<reference<SegmentNode<RowGroup>>> nodes;
+	for (auto &node : GetRowGroups()->SegmentNodes()) {
+		nodes.push_back(node);
+	}
+	vector<unique_ptr<RowGroup>> new_row_groups(nodes.size());
+	std::function<void(idx_t)> alter_row_group = [&](idx_t index) {
+		auto row_group = alter(nodes[index].get());
+		if (writer) {
+			writer->WriteColumn(*row_group, column_idx);
+		}
+		new_row_groups[index] = std::move(row_group);
+	};
 	try {
-		for (auto &node : row_groups->SegmentNodes()) {
-			auto &current_row_group = node.GetNode();
-			auto new_row_group = current_row_group.AlterType(*result, target_type, changed_idx, executor,
-			                                                 scan_state.table_state, node, scan_chunk);
-			if (writer) {
-				writer->WriteColumn(*new_row_group, changed_idx);
+		if (expression.IsVolatile()) {
+			// a volatile expression must see the rows in order
+			for (idx_t index = 0; index < nodes.size(); index++) {
+				alter_row_group(index);
 			}
-			new_row_group->MergeIntoStatistics(changed_idx, changed_stats.Statistics());
-			result_row_groups->AppendSegment(std::move(new_row_group));
+		} else {
+			TaskExecutor executor(context);
+			try {
+				for (idx_t index = 0; index < nodes.size(); index++) {
+					executor.ScheduleTask(make_uniq<AlterRowGroupTask>(executor, alter_row_group, index));
+				}
+			} catch (const std::exception &ex) {
+				// the scheduled tasks refer to this frame, so wait for them before rethrowing
+				executor.PushError(ErrorData(ex));
+				executor.WorkOnTasks();
+				throw;
+			}
+			executor.WorkOnTasks();
+		}
+		auto lock = result.stats.GetLock();
+		auto &column_stats = result.stats.GetStats(*lock, column_idx);
+		auto result_row_groups = result.GetRowGroups();
+		for (auto &row_group : new_row_groups) {
+			row_group->MergeIntoStatistics(column_idx, column_stats.Statistics());
+			result_row_groups->AppendSegment(std::move(row_group));
 		}
 		if (writer) {
 			writer->FinalFlush();
 		}
 	} catch (...) {
 		if (writer) {
-			// release the blocks the converted column was already written to
+			// release the blocks the column was already written to
 			writer->Rollback();
-			result->CommitDropColumn(changed_idx);
+			CommitDropState drop_state(&block_manager);
+			for (auto &row_group : new_row_groups) {
+				if (row_group) {
+					row_group->CommitDropColumn(column_idx, drop_state);
+				}
+			}
+			drop_state.FinalizeCommit();
+			result.CommitDropColumn(column_idx);
 		}
 		throw;
 	}
-	return result;
 }
 
 void RowGroupCollection::VerifyNewConstraint(const QueryContext &context, DataTable &parent,

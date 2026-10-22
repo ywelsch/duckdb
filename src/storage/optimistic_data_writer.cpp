@@ -155,18 +155,20 @@ void OptimisticDataWriter::WriteUnflushedRowGroups(OptimisticWriteCollection &ro
 	row_groups.collection->SetRowGroupAppendMode(RowGroupAppendMode::REQUIRE_NEW);
 }
 
-void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
-	auto &collection = row_group.GetCollection();
+bool OptimisticDataWriter::PrepareWriteColumn(const RowGroupCollection &collection) {
 	if (collection.GetTotalRows() < collection.GetRowGroupSize()) {
 		// a column of less than a row group would waste most of its block, the checkpoint packs it instead
-		return;
+		return false;
 	}
 	if (!PrepareWrite()) {
-		return;
+		return false;
 	}
-	if (column_compression_types.empty()) {
-		column_compression_types = GetCompressionTypes();
-	}
+	column_compression_types = GetCompressionTypes();
+	return true;
+}
+
+void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
+	D_ASSERT(partial_manager);
 	RowGroupWriteInfo info(*partial_manager, column_compression_types);
 	row_group.WriteColumnToDisk(info, column_idx);
 }
