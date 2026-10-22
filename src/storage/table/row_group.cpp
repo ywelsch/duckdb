@@ -1659,8 +1659,9 @@ bool RowGroup::HasChanges() const {
 }
 
 bool RowGroup::IsPersistent() const {
-	for (auto &column : columns) {
-		if (!column->IsPersistent()) {
+	for (idx_t c = 0; c < columns.size(); c++) {
+		// columns that are not loaded are on disk
+		if (ColumnIsLoaded(c) && !columns[c]->IsPersistent()) {
 			// column is not persistent
 			return false;
 		}

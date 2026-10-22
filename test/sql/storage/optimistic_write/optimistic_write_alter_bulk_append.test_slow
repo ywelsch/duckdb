@@ -156,3 +156,63 @@ query II
 SELECT COUNT(*), SUM(c) FROM db.t2
 ----
 2200001	200000
+
+# an ALTER in the middle of loading keeps the row group that is being filled open
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE TABLE db.t3 (i BIGINT)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t3 SELECT i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t3 ADD COLUMN c BIGINT
+
+statement ok
+INSERT INTO db.t3 SELECT i, 1 FROM range(200000) t(i)
+
+statement ok
+COMMIT
+
+# 1.2M rows fit in 10 row groups, sealing the partly filled one at the ALTER would need 11
+query I
+SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('db.t3')
+----
+10
+
+# DROP COLUMN keeps the row groups that are on disk there, too
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE TABLE db.t4 (i BIGINT, j BIGINT)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.t4 SELECT i, i FROM range(1000000) t(i)
+
+statement ok
+ALTER TABLE db.t4 DROP COLUMN j
+
+statement ok
+INSERT INTO db.t4 VALUES (1)
+
+statement ok
+COMMIT
+
+query I
+SELECT size < 100000 FROM read_blob('__TEST_DIR__/optimistic_write_alter_bulk_append.db.wal')
+----
+true
+
+query II
+SELECT COUNT(*), SUM(i) FROM db.t4
+----
+1000001	499999500001

@@ -52,7 +52,7 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_data
       optimistic_writer(new_data_table, parent.optimistic_writer) {
 	// Alter the column type.
 	auto &parent_collection = *parent.row_groups->collection;
-	optional_ptr<OptimisticDataWriter> writer = parent.row_groups->IsFullyFlushed() ? &optimistic_writer : nullptr;
+	optional_ptr<OptimisticDataWriter> writer = parent.deleted_rows == 0 ? &optimistic_writer : nullptr;
 	auto new_collection =
 	    parent_collection.AlterType(context, alter_column_index, target_type, bound_columns, cast_expr, writer);
 	parent_collection.CommitDropColumn(alter_column_index);
@@ -83,7 +83,7 @@ LocalTableStorage::LocalTableStorage(ClientContext &context, DataTable &new_dt, 
       optimistic_collections(std::move(parent.optimistic_collections)),
       optimistic_writer(new_dt, parent.optimistic_writer) {
 	auto &parent_collection = *parent.row_groups->collection;
-	optional_ptr<OptimisticDataWriter> writer = parent.row_groups->IsFullyFlushed() ? &optimistic_writer : nullptr;
+	optional_ptr<OptimisticDataWriter> writer = parent.deleted_rows == 0 ? &optimistic_writer : nullptr;
 	auto new_collection = parent_collection.AddColumn(context, new_column, default_executor, writer);
 	row_groups = std::move(parent.row_groups);
 	row_groups->ReplaceCollection(std::move(new_collection));
@@ -721,56 +721,36 @@ void LocalStorage::MoveStorage(DataTable &old_dt, DataTable &new_dt) {
 
 void LocalStorage::AddColumn(DataTable &old_dt, DataTable &new_dt, ColumnDefinition &new_column,
                              ExpressionExecutor &default_executor) {
-	// check if there are any pending appends for the old version of the table
-	auto storage = table_manager.MoveEntry(old_dt);
-	if (!storage) {
-		return;
-	}
-	if (storage->IsBulkAppend()) {
-		// commit merges these row groups as written, so write them all out to write the new column along with them
-		storage->FlushBlocks();
-	}
-	shared_ptr<LocalTableStorage> new_storage;
-	try {
-		new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, new_column, default_executor);
-	} catch (...) {
-		// keep the appended rows so that the rollback of the transaction releases their blocks
-		table_manager.InsertEntry(old_dt, std::move(storage));
-		throw;
-	}
-	table_manager.InsertEntry(new_dt, std::move(new_storage));
+	AlterStorage(old_dt, new_dt, [&](LocalTableStorage &storage) {
+		return make_shared_ptr<LocalTableStorage>(context, new_dt, storage, new_column, default_executor);
+	});
 }
 
 void LocalStorage::DropColumn(DataTable &old_dt, DataTable &new_dt, const idx_t drop_column_index) {
-	// check if there are any pending appends for the old version of the table
-	auto storage = table_manager.MoveEntry(old_dt);
-	if (!storage) {
-		return;
-	}
-	auto new_storage = make_shared_ptr<LocalTableStorage>(new_dt, *storage, drop_column_index);
-	table_manager.InsertEntry(new_dt, std::move(new_storage));
+	AlterStorage(old_dt, new_dt, [&](LocalTableStorage &storage) {
+		return make_shared_ptr<LocalTableStorage>(new_dt, storage, drop_column_index);
+	});
 }
 
 void LocalStorage::ChangeType(DataTable &old_dt, DataTable &new_dt, idx_t changed_idx, const LogicalType &target_type,
                               const vector<StorageIndex> &bound_columns, Expression &cast_expr) {
+	AlterStorage(old_dt, new_dt, [&](LocalTableStorage &storage) {
+		return make_shared_ptr<LocalTableStorage>(context, new_dt, storage, changed_idx, target_type, bound_columns,
+		                                          cast_expr);
+	});
+}
+
+void LocalStorage::AlterStorage(DataTable &old_dt, DataTable &new_dt,
+                                const std::function<shared_ptr<LocalTableStorage>(LocalTableStorage &)> &alter) {
 	// check if there are any pending appends for the old version of the table
-	auto storage = table_manager.MoveEntry(old_dt);
+	auto storage = table_manager.GetStorage(old_dt);
 	if (!storage) {
 		return;
 	}
-	if (storage->IsBulkAppend()) {
-		// commit merges these row groups as written, so write them all out to write the new column along with them
-		storage->FlushBlocks();
-	}
-	shared_ptr<LocalTableStorage> new_storage;
-	try {
-		new_storage = make_shared_ptr<LocalTableStorage>(context, new_dt, *storage, changed_idx, target_type,
-		                                                 bound_columns, cast_expr);
-	} catch (...) {
-		// keep the appended rows so that the rollback of the transaction releases their blocks
-		table_manager.InsertEntry(old_dt, std::move(storage));
-		throw;
-	}
+	// finish the blocks of the row groups that are written to disk, so that these stay written in the altered storage
+	storage->GetOptimisticWriter().FinalFlush();
+	auto new_storage = alter(*storage);
+	table_manager.MoveEntry(old_dt);
 	table_manager.InsertEntry(new_dt, std::move(new_storage));
 }
 

@@ -196,10 +196,6 @@ void OptimisticWriteCollection::ReplaceCollection(shared_ptr<RowGroupCollection>
 	prev_allocated_size = collection->GetAllocationSize();
 }
 
-bool OptimisticWriteCollection::IsFullyFlushed() const {
-	return unflushed_row_groups.empty() && complete_row_groups == collection->GetRowGroupCount();
-}
-
 void OptimisticWriteCollection::MergeStorage(OptimisticWriteCollection &merge_collection) {
 	auto &merge_row_groups = *merge_collection.collection;
 	if (merge_row_groups.GetTotalRows() == 0) {

@@ -27,8 +27,6 @@ struct OptimisticWriteCollection {
 	void MergeStorage(OptimisticWriteCollection &collection);
 	//! Replace the collection with the one an ALTER created from it
 	void ReplaceCollection(shared_ptr<RowGroupCollection> new_collection);
-	//! Whether all row groups of the collection have been written to disk
-	bool IsFullyFlushed() const;
 };
 
 enum class OptimisticWritePartialManagers { PER_COLUMN, GLOBAL };

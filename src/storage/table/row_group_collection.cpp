@@ -2121,8 +2121,10 @@ void RowGroupCollection::AlterRowGroups(ClientContext &context, RowGroupCollecti
 	}
 	vector<unique_ptr<RowGroup>> new_row_groups(nodes.size());
 	std::function<void(idx_t)> alter_row_group = [&](idx_t index) {
-		auto row_group = alter(nodes[index].get());
-		if (writer) {
+		auto &node = nodes[index].get();
+		auto row_group = alter(node);
+		// a row group that is not on disk yet is written as a whole later, together with its new column
+		if (writer && node.GetNode().IsPersistent()) {
 			writer->WriteColumn(*row_group, column_idx);
 		}
 		new_row_groups[index] = std::move(row_group);
