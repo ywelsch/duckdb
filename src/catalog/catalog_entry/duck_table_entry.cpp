@@ -1228,7 +1228,11 @@ void DuckTableEntry::Rollback(CatalogEntry &prev_entry) {
 
 	auto &table = Cast<DuckTableEntry>();
 	auto &prev_table = prev_entry.Cast<DuckTableEntry>();
-	auto &prev_info = prev_table.GetStorage().GetDataTableInfo();
+	auto &prev_storage = prev_table.GetStorage();
+	if (storage.get() != &prev_storage) {
+		storage->RollbackWrittenColumn();
+	}
+	auto &prev_info = prev_storage.GetDataTableInfo();
 	auto &prev_indexes = prev_info->GetIndexes();
 
 	// Find all index-based constraints that exist in rollback_table, but not in table.

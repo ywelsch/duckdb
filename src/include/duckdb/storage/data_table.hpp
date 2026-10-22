@@ -238,6 +238,8 @@ public:
 	void CommitDropTable(CommitDropState &drop_state);
 	//! Accumulates the column's on-disk blocks for reclamation into the drop state.
 	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state);
+	//! Releases the on-disk blocks of the column this table version wrote, when its ALTER is rolled back
+	void RollbackWrittenColumn();
 
 	idx_t ColumnCount() const;
 	idx_t GetTotalRows() const;
@@ -341,5 +343,7 @@ private:
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table
 	atomic<DataTableVersion> version;
+	//! The physical column whose data this table version wrote (ADD COLUMN), if any
+	optional_idx written_column;
 };
 } // namespace duckdb

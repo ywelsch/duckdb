@@ -13,6 +13,7 @@
 #include "duckdb/storage/checkpoint/table_data_writer.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/metadata/metadata_reader.hpp"
+#include "duckdb/storage/optimistic_data_writer.hpp"
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/column_checkpoint_state.hpp"
 #include "duckdb/storage/table/persistent_table_data.hpp"
@@ -2001,7 +2002,8 @@ bool RowGroupCollection::SupportsPerColumnWrites() {
 // Alter
 //===--------------------------------------------------------------------===//
 shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &context, ColumnDefinition &new_column,
-                                                             ExpressionExecutor &default_executor) {
+                                                             ExpressionExecutor &default_executor,
+                                                             optional_ptr<OptimisticDataWriter> writer) {
 	idx_t new_column_idx = types.size();
 	auto new_types = types;
 	auto row_groups = GetRowGroups();
@@ -2019,12 +2021,24 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 	// fill the column with its DEFAULT value, or NULL if none is specified
 	auto new_stats = make_uniq<SegmentStatistics>(new_column.GetType());
 	auto result_row_groups = result->GetRowGroups();
-	for (auto &current_row_group : row_groups->Segments()) {
-		auto new_row_group = current_row_group.AddColumn(*result, new_column, default_executor, default_vector);
-		// merge in the statistics
-		new_row_group->MergeIntoStatistics(new_column_idx, new_column_stats.Statistics());
+	try {
+		for (auto &current_row_group : row_groups->Segments()) {
+			auto new_row_group = current_row_group.AddColumn(*result, new_column, default_executor, default_vector);
+			if (writer) {
+				writer->WriteColumn(*new_row_group, new_column_idx);
+			}
+			// merge in the statistics
+			new_row_group->MergeIntoStatistics(new_column_idx, new_column_stats.Statistics());
 
-		result_row_groups->AppendSegment(std::move(new_row_group));
+			result_row_groups->AppendSegment(std::move(new_row_group));
+		}
+	} catch (...) {
+		if (writer) {
+			// release the blocks the new column was already written to
+			writer->Rollback();
+			result->CommitDropColumn(new_column_idx);
+		}
+		throw;
 	}
 
 	return result;

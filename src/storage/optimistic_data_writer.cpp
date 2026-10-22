@@ -155,6 +155,18 @@ void OptimisticDataWriter::WriteUnflushedRowGroups(OptimisticWriteCollection &ro
 	row_groups.collection->SetRowGroupAppendMode(RowGroupAppendMode::REQUIRE_NEW);
 }
 
+void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
+	if (!PrepareWrite()) {
+		return;
+	}
+	vector<CompressionType> compression_types;
+	for (auto &column : table.Columns()) {
+		compression_types.push_back(column.CompressionType());
+	}
+	RowGroupWriteInfo info(*partial_manager, compression_types);
+	row_group.WriteColumnToDisk(info, column_idx);
+}
+
 void OptimisticWriteCollection::MergeStorage(OptimisticWriteCollection &merge_collection) {
 	auto &merge_row_groups = *merge_collection.collection;
 	if (merge_row_groups.GetTotalRows() == 0) {

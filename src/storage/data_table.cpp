@@ -96,7 +96,10 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	// prevent any new tuples from being added to the parent
 	lock_guard<mutex> parent_lock(parent.append_lock);
 
-	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
+	OptimisticDataWriter writer(context, *this);
+	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor, writer);
+	writer.FinalFlush();
+	written_column = column_definitions.size() - 1;
 
 	// also add this column to client local storage
 	local_storage.AddColumn(parent, *this, new_column, default_executor);
@@ -1850,6 +1853,12 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 
 void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state) {
 	row_groups->CommitDropColumn(column_index, drop_state);
+}
+
+void DataTable::RollbackWrittenColumn() {
+	if (written_column.IsValid()) {
+		row_groups->CommitDropColumn(written_column.GetIndex());
+	}
 }
 
 void DataTable::Destroy() {

@@ -1,0 +1,134 @@
+# name: test/sql/storage/optimistic_write/optimistic_write_alter_add_column.test_slow
+# description: ADD COLUMN on a persistent table writes the new column to disk row group by row group
+# group: [optimistic_write]
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+statement ok
+ATTACH '__TEST_DIR__/optimistic_write_alter_add_column.db' AS db
+
+statement ok
+CREATE TABLE db.t AS SELECT i FROM range(10000000) t(i)
+
+statement ok
+CHECKPOINT db
+
+# buffering one uncompressed BIGINT column of 10M rows takes ~100MB, which does not fit
+statement ok
+SET memory_limit='32MB'
+
+statement ok
+SET max_temp_directory_size='16MB'
+
+statement ok
+ALTER TABLE db.t ADD COLUMN c1 BIGINT
+
+statement ok
+ALTER TABLE db.t ADD COLUMN c2 BIGINT DEFAULT 42
+
+# IF NOT EXISTS skips the rewrite of a volatile default into an UPDATE, so ADD COLUMN itself writes these values
+statement ok
+ALTER TABLE db.t ADD COLUMN IF NOT EXISTS c3 DOUBLE DEFAULT random()
+
+query I
+SELECT BOOL_AND(persistent) FROM pragma_storage_info('db.t') WHERE column_name IN ('c1', 'c2', 'c3')
+----
+true
+
+query I
+SELECT COUNT(*) FROM pragma_storage_info('db.t') WHERE column_name IN ('c1', 'c2') AND compression <> 'Constant'
+----
+0
+
+query IIIII
+SELECT COUNT(*), COUNT(c1), SUM(c2), COUNT(c3), BOOL_AND(c3 >= 0 AND c3 < 1) FROM db.t
+----
+10000000	0	420000000	10000000	true
+
+# WAL replay redoes the ADD COLUMNs within the same memory limit
+statement ok
+DETACH db
+
+statement ok
+ATTACH '__TEST_DIR__/optimistic_write_alter_add_column.db' AS db
+
+query IIIII
+SELECT COUNT(*), COUNT(c1), SUM(c2), COUNT(c3), BOOL_AND(c3 >= 0 AND c3 < 1) FROM db.t
+----
+10000000	0	420000000	10000000	true
+
+statement ok
+CHECKPOINT db
+
+statement ok
+DETACH db
+
+statement ok
+ATTACH '__TEST_DIR__/optimistic_write_alter_add_column.db' AS db
+
+query IIIII
+SELECT COUNT(*), COUNT(c1), SUM(c2), COUNT(c3), BOOL_AND(c3 >= 0 AND c3 < 1) FROM db.t
+----
+10000000	0	420000000	10000000	true
+
+# the blocks of a rolled back ADD COLUMN are free again right away
+statement ok
+CREATE TEMPORARY TABLE used_before AS SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+loop i 0 3
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE db.t ADD COLUMN IF NOT EXISTS c4 DOUBLE DEFAULT random()
+
+query I
+SELECT COUNT(c4) FROM db.t
+----
+10000000
+
+statement ok
+ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+endloop
+
+query I
+SELECT COUNT(*) FROM duckdb_columns() WHERE database_name = 'db' AND table_name = 't'
+----
+4
+
+# adding and dropping a column in one transaction
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE db.t ADD COLUMN IF NOT EXISTS c5 DOUBLE DEFAULT random()
+
+statement ok
+ALTER TABLE db.t DROP COLUMN c5
+
+statement ok
+COMMIT
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+statement ok
+CHECKPOINT db
+
+query IIIII
+SELECT COUNT(*), COUNT(c1), SUM(c2), COUNT(c3), BOOL_AND(c3 >= 0 AND c3 < 1) FROM db.t
+----
+10000000	0	420000000	10000000	true
