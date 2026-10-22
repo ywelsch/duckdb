@@ -46,6 +46,10 @@ public:
 	void WriteNewRowGroup(OptimisticWriteCollection &row_groups, idx_t flushed_row_group_idx);
 	//! Write any unflushed row groups of a collection to disk
 	void WriteUnflushedRowGroups(OptimisticWriteCollection &row_groups);
+	//! Prepare writing single columns of the collection's row groups, returns false if they should stay in memory
+	bool PrepareWriteColumn(const RowGroupCollection &collection);
+	//! Write a single column of a row group to disk after PrepareWriteColumn, can be called from several threads
+	void WriteColumn(RowGroup &row_group, idx_t column_idx);
 	//! Final flush of the optimistic writer - fully flushes the partial block manager
 	void FinalFlush();
 	//! Merge the partially written blocks from one optimistic writer into another
@@ -68,6 +72,8 @@ private:
 	//! Flushes a specific row group to disk
 	void FlushToDisk(OptimisticWriteCollection &collection, const vector<const_reference<RowGroup>> &row_groups,
 	                 const vector<int64_t> &segment_indexes);
+	//! The compression type of each column of the table
+	vector<CompressionType> GetCompressionTypes() const;
 
 private:
 	//! The client context in which we're writing the data.
@@ -76,6 +82,14 @@ private:
 	DataTable &table;
 	//! The partial block manager, if any.
 	unique_ptr<PartialBlockManager> partial_manager;
+	//! The compression types of the table's columns, used for writing single columns
+	vector<CompressionType> column_compression_types;
+	//! Protects merging the blocks of single written columns into the partial block manager
+	mutex write_column_lock;
+	//! The number of single columns written so far
+	idx_t written_column_count = 0;
+	//! After how many written single columns the partial blocks are flushed
+	static constexpr idx_t WRITTEN_COLUMNS_PER_FLUSH = 16;
 };
 
 } // namespace duckdb

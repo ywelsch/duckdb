@@ -238,6 +238,9 @@ private:
 
 private:
 	void Flush(DataTable &table, LocalTableStorage &storage, optional_ptr<StorageCommitState> commit_state);
+	//! Replaces the storage of a table version that an ALTER replaced by the storage alter creates from it
+	void AlterStorage(DataTable &old_dt, DataTable &new_dt,
+	                  const std::function<shared_ptr<LocalTableStorage>(LocalTableStorage &)> &alter);
 };
 
 } // namespace duckdb

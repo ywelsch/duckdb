@@ -185,15 +185,47 @@ void OptimisticWriteCollection::MergeStorage(OptimisticWriteCollection &merge_co
 	collection->MergeStorage(merge_row_groups, nullptr, nullptr);
 }
 
+bool OptimisticDataWriter::PrepareWriteColumn(const RowGroupCollection &collection) {
+	if (collection.GetTotalRows() < collection.GetRowGroupSize()) {
+		// a column of less than a row group would waste most of its block, the checkpoint packs it instead
+		return false;
+	}
+	if (!PrepareWrite()) {
+		return false;
+	}
+	column_compression_types = GetCompressionTypes();
+	return true;
+}
+
+void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
+	D_ASSERT(partial_manager);
+	// a partial block manager of its own keeps a failed write from leaving segments behind in shared blocks
+	auto &block_manager = table.GetTableIOManager().GetBlockManagerForRowData();
+	PartialBlockManager column_manager(QueryContext(context), block_manager, PartialBlockType::APPEND_TO_TABLE);
+	RowGroupWriteInfo info(column_manager, column_compression_types);
+	row_group.WriteColumnToDisk(info, column_idx);
+
+	lock_guard<mutex> guard(write_column_lock);
+	partial_manager->Merge(column_manager);
+	if (++written_column_count % WRITTEN_COLUMNS_PER_FLUSH == 0) {
+		// bound the blocks that wait for more data to be packed into them
+		partial_manager->FlushPartialBlocks();
+	}
+}
+
+vector<CompressionType> OptimisticDataWriter::GetCompressionTypes() const {
+	vector<CompressionType> compression_types;
+	for (auto &column : table.Columns()) {
+		compression_types.push_back(column.CompressionType());
+	}
+	return compression_types;
+}
+
 void OptimisticDataWriter::FlushToDisk(OptimisticWriteCollection &collection,
                                        const vector<const_reference<RowGroup>> &row_groups,
                                        const vector<int64_t> &segment_indexes) {
 	//! The set of column compression types (if any)
-	vector<CompressionType> compression_types;
-	D_ASSERT(compression_types.empty());
-	for (auto &column : table.Columns()) {
-		compression_types.push_back(column.CompressionType());
-	}
+	auto compression_types = GetCompressionTypes();
 	RowGroupWriteInfo info(*partial_manager, compression_types, collection.partial_block_managers);
 	auto result = RowGroup::WriteToDisk(info, row_groups);
 	// move new (checkpointed) row groups to the row group collection

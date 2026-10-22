@@ -355,7 +355,18 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 
 	// fetch the entry again before doing the modification
 	// this will catch any write-write conflicts between transactions
-	entry = GetEntryInternal(transaction, name);
+	try {
+		entry = GetEntryInternal(transaction, name);
+	} catch (...) {
+		if (value->type == CatalogType::TABLE_ENTRY) {
+			auto new_table = value->Cast<TableCatalogEntry>().TryGetDuckTableEntry();
+			if (new_table) {
+				// a conflict that arose while altering: release what the discarded altered table wrote to disk
+				new_table->RollbackWrittenColumn(*entry);
+			}
+		}
+		throw;
+	}
 
 	// Mark this entry as being created by this transaction
 	value->timestamp = transaction.GetTransactionId();

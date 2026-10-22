@@ -1,0 +1,220 @@
+# name: test/sql/storage/optimistic_write/optimistic_write_alter_column_type.test_slow
+# description: ALTER TYPE and struct field changes on a persistent table write the new column row group by row group
+# group: [optimistic_write]
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+statement ok
+ATTACH '{TEST_DIR}/optimistic_write_alter_column_type.db' AS db
+
+statement ok
+CREATE TABLE db.t AS SELECT i, i::INTEGER AS j, {'a': i, 'b': i * 2} AS s FROM range(10000000) t(i)
+
+statement ok
+CREATE TABLE db.w AS SELECT (random() * 5000)::INTEGER AS k FROM range(30000000) t(i)
+
+statement ok
+CHECKPOINT db
+
+# buffering one uncompressed BIGINT column of 10M rows takes ~100MB, which does not fit
+statement ok
+SET memory_limit='32MB'
+
+statement ok
+SET max_temp_directory_size='16MB'
+
+# the ALTERs need about one row group of memory per thread
+statement ok
+SET threads=4
+
+statement ok
+ALTER TABLE db.t ALTER j TYPE BIGINT USING j * 3
+
+statement ok
+ALTER TABLE db.t ADD COLUMN s.c BIGINT
+
+statement ok
+ALTER TABLE db.t RENAME s.b TO bb
+
+statement ok
+ALTER TABLE db.t DROP COLUMN s.a
+
+query I
+SELECT BOOL_AND(persistent) FROM pragma_storage_info('db.t') WHERE column_name IN ('j', 's')
+----
+true
+
+query IIIII
+SELECT COUNT(*), SUM(j), SUM(s.bb), COUNT(s.c), MIN(j) FROM db.t
+----
+10000000	149999985000000	99999990000000	0	0
+
+# WAL replay redoes the ALTERs within the same memory limit
+statement ok
+DETACH db
+
+statement ok
+ATTACH '{TEST_DIR}/optimistic_write_alter_column_type.db' AS db
+
+query IIIII
+SELECT COUNT(*), SUM(j), SUM(s.bb), COUNT(s.c), MIN(j) FROM db.t
+----
+10000000	149999985000000	99999990000000	0	0
+
+statement ok
+CHECKPOINT db
+
+statement ok
+DETACH db
+
+statement ok
+ATTACH '{TEST_DIR}/optimistic_write_alter_column_type.db' AS db
+
+query IIIII
+SELECT COUNT(*), SUM(j), SUM(s.bb), COUNT(s.c), MIN(j) FROM db.t
+----
+10000000	149999985000000	99999990000000	0	0
+
+# the blocks of a rolled back ALTER TYPE are free again right away
+statement ok
+CREATE TEMPORARY TABLE used_before AS SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+loop k 0 3
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE db.t ALTER j TYPE DOUBLE USING j / 7
+
+query I
+SELECT COUNT(j) FROM db.t
+----
+10000000
+
+statement ok
+ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+endloop
+
+query I
+SELECT typeof(j) FROM db.t LIMIT 1
+----
+BIGINT
+
+# converting the same column twice in one transaction
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE db.t ALTER j TYPE DOUBLE USING j / 3
+
+statement ok
+ALTER TABLE db.t ALTER j TYPE BIGINT
+
+statement ok
+COMMIT
+
+statement ok
+CHECKPOINT db
+
+query IIIII
+SELECT COUNT(*), SUM(j), SUM(s.bb), COUNT(s.c), MIN(j) FROM db.t
+----
+10000000	49999995000000	99999990000000	0	0
+
+# columns whose row groups each leave a mostly empty block behind still do not pile up in memory
+statement ok
+ALTER TABLE db.w ALTER k TYPE BIGINT
+
+query I
+SELECT COUNT(*) FROM db.w WHERE k BETWEEN 0 AND 5000
+----
+30000000
+
+statement ok
+DROP TABLE db.w
+
+statement ok
+CHECKPOINT db
+
+# an ALTER that fails after writing its column gives all blocks back: a cast error in bulk appended rows
+statement ok
+CREATE TABLE db.s AS SELECT i::VARCHAR AS v FROM range(10000000) t(i)
+
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE OR REPLACE TEMPORARY TABLE used_before AS SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO db.s SELECT i::VARCHAR FROM range(1000000) t(i)
+
+statement ok
+INSERT INTO db.s VALUES ('not a number')
+
+statement error
+ALTER TABLE db.s ALTER v TYPE BIGINT
+----
+Could not convert
+
+statement ok
+ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+# ... and a write-write conflict with the ALTER of another transaction
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE db.s ADD COLUMN x BIGINT
+
+statement error con2
+ALTER TABLE db.s ALTER v TYPE BIGINT
+----
+write-write conflict
+
+statement ok con1
+ROLLBACK
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0
+
+# a conversion error in one row group gives back the blocks of the row groups converted in parallel
+statement ok
+CREATE TABLE db.u AS SELECT CASE WHEN i = 5000000 THEN 'x' ELSE random()::VARCHAR END AS v FROM range(10000000) t(i)
+
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE OR REPLACE TEMPORARY TABLE used_before AS SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+statement error
+ALTER TABLE db.u ALTER v TYPE DOUBLE
+----
+Could not convert
+
+query I
+SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_size() WHERE database_name = 'db'
+----
+0

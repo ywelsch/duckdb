@@ -1407,10 +1407,18 @@ unique_ptr<CatalogEntry> DuckTableEntry::DropForeignKeyConstraint(ClientContext 
 	return make_uniq<DuckTableEntry>(catalog, schema, *bound_create_info, storage, triggers);
 }
 
+void DuckTableEntry::RollbackWrittenColumn(CatalogEntry &prev_entry) {
+	if (storage.get() != &prev_entry.Cast<DuckTableEntry>().GetStorage()) {
+		storage->RollbackWrittenColumn();
+	}
+}
+
 void DuckTableEntry::Rollback(CatalogEntry &prev_entry) {
 	if (prev_entry.type != CatalogType::TABLE_ENTRY) {
 		return;
 	}
+
+	RollbackWrittenColumn(prev_entry);
 
 	// Rolls back any physical index creation for index-based constraints.
 	auto &prev_table = prev_entry.Cast<DuckTableEntry>();
