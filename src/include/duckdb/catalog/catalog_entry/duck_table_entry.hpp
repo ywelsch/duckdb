@@ -34,8 +34,6 @@ public:
 	unique_ptr<CatalogEntry> AlterEntry(CatalogTransaction, AlterInfo &info) override;
 	void UndoAlter(ClientContext &context, AlterInfo &info) override;
 	void Rollback(CatalogEntry &prev_entry) override;
-	//! Releases the column that the storage of this entry, altered from prev_entry, wrote to disk
-	void RollbackWrittenColumn(CatalogEntry &prev_entry);
 	void OnDrop() override;
 
 	//! Returns the underlying storage of the table

@@ -364,13 +364,8 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 	try {
 		entry = GetEntryInternal(transaction, name);
 	} catch (...) {
-		if (value->type == CatalogType::TABLE_ENTRY) {
-			auto new_table = value->Cast<TableCatalogEntry>().TryGetDuckTableEntry();
-			if (new_table) {
-				// a conflict that arose while altering: release what the discarded altered table wrote to disk
-				new_table->RollbackWrittenColumn(*entry);
-			}
-		}
+		// a conflict that arose while altering: undo building the discarded entry, as rolling back an ALTER does
+		value->Rollback(*entry);
 		throw;
 	}
 
