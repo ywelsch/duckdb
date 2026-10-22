@@ -203,7 +203,10 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 
 	// set up the statistics for the table
 	// the column that had its type changed will have the new statistics computed during conversion
-	row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr);
+	OptimisticDataWriter writer(context, *this);
+	row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr, writer);
+	writer.FinalFlush();
+	written_column = changed_idx;
 
 	// scan the original table, and fill the new column with the transformed value
 	local_storage.ChangeType(parent, *this, changed_idx, target_type, bound_columns, cast_expr);

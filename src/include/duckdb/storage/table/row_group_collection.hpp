@@ -160,8 +160,10 @@ public:
 	                                         ExpressionExecutor &default_executor,
 	                                         optional_ptr<OptimisticDataWriter> writer = nullptr);
 	shared_ptr<RowGroupCollection> RemoveColumn(idx_t col_idx);
+	//! If a writer is given, the converted column of each row group is written to disk as soon as it is filled
 	shared_ptr<RowGroupCollection> AlterType(ClientContext &context, idx_t changed_idx, const LogicalType &target_type,
-	                                         vector<StorageIndex> bound_columns, Expression &cast_expr);
+	                                         vector<StorageIndex> bound_columns, Expression &cast_expr,
+	                                         optional_ptr<OptimisticDataWriter> writer = nullptr);
 	void VerifyNewConstraint(const QueryContext &context, DataTable &parent, const BoundConstraint &constraint);
 
 	void SetStats(TableStatistics &new_stats);

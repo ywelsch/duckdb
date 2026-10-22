@@ -2067,8 +2067,8 @@ shared_ptr<RowGroupCollection> RowGroupCollection::RemoveColumn(idx_t col_idx) {
 
 shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &context, idx_t changed_idx,
                                                              const LogicalType &target_type,
-                                                             vector<StorageIndex> bound_columns,
-                                                             Expression &cast_expr) {
+                                                             vector<StorageIndex> bound_columns, Expression &cast_expr,
+                                                             optional_ptr<OptimisticDataWriter> writer) {
 	D_ASSERT(changed_idx < types.size());
 	auto new_types = types;
 	auto row_groups = GetRowGroups();
@@ -2102,12 +2102,24 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 	auto &changed_stats = result->stats.GetStats(*lock, changed_idx);
 	auto result_row_groups = result->GetRowGroups();
 
-	for (auto &node : row_groups->SegmentNodes()) {
-		auto &current_row_group = node.GetNode();
-		auto new_row_group = current_row_group.AlterType(*result, target_type, changed_idx, executor,
-		                                                 scan_state.table_state, node, scan_chunk);
-		new_row_group->MergeIntoStatistics(changed_idx, changed_stats.Statistics());
-		result_row_groups->AppendSegment(std::move(new_row_group));
+	try {
+		for (auto &node : row_groups->SegmentNodes()) {
+			auto &current_row_group = node.GetNode();
+			auto new_row_group = current_row_group.AlterType(*result, target_type, changed_idx, executor,
+			                                                 scan_state.table_state, node, scan_chunk);
+			if (writer) {
+				writer->WriteColumn(*new_row_group, changed_idx);
+			}
+			new_row_group->MergeIntoStatistics(changed_idx, changed_stats.Statistics());
+			result_row_groups->AppendSegment(std::move(new_row_group));
+		}
+	} catch (...) {
+		if (writer) {
+			// release the blocks the converted column was already written to
+			writer->Rollback();
+			result->CommitDropColumn(changed_idx);
+		}
+		throw;
 	}
 	return result;
 }

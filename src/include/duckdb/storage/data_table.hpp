@@ -343,7 +343,7 @@ private:
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table
 	atomic<DataTableVersion> version;
-	//! The physical column whose data this table version wrote (ADD COLUMN), if any
+	//! The physical column whose data this table version wrote (ADD COLUMN or ALTER TYPE), if any
 	optional_idx written_column;
 };
 } // namespace duckdb
