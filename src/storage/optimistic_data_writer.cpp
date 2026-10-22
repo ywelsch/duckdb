@@ -156,6 +156,11 @@ void OptimisticDataWriter::WriteUnflushedRowGroups(OptimisticWriteCollection &ro
 }
 
 void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
+	auto &collection = row_group.GetCollection();
+	if (collection.GetTotalRows() < collection.GetRowGroupSize()) {
+		// a column of less than a row group would waste most of its block, the checkpoint packs it instead
+		return;
+	}
 	if (!PrepareWrite()) {
 		return;
 	}
