@@ -169,8 +169,18 @@ bool OptimisticDataWriter::PrepareWriteColumn(const RowGroupCollection &collecti
 
 void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
 	D_ASSERT(partial_manager);
-	RowGroupWriteInfo info(*partial_manager, column_compression_types);
+	// a partial block manager of its own keeps a failed write from leaving segments behind in shared blocks
+	auto &block_manager = table.GetTableIOManager().GetBlockManagerForRowData();
+	PartialBlockManager column_manager(QueryContext(context), block_manager, PartialBlockType::APPEND_TO_TABLE);
+	RowGroupWriteInfo info(column_manager, column_compression_types);
 	row_group.WriteColumnToDisk(info, column_idx);
+
+	lock_guard<mutex> guard(write_column_lock);
+	partial_manager->Merge(column_manager);
+	if (++written_column_count % WRITTEN_COLUMNS_PER_FLUSH == 0) {
+		// bound the blocks that wait for more data to be packed into them
+		partial_manager->FlushPartialBlocks();
+	}
 }
 
 vector<CompressionType> OptimisticDataWriter::GetCompressionTypes() const {

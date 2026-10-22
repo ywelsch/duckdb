@@ -15,6 +15,9 @@ statement ok
 CREATE TABLE db.t AS SELECT i, i::INTEGER AS j, {'a': i, 'b': i * 2} AS s FROM range(10000000) t(i)
 
 statement ok
+CREATE TABLE db.w AS SELECT (random() * 5000)::INTEGER AS k FROM range(30000000) t(i)
+
+statement ok
 CHECKPOINT db
 
 # buffering one uncompressed BIGINT column of 10M rows takes ~100MB, which does not fit
@@ -128,6 +131,21 @@ query IIIII
 SELECT COUNT(*), SUM(j), SUM(s.bb), COUNT(s.c), MIN(j) FROM db.t
 ----
 10000000	49999995000000	99999990000000	0	0
+
+# columns whose row groups each leave a mostly empty block behind still do not pile up in memory
+statement ok
+ALTER TABLE db.w ALTER k TYPE BIGINT
+
+query I
+SELECT COUNT(*) FROM db.w WHERE k BETWEEN 0 AND 5000
+----
+30000000
+
+statement ok
+DROP TABLE db.w
+
+statement ok
+CHECKPOINT db
 
 # an ALTER that fails after writing its column gives all blocks back: a cast error in bulk appended rows
 statement ok
