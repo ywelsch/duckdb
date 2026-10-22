@@ -1412,7 +1412,7 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 			if (!ColumnIsLoaded(column_idx)) {
 				column_has_changes = false;
 			} else if (!columns[column_idx]->HasAnyChanges() && column_pointers[column_idx].IsValid()) {
-				// an unchanged column without metadata (written by ADD COLUMN or ALTER TYPE) still needs its metadata written
+				// only metadata that is on disk can be reused, also for an unchanged column
 				column_has_changes = false;
 			}
 		}

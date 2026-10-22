@@ -2021,7 +2021,8 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 
 	// fill the column with its DEFAULT value, or NULL if none is specified
 	auto &default_value = *default_executor.expressions[0];
-	AlterRowGroups(context, *result, new_column_idx, default_value, writer, [&](SegmentNode<RowGroup> &node) {
+	auto parallel = !default_value.IsVolatile();
+	AlterRowGroups(context, *result, new_column_idx, parallel, writer, [&](SegmentNode<RowGroup> &node) {
 		ExpressionExecutor executor(context, default_value);
 		Vector default_vector(new_column.GetType());
 		return node.GetNode().AddColumn(*result, new_column, executor, default_vector);
@@ -2076,7 +2077,7 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 	auto max_row = row_groups->GetBaseRowId() + total_rows;
 
 	// now alter the type of the column within all of the row_groups individually
-	AlterRowGroups(context, *result, changed_idx, cast_expr, writer, [&](SegmentNode<RowGroup> &node) {
+	AlterRowGroups(context, *result, changed_idx, !cast_expr.IsVolatile(), writer, [&](SegmentNode<RowGroup> &node) {
 		DataChunk scan_chunk;
 		scan_chunk.Initialize(GetAllocator(), scan_types);
 		ExpressionExecutor executor(context, cast_expr);
@@ -2110,7 +2111,7 @@ private:
 };
 
 void RowGroupCollection::AlterRowGroups(ClientContext &context, RowGroupCollection &result, idx_t column_idx,
-                                        const Expression &expression, optional_ptr<OptimisticDataWriter> writer,
+                                        bool parallel, optional_ptr<OptimisticDataWriter> writer,
                                         const std::function<unique_ptr<RowGroup>(SegmentNode<RowGroup> &)> &alter) {
 	if (writer && !writer->PrepareWriteColumn(*this)) {
 		writer = nullptr;
@@ -2130,8 +2131,7 @@ void RowGroupCollection::AlterRowGroups(ClientContext &context, RowGroupCollecti
 		new_row_groups[index] = std::move(row_group);
 	};
 	try {
-		if (expression.IsVolatile()) {
-			// a volatile expression must see the rows in order
+		if (!parallel) {
 			for (idx_t index = 0; index < nodes.size(); index++) {
 				alter_row_group(index);
 			}
@@ -2169,8 +2169,8 @@ void RowGroupCollection::AlterRowGroups(ClientContext &context, RowGroupCollecti
 					row_group->CommitDropColumn(column_idx, drop_state);
 				}
 			}
+			result.CommitDropColumn(column_idx, drop_state);
 			drop_state.FinalizeCommit();
-			result.CommitDropColumn(column_idx);
 		}
 		throw;
 	}

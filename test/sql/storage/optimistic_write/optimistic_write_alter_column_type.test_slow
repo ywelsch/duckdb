@@ -155,10 +155,7 @@ statement ok
 CHECKPOINT db
 
 statement ok
-DELETE FROM used_before
-
-statement ok
-INSERT INTO used_before SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+CREATE OR REPLACE TEMPORARY TABLE used_before AS SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
 
 statement ok
 BEGIN
@@ -228,10 +225,7 @@ statement ok
 CHECKPOINT db
 
 statement ok
-DELETE FROM used_before
-
-statement ok
-INSERT INTO used_before SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
+CREATE OR REPLACE TEMPORARY TABLE used_before AS SELECT used_blocks FROM pragma_database_size() WHERE database_name = 'db'
 
 statement error
 ALTER TABLE db.u ALTER v TYPE DOUBLE

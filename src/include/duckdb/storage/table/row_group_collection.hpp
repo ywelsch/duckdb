@@ -202,9 +202,9 @@ private:
 	void SetRowGroups(shared_ptr<RowGroupSegmentTree> row_groups);
 	//! Carries a non-default append mode over to the collection that replaces this one after an ALTER
 	void CopyAppendModeTo(RowGroupCollection &target) const;
-	//! Fills result with alter's row groups and writes their column with the writer, in parallel unless volatile
-	void AlterRowGroups(ClientContext &context, RowGroupCollection &result, idx_t column_idx,
-	                    const Expression &expression, optional_ptr<OptimisticDataWriter> writer,
+	//! Fills result with alter's row groups and writes their column, in parallel unless volatile values need row order
+	void AlterRowGroups(ClientContext &context, RowGroupCollection &result, idx_t column_idx, bool parallel,
+	                    optional_ptr<OptimisticDataWriter> writer,
 	                    const std::function<unique_ptr<RowGroup>(SegmentNode<RowGroup> &)> &alter);
 
 private:
