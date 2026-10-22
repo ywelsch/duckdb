@@ -12,7 +12,8 @@ CompressedStringScanState::~CompressedStringScanState() {
 	delete reinterpret_cast<duckdb_fsst_decoder_t *>(decoder);
 }
 
-string_t CompressedStringScanState::FetchStringFromDict(Vector &result, uint32_t dict_offset, idx_t dict_idx) {
+string_t CompressedStringScanState::FetchStringFromDict(Vector &result, uint32_t dict_offset, idx_t dict_idx,
+                                                        StringScanType string_scan_type) {
 	D_ASSERT(dict_offset <= NumericCast<uint32_t>(segment.GetBlockSize()));
 
 	if (dict_idx == 0) {
@@ -38,6 +39,9 @@ string_t CompressedStringScanState::FetchStringFromDict(Vector &result, uint32_t
 		}
 	}
 	default:
+		if (string_scan_type == StringScanType::COPY_STRINGS) {
+			return StringVector::AddStringOrBlob(result, string_t(str_ptr, string_len));
+		}
 		// FIXME: the Vector doesn't seem to take ownership of the non-inlined string data???
 		return string_t(str_ptr, string_len);
 	}
@@ -195,7 +199,8 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 				result_data.WriteNull();
 				continue;
 			}
-			result_data.WriteValue(FetchStringFromDict(result, offsets[string_number], string_number));
+			result_data.WriteStringRef(
+			    FetchStringFromDict(result, offsets[string_number], string_number, StringScanType::COPY_STRINGS));
 		}
 	} else if (EnsureDictionary()) {
 		// We have prepared the full dictionary, we can reference these strings directly

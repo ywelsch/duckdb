@@ -33,7 +33,9 @@ public:
 	bool AllowDictionaryScan(idx_t scan_count);
 
 private:
-	string_t FetchStringFromDict(Vector &result, uint32_t dict_offset, idx_t dict_idx);
+	//! With COPY_STRINGS the string is owned by the result instead of pointing into the block
+	string_t FetchStringFromDict(Vector &result, uint32_t dict_offset, idx_t dict_idx,
+	                             StringScanType string_scan_type = StringScanType::STANDARD);
 	//! Builds the dictionary on first use, returns false if this scan has no dictionary
 	bool EnsureDictionary();
 	//! The offset of each string in the dictionary, computed on first use
