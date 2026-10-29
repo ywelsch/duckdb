@@ -247,12 +247,11 @@ void TableIndexList::RemoveDetachedIndex(const IndexEntry &entry) {
 	}
 }
 
-void TableIndexList::UpdateTimestamp(idx_t index_oid, transaction_t timestamp) {
+void TableIndexList::UpdateTimestamps(transaction_t old_timestamp, transaction_t new_timestamp) {
 	annotated_lock_guard lock(index_entries_lock);
 	for (const auto &entry : index_entries) {
-		if (entry->GetIndexOid() == index_oid) {
-			entry->SetTimestamp(timestamp);
-			return;
+		if (entry->GetTimestamp() == old_timestamp) {
+			entry->SetTimestamp(new_timestamp);
 		}
 	}
 }
@@ -595,6 +594,13 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 		entries[i]->InstallShadow(std::move(shadows[i]));
 	}
 
+#ifdef D_ASSERT_IS_ENABLED
+	// the indexes added meanwhile are not in the catalog that the checkpoint writes either
+	annotated_lock_guard lock(index_entries_lock);
+	for (const auto &entry : index_entries) {
+		D_ASSERT(entry->GetTimestamp() >= bound || std::find(entries.begin(), entries.end(), entry) != entries.end());
+	}
+#endif
 	return infos;
 }
 
