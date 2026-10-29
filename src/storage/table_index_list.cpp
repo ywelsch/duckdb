@@ -489,10 +489,20 @@ unordered_set<column_t> TableIndexList::GetIndexedColumns() const {
 }
 
 vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndexWriter &writer) {
+	auto &index_oids = writer.GetIndexOids();
 	vector<shared_ptr<IndexEntry>> entries;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		entries = index_entries;
+		for (const auto &entry : index_entries) {
+			// the list can have indexes that the catalog that the checkpoint writes does not have yet
+			if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
+				entries.push_back(entry);
+			}
+		}
+	}
+	if (entries.size() != index_oids.size()) {
+		throw InternalException("A checkpoint found %llu of the %llu indexes that its catalog has for a table",
+		                        entries.size(), index_oids.size());
 	}
 
 	// written without the list lock, which every commit that changes the table takes
