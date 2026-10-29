@@ -584,6 +584,28 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 		entries[i]->InstallShadow(std::move(shadows[i]));
 	}
 
+#ifdef D_ASSERT_IS_ENABLED
+	// the list lock was not needed: the catalog's indexes in the list are the entries that were written
+	unordered_set<const IndexEntry *> written;
+	for (const auto &entry : entries) {
+		written.insert(entry.get());
+	}
+	unordered_set<const IndexEntry *> current;
+	{
+		annotated_lock_guard lock(index_entries_lock);
+		for (const auto &entry : index_entries) {
+			if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
+				current.insert(entry.get());
+			}
+		}
+		for (const auto &entry : detached_index_entries) {
+			if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
+				current.insert(entry.get());
+			}
+		}
+	}
+	D_ASSERT(current == written);
+#endif
 	return infos;
 }
 
