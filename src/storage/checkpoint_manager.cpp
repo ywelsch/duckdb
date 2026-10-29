@@ -294,6 +294,15 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	auto &dependency_manager = *catalog.GetDependencyManager();
 	catalog_entries = GetCatalogEntries(schemas, options.visibility_bound);
 	dependency_manager.ReorderEntries(catalog_entries, options.visibility_bound);
+	for (auto &entry : catalog_entries) {
+		if (entry.get().type != CatalogType::INDEX_ENTRY) {
+			continue;
+		}
+		auto &index = entry.get().Cast<DuckIndexEntry>();
+		if (index.info && index.info->info) {
+			index_entry_oids[*index.info->info].push_back(index.oid);
+		}
+	}
 
 	// write the actual data into the database
 

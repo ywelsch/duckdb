@@ -10,6 +10,7 @@
 
 #include "duckdb/common/shared_ptr_ipp.hpp"
 #include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/storage/index_storage_info.hpp"
 
 namespace duckdb {
@@ -26,7 +27,8 @@ struct IndexCheckpointResult {
 
 class TableIndexWriter {
 protected:
-	explicit TableIndexWriter(PartialBlockManager &partial_block_manager, StorageVersion version);
+	TableIndexWriter(PartialBlockManager &partial_block_manager, StorageVersion version,
+	                 unordered_set<idx_t> index_oids);
 
 public:
 	virtual ~TableIndexWriter();
@@ -42,16 +44,22 @@ public:
 	virtual void Flush() = 0;
 	//! Get the targeted storage version for the current writer
 	StorageVersion GetStorageVersion() const;
+	//! The OIDs of the table's indexes in the catalog that the checkpoint writes
+	const unordered_set<idx_t> &GetIndexOids() const {
+		return index_oids;
+	}
 
 protected:
 	//! Used to colocate blocks across indexes, used when index supports deferred checkpointing.
 	PartialBlockManager &partial_block_manager;
 	StorageVersion storage_version;
+	unordered_set<idx_t> index_oids;
 };
 
 class SingleFileTableIndexWriter : public TableIndexWriter {
 public:
-	explicit SingleFileTableIndexWriter(SingleFileCheckpointWriter &checkpoint_manager, StorageVersion version);
+	SingleFileTableIndexWriter(SingleFileCheckpointWriter &checkpoint_manager, StorageVersion version,
+	                           unordered_set<idx_t> index_oids);
 
 private:
 	PartialBlockManager CreatePerIndexPartialBlockManager() override;

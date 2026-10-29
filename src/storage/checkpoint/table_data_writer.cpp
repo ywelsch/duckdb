@@ -93,7 +93,18 @@ void SingleFileTableDataWriter::WriteUnchangedTable(MetaBlockPointer pointer,
 }
 
 unique_ptr<TableIndexWriter> SingleFileTableDataWriter::GetTableIndexWriter(StorageVersion version) {
-	return make_uniq<SingleFileTableIndexWriter>(checkpoint_manager, version);
+	// the indexes of the table in the catalog that the checkpoint writes
+	unordered_set<idx_t> index_oids;
+	for (auto &constraint : table.GetConstraints()) {
+		if (constraint->NeedsBackingIndex()) {
+			index_oids.insert(constraint->GetBackingIndexOid());
+		}
+	}
+	auto entry_oids = checkpoint_manager.index_entry_oids.find(*table.GetStorage().GetDataTableInfo());
+	if (entry_oids != checkpoint_manager.index_entry_oids.end()) {
+		index_oids.insert(entry_oids->second.begin(), entry_oids->second.end());
+	}
+	return make_uniq<SingleFileTableIndexWriter>(checkpoint_manager, version, std::move(index_oids));
 }
 
 void SingleFileTableDataWriter::FlushPartialBlocks() {
