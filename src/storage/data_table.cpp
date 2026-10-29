@@ -1611,7 +1611,7 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	vector<shared_ptr<const IndexStorageInfo>> index_infos;
 	if (index_writer) {
 		// Only checkpoint indexes when we write to disk
-		index_infos = info->GetIndexes().Checkpoint(*index_writer);
+		index_infos = info->GetIndexes().Checkpoint(*index_writer, writer.GetCheckpointOptions().visibility_bound);
 	}
 
 	writer.FinalizeTable(global_stats, *info, *row_groups, index_infos, serializer);

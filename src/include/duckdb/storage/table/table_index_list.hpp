@@ -43,7 +43,10 @@ public:
 	//! Iterates over shared ownership of stable index entries while holding the entry-list lock.
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
 	//! Adds an index entry to the list of index entries, and returns it.
-	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, idx_t index_oid, ConstraintCheckMode check_mode);
+	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, idx_t index_oid, ConstraintCheckMode check_mode,
+	                                transaction_t timestamp = 0);
+	//! Sets the timestamp of the index entry matching the OID.
+	void UpdateTimestamp(idx_t index_oid, transaction_t timestamp);
 	//! Visits the on-disk blocks of every index, once per use
 	void VisitBlockIds(BlockIdVisitor &visitor);
 	//! Disowns the on-disk blocks of every index: destroying an index no longer frees them
@@ -131,8 +134,8 @@ public:
 	//! Verify a foreign key constraint.
 	void VerifyForeignKey(optional_ptr<const TableIndexList> delete_indexes, const vector<PhysicalIndex> &fk_keys,
 	                      DataChunk &chunk, ConflictManager &conflict_manager);
-	//! Persist index buffers and install replacements before returning their metadata.
-	vector<shared_ptr<const IndexStorageInfo>> Checkpoint(TableIndexWriter &writer);
+	//! Persist the buffers of the indexes added before the bound and install replacements, returning their metadata.
+	vector<shared_ptr<const IndexStorageInfo>> Checkpoint(TableIndexWriter &writer, VisibilityBound bound);
 	//! Returns the physical table columns referenced by any index.
 	unordered_set<column_t> GetIndexedColumns() const;
 	//! Returns the column sets of unique indexes matching the conflict target.
