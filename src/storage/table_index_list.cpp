@@ -91,11 +91,11 @@ TableIndexList::~TableIndexList() {
 }
 
 shared_ptr<IndexEntry> TableIndexList::AddIndex(unique_ptr<Index> index, idx_t index_oid,
-                                                const ConstraintCheckMode check_mode) {
+                                                const ConstraintCheckMode check_mode, transaction_t timestamp) {
 	D_ASSERT(index);
 	D_ASSERT(index_oid != DConstants::INVALID_INDEX);
 	annotated_lock_guard lock(index_entries_lock);
-	auto index_entry = make_shared_ptr<IndexEntry>(std::move(index), index_oid, check_mode);
+	auto index_entry = make_shared_ptr<IndexEntry>(std::move(index), index_oid, check_mode, timestamp);
 	if (index_entry->GetBindState() != IndexBindState::BOUND) {
 		unbound_count++;
 	}
@@ -199,6 +199,16 @@ void TableIndexList::RemoveIndex(idx_t index_oid) {
 	}
 	if (removed_entry) {
 		removed_entry->Retire();
+	}
+}
+
+void TableIndexList::UpdateTimestamp(idx_t index_oid, transaction_t timestamp) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (const auto &entry : index_entries) {
+		if (entry->GetIndexOid() == index_oid) {
+			entry->SetTimestamp(timestamp);
+			return;
+		}
 	}
 }
 
@@ -488,11 +498,16 @@ unordered_set<column_t> TableIndexList::GetIndexedColumns() const {
 	return column_ids;
 }
 
-vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndexWriter &writer) {
+vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndexWriter &writer, VisibilityBound bound) {
 	vector<shared_ptr<IndexEntry>> entries;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		entries = index_entries;
+		for (const auto &entry : index_entries) {
+			// the indexes of the catalog that the checkpoint writes
+			if (entry->GetTimestamp() < bound) {
+				entries.push_back(entry);
+			}
+		}
 	}
 
 	// written without the list lock, which every commit that changes the table takes
