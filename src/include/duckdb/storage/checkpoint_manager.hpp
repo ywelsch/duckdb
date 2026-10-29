@@ -9,7 +9,6 @@
 #pragma once
 
 #include "duckdb/catalog/catalog.hpp"
-#include "duckdb/common/reference_map.hpp"
 #include "duckdb/storage/partial_block_manager.hpp"
 #include "duckdb/storage/checkpoint/table_index_writer.hpp"
 
@@ -23,7 +22,6 @@ struct CatalogTransaction;
 class ClientContext;
 class ColumnSegment;
 class DatabaseInstance;
-struct DataTableInfo;
 class Deserializer;
 class Connection;
 class DuckTransaction;
@@ -185,8 +183,10 @@ private:
 	CheckpointOptions options;
 	//! Block usage count for verification purposes
 	unordered_map<block_id_t, idx_t> verify_block_usage_count;
-	//! The OIDs of the index entries in the catalog that the checkpoint writes, by table
-	reference_map_t<DataTableInfo, vector<idx_t>> index_entry_oids;
+	//! The OIDs of the indexes in the catalog that the checkpoint writes
+	unordered_set<idx_t> index_oids;
+	//! The number of indexes that the tables wrote
+	idx_t written_index_count = 0;
 };
 
 } // namespace duckdb
