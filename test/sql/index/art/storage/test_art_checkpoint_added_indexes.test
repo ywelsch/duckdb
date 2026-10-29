@@ -1,5 +1,5 @@
 # name: test/sql/index/art/storage/test_art_checkpoint_added_indexes.test
-# description: A checkpoint writes the indexes that committed transactions added, but not those of failed commits
+# description: A checkpoint writes the indexes of its catalog: added by committed transactions, not by failed commits
 # group: [storage]
 
 # the forced commit failure crashes the alternative-verify build
@@ -43,6 +43,13 @@ COMMIT
 statement ok
 ALTER TABLE v ADD PRIMARY KEY (m);
 
+# new versions of the catalog entries of an index and of a table with a primary key
+statement ok
+COMMENT ON INDEX idx_i IS 'commented';
+
+statement ok
+ALTER TABLE v ADD COLUMN n INTEGER;
+
 # the commit of an index fails
 statement ok
 SET debug_force_commit_failure=true;
@@ -66,14 +73,14 @@ CHECKPOINT
 
 restart
 
-query II
-SELECT table_name, index_name FROM duckdb_indexes() ORDER BY ALL
+query III
+SELECT table_name, index_name, comment FROM duckdb_indexes() ORDER BY ALL
 ----
-t	idx_i
-u	idx_l
+t	idx_i	commented
+u	idx_l	NULL
 
 statement error
-INSERT INTO v VALUES (1)
+INSERT INTO v VALUES (1, NULL)
 ----
 violates primary key constraint
 
