@@ -221,11 +221,11 @@ void TableIndexList::RemoveIndex(idx_t index_oid) {
 	}
 }
 
-shared_ptr<IndexEntry> TableIndexList::DetachIndex(idx_t index_oid) {
+shared_ptr<IndexEntry> TableIndexList::DetachIndex(idx_t index_oid, transaction_t drop_timestamp) {
 	annotated_lock_guard lock(index_entries_lock);
 	auto entry = ExtractIndex(index_oid);
 	if (entry) {
-		detached_index_entries.push_back(entry);
+		detached_index_entries.push_back(DetachedIndexEntry {entry, drop_timestamp});
 	}
 	return entry;
 }
@@ -235,8 +235,8 @@ void TableIndexList::RemoveDetachedIndex(const IndexEntry &entry) {
 	{
 		annotated_lock_guard lock(index_entries_lock);
 		for (idx_t i = 0; i < detached_index_entries.size(); i++) {
-			if (detached_index_entries[i].get() == &entry) {
-				removed_entry = std::move(detached_index_entries[i]);
+			if (detached_index_entries[i].entry.get() == &entry) {
+				removed_entry = std::move(detached_index_entries[i].entry);
 				detached_index_entries.erase_at(i);
 				break;
 			}
@@ -492,9 +492,11 @@ void TableIndexList::Bind(ClientContext &context, DataTableInfo &table_info, con
 		auto current_entry = std::find(index_entries.begin(), index_entries.end(), index_entry);
 		if (current_entry == index_entries.end()) {
 			// a drop detached it meanwhile: the bound index now owns the storage that checkpoints still write
-			if (std::find(detached_index_entries.begin(), detached_index_entries.end(), index_entry) !=
-			    detached_index_entries.end()) {
-				index_entry->CommitBind(std::move(bound_idx));
+			for (const auto &detached : detached_index_entries) {
+				if (detached.entry == index_entry) {
+					index_entry->CommitBind(std::move(bound_idx));
+					break;
+				}
 			}
 			continue;
 		}
@@ -558,8 +560,12 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 				entries.push_back(entry);
 			}
 		}
-		// dropped after the checkpoint's bound
-		entries.insert(entries.end(), detached_index_entries.begin(), detached_index_entries.end());
+		for (const auto &detached : detached_index_entries) {
+			// dropped at or after the checkpoint's bound
+			if (detached.entry->GetTimestamp() < bound && detached.drop_timestamp >= bound) {
+				entries.push_back(detached.entry);
+			}
+		}
 	}
 
 	// written without the list lock, which every commit that changes the table takes

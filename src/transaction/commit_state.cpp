@@ -55,7 +55,7 @@ void CommitDropState::DropColumn(shared_ptr<DataTable> table, idx_t column_index
 
 void CommitDropState::DetachIndexes() {
 	for (auto &index : dropped_indexes) {
-		index.detached_entry = index.info->GetIndexes().DetachIndex(index.index_oid);
+		index.detached_entry = index.info->GetIndexes().DetachIndex(index.index_oid, commit_id);
 	}
 }
 

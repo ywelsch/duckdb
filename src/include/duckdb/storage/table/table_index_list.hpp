@@ -69,8 +69,8 @@ public:
 	                       optional_idx active_checkpoint = optional_idx());
 	//! Removes an index entry from the list of index entries and release any storage the index owns.
 	void RemoveIndex(idx_t index_oid);
-	//! Removes an index entry without releasing it: checkpoints still write it until RemoveDetachedIndex
-	shared_ptr<IndexEntry> DetachIndex(idx_t index_oid);
+	//! Removes an index entry without releasing it: checkpoints before the drop write it until RemoveDetachedIndex
+	shared_ptr<IndexEntry> DetachIndex(idx_t index_oid, transaction_t drop_timestamp);
 	//! Removes an index entry detached by DetachIndex and releases any storage the index owns.
 	void RemoveDetachedIndex(const IndexEntry &entry);
 	//! Returns the entry matching the index OID.
@@ -166,8 +166,13 @@ private:
 	vector<shared_ptr<IndexEntry>> index_entries DUCKDB_GUARDED_BY(index_entries_lock);
 	//! Contains the number of unbound indexes.
 	idx_t unbound_count DUCKDB_GUARDED_BY(index_entries_lock) = 0;
+	struct DetachedIndexEntry {
+		shared_ptr<IndexEntry> entry;
+		//! The commit that dropped the index
+		transaction_t drop_timestamp;
+	};
 	//! Index entries detached by a commit, which checkpoints with an earlier bound still write
-	vector<shared_ptr<IndexEntry>> detached_index_entries DUCKDB_GUARDED_BY(index_entries_lock);
+	vector<DetachedIndexEntry> detached_index_entries DUCKDB_GUARDED_BY(index_entries_lock);
 };
 
 template <class T>
