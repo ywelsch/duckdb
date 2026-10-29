@@ -488,17 +488,23 @@ unordered_set<column_t> TableIndexList::GetIndexedColumns() const {
 	return column_ids;
 }
 
+vector<shared_ptr<IndexEntry>> TableIndexList::FindEntries(const unordered_set<idx_t> &index_oids) const {
+	vector<shared_ptr<IndexEntry>> result;
+	for (const auto &entry : index_entries) {
+		if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
+			result.push_back(entry);
+		}
+	}
+	return result;
+}
+
 vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndexWriter &writer) {
 	auto &index_oids = writer.GetIndexOids();
 	vector<shared_ptr<IndexEntry>> entries;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		for (const auto &entry : index_entries) {
-			// the list can have indexes that the catalog that the checkpoint writes does not have yet
-			if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
-				entries.push_back(entry);
-			}
-		}
+		// the indexes of the catalog that the checkpoint writes: the list can also have uncommitted or later ones
+		entries = FindEntries(index_oids);
 	}
 
 	// written without the list lock, which every commit that changes the table takes
@@ -527,21 +533,20 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 	}
 
 #ifdef D_ASSERT_IS_ENABLED
-	// the list lock was not needed: the catalog's indexes in the list are the entries that were written
-	unordered_set<const IndexEntry *> written;
-	for (const auto &entry : entries) {
-		written.insert(entry.get());
-	}
-	unordered_set<const IndexEntry *> current;
+	// the list lock was not needed: the entries of the catalog's indexes did not change meanwhile
+	vector<shared_ptr<IndexEntry>> current;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		for (const auto &entry : index_entries) {
-			if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
-				current.insert(entry.get());
-			}
-		}
+		current = FindEntries(index_oids);
 	}
-	D_ASSERT(current == written);
+	auto entry_set = [](const vector<shared_ptr<IndexEntry>> &list) {
+		unordered_set<const IndexEntry *> result;
+		for (const auto &entry : list) {
+			result.insert(entry.get());
+		}
+		return result;
+	};
+	D_ASSERT(entry_set(current) == entry_set(entries));
 #endif
 	return infos;
 }

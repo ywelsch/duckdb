@@ -142,6 +142,10 @@ public:
 	                                vector<StorageIndex> &mapped_column_ids);
 
 private:
+	//! Returns the index entries with these OIDs.
+	vector<shared_ptr<IndexEntry>> FindEntries(const unordered_set<idx_t> &index_oids) const
+	    DUCKDB_REQUIRES(index_entries_lock);
+
 	template <class>
 	friend class TableIndexIterationHelper;
 
