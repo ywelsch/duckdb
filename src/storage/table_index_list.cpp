@@ -500,10 +500,6 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 			}
 		}
 	}
-	if (entries.size() != index_oids.size()) {
-		throw InternalException("A checkpoint found %llu of the %llu indexes that its catalog has for a table",
-		                        entries.size(), index_oids.size());
-	}
 
 	// written without the list lock, which every commit that changes the table takes
 	vector<unique_ptr<BoundIndex>> shadows;
