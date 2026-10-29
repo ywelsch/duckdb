@@ -153,6 +153,9 @@ public:
 private:
 	//! Removes an index entry from the list of index entries, and returns it.
 	shared_ptr<IndexEntry> ExtractIndex(idx_t index_oid) DUCKDB_REQUIRES(index_entries_lock);
+	//! Returns the index entries with these OIDs, also among the ones that a drop detached.
+	vector<shared_ptr<IndexEntry>> FindEntries(const unordered_set<idx_t> &index_oids) const
+	    DUCKDB_REQUIRES(index_entries_lock);
 
 	template <class>
 	friend class TableIndexIterationHelper;
