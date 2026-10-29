@@ -7,9 +7,8 @@
 
 namespace duckdb {
 
-TableIndexWriter::TableIndexWriter(PartialBlockManager &partial_block_manager, StorageVersion version,
-                                   const unordered_set<idx_t> &index_oids)
-    : partial_block_manager(partial_block_manager), storage_version(version), index_oids(index_oids) {
+TableIndexWriter::TableIndexWriter(PartialBlockManager &partial_block_manager, StorageVersion version)
+    : partial_block_manager(partial_block_manager), storage_version(version) {
 }
 
 TableIndexWriter::~TableIndexWriter() {
@@ -21,12 +20,16 @@ StorageVersion TableIndexWriter::GetStorageVersion() const {
 
 SingleFileTableIndexWriter::SingleFileTableIndexWriter(SingleFileCheckpointWriter &checkpoint_manager,
                                                        const StorageVersion version)
-    : TableIndexWriter(checkpoint_manager.index_partial_block_manager, version, checkpoint_manager.index_oids),
+    : TableIndexWriter(checkpoint_manager.index_partial_block_manager, version),
       checkpoint_manager(checkpoint_manager) {
 }
 
 PartialBlockManager SingleFileTableIndexWriter::CreatePerIndexPartialBlockManager() {
 	return checkpoint_manager.CreatePerIndexPartialBlockManager();
+}
+
+const unordered_set<idx_t> &SingleFileTableIndexWriter::GetIndexOids() const {
+	return checkpoint_manager.index_oids;
 }
 
 void SingleFileTableIndexWriter::Flush() {
