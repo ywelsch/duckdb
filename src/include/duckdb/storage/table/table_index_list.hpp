@@ -44,8 +44,8 @@ public:
 	//! Adds an index entry to the list of index entries, and returns it.
 	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, idx_t index_oid, ConstraintCheckMode check_mode,
 	                                transaction_t timestamp = 0);
-	//! Sets the timestamp of the index entry matching the OID.
-	void UpdateTimestamp(idx_t index_oid, transaction_t timestamp);
+	//! Replaces the timestamp of the index entries that carry old_timestamp.
+	void UpdateTimestamps(transaction_t old_timestamp, transaction_t new_timestamp);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.

@@ -157,18 +157,14 @@ IndexRemovalType CommitState::GetIndexRemovalType(ActiveTransactionState transac
 	return IndexRemovalType::REVERT_MAIN_INDEX;
 }
 
-//! Stamps the indexes that a CREATE INDEX or an ALTER TABLE adds to the table like the catalog entry
-static void UpdateIndexTimestamps(CatalogEntry &old_entry, transaction_t timestamp) {
-	auto &new_entry = old_entry.Parent();
-	if (new_entry.type == CatalogType::INDEX_ENTRY && old_entry.type != CatalogType::INDEX_ENTRY) {
-		auto &index = new_entry.Cast<DuckIndexEntry>();
-		index.GetDataTableInfo().GetIndexes().UpdateTimestamp(index.oid, timestamp);
-	} else if (new_entry.type == CatalogType::TABLE_ENTRY && old_entry.type == CatalogType::TABLE_ENTRY) {
-		auto &table = new_entry.Cast<DuckTableEntry>();
-		auto &indexes = table.GetStorage().GetDataTableInfo()->GetIndexes();
-		for (auto oid : table.GetAddedUniqueIndexOids(old_entry.Cast<DuckTableEntry>())) {
-			indexes.UpdateTimestamp(oid, timestamp);
-		}
+//! Stamps the indexes that the transaction added to the table of an index or table entry, like the catalog entry
+static void UpdateIndexTimestamps(CatalogEntry &entry, transaction_t old_timestamp, transaction_t new_timestamp) {
+	if (entry.type == CatalogType::INDEX_ENTRY) {
+		auto &indexes = entry.Cast<DuckIndexEntry>().GetDataTableInfo().GetIndexes();
+		indexes.UpdateTimestamps(old_timestamp, new_timestamp);
+	} else if (entry.type == CatalogType::TABLE_ENTRY) {
+		auto &indexes = entry.Cast<DuckTableEntry>().GetStorage().GetDataTableInfo()->GetIndexes();
+		indexes.UpdateTimestamps(old_timestamp, new_timestamp);
 	}
 }
 
@@ -363,7 +359,7 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info)
 
 		// Set the timestamp of the catalog entry to the given commit_id, marking it as committed
 		CatalogSet::UpdateTimestamp(old_entry.Parent(), commit_id);
-		UpdateIndexTimestamps(old_entry, commit_id);
+		UpdateIndexTimestamps(old_entry.Parent(), transaction.GetTransactionId(), commit_id);
 
 		// drop any blocks associated with the catalog entry if possible (e.g. in case of a DROP or ALTER)
 		CommitEntryDrop(old_entry, data + sizeof(CatalogEntry *), info);
@@ -433,7 +429,7 @@ void CommitState::RevertCommit(UndoFlags type, data_ptr_t data) {
 		auto catalog_entry = Load<CatalogEntry *>(data);
 		D_ASSERT(catalog_entry->HasParent());
 		CatalogSet::UpdateTimestamp(catalog_entry->Parent(), transaction_id);
-		UpdateIndexTimestamps(*catalog_entry, transaction_id);
+		UpdateIndexTimestamps(catalog_entry->Parent(), transaction.commit_id, transaction_id);
 		if (catalog_entry->name != catalog_entry->Parent().name) {
 			CatalogSet::UpdateTimestamp(*catalog_entry, transaction_id);
 		}
