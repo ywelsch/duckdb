@@ -27,8 +27,7 @@ struct IndexCheckpointResult {
 
 class TableIndexWriter {
 protected:
-	TableIndexWriter(PartialBlockManager &partial_block_manager, StorageVersion version,
-	                 const unordered_set<idx_t> &index_oids);
+	explicit TableIndexWriter(PartialBlockManager &partial_block_manager, StorageVersion version);
 
 public:
 	virtual ~TableIndexWriter();
@@ -45,15 +44,12 @@ public:
 	//! Get the targeted storage version for the current writer
 	StorageVersion GetStorageVersion() const;
 	//! The OIDs of the indexes in the catalog that the checkpoint writes
-	const unordered_set<idx_t> &GetIndexOids() const {
-		return index_oids;
-	}
+	virtual const unordered_set<idx_t> &GetIndexOids() const = 0;
 
 protected:
 	//! Used to colocate blocks across indexes, used when index supports deferred checkpointing.
 	PartialBlockManager &partial_block_manager;
 	StorageVersion storage_version;
-	const unordered_set<idx_t> &index_oids;
 };
 
 class SingleFileTableIndexWriter : public TableIndexWriter {
@@ -63,6 +59,7 @@ public:
 private:
 	PartialBlockManager CreatePerIndexPartialBlockManager() override;
 	void Flush() override;
+	const unordered_set<idx_t> &GetIndexOids() const override;
 
 private:
 	SingleFileCheckpointWriter &checkpoint_manager;
