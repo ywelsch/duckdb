@@ -56,3 +56,5 @@ benchmark/micro/insert/bulk_insert_commit_parallel.benchmark
 benchmark/micro/insert/bulk_insert_commit_in_memory.benchmark
 benchmark/micro/order/order_external_after_early_finish.benchmark
 benchmark/micro/json/lateral_json_each.benchmark
+benchmark/micro/aggregate/pivot_many_filtered_aggregates.benchmark
+benchmark/micro/aggregate/pivot_many_filtered_aggregates_ungrouped.benchmark

@@ -40,19 +40,37 @@ vector<AggregateObject> AggregateObject::CreateAggregateObjects(const vector<Bou
 }
 
 AggregateFilterData::AggregateFilterData(ClientContext &context, const Expression &filter_expr,
-                                         const vector<LogicalType> &payload_types)
-    : filter_executor(context, &filter_expr), true_sel(STANDARD_VECTOR_SIZE) {
-	if (payload_types.empty()) {
-		return;
-	}
-	filtered_payload.Initialize(Allocator::Get(context), payload_types);
+                                         DataChunk &filtered_payload)
+    : filter_executor(context, &filter_expr), filtered_payload(filtered_payload), true_sel(STANDARD_VECTOR_SIZE) {
 }
 
-idx_t AggregateFilterData::ApplyFilter(DataChunk &payload) {
-	filtered_payload.Reset();
+void AggregateFilterData::DropStaleColumns(DataChunk &chunk) {
+#ifdef DEBUG
+	for (auto &col : chunk.data) {
+		col.SetBuffer(nullptr);
+	}
+#endif
+}
 
+idx_t AggregateFilterData::ApplyFilter(DataChunk &payload, idx_t column_start, idx_t column_count) {
+	D_ASSERT(payload.ColumnCount() == filtered_payload.ColumnCount());
 	auto count = filter_executor.SelectExpression(payload, true_sel);
-	filtered_payload.Slice(payload, true_sel, count);
+	DropStaleColumns(filtered_payload);
+	for (idx_t col_idx = column_start; col_idx < column_start + column_count; col_idx++) {
+		filtered_payload.data[col_idx].Slice(payload.data[col_idx], true_sel, count);
+	}
+	filtered_payload.SetCardinalityUnsafe(count);
+	return count;
+}
+
+idx_t AggregateFilterData::ApplyFilter(DataChunk &payload, const vector<idx_t> &columns) {
+	D_ASSERT(payload.ColumnCount() == filtered_payload.ColumnCount());
+	auto count = filter_executor.SelectExpression(payload, true_sel);
+	DropStaleColumns(filtered_payload);
+	for (auto col_idx : columns) {
+		filtered_payload.data[col_idx].Slice(payload.data[col_idx], true_sel, count);
+	}
+	filtered_payload.SetCardinalityUnsafe(count);
 	return count;
 }
 
@@ -72,11 +90,14 @@ void AggregateFilterDataSet::Initialize(ClientContext &context, const vector<Agg
 		// no filters: nothing to do
 		return;
 	}
+	// the filtered payload only references slices of the payload, so it needs no buffers of its own
+	filtered_payload = make_uniq<DataChunk>();
+	filtered_payload->InitializeEmpty(payload_types);
 	filter_data.resize(aggregates.size());
 	for (idx_t aggr_idx = 0; aggr_idx < aggregates.size(); aggr_idx++) {
 		auto &aggr = aggregates[aggr_idx];
 		if (aggr.filter) {
-			filter_data[aggr_idx] = make_uniq<AggregateFilterData>(context, *aggr.filter, payload_types);
+			filter_data[aggr_idx] = make_uniq<AggregateFilterData>(context, *aggr.filter, *filtered_payload);
 		}
 	}
 }

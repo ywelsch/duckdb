@@ -188,10 +188,14 @@ UngroupedAggregateExecuteState::UngroupedAggregateExecuteState(ClientContext &co
 		D_ASSERT(aggregate->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE);
 		auto &aggr = aggregate->Cast<BoundAggregateExpression>();
 		// initialize the payload chunk
+		vector<idx_t> columns;
 		for (auto &child : aggr.GetChildren()) {
 			payload_types.push_back(child->GetReturnType());
 			child_executor.AddExpression(*child);
+			// the planner projects aggregate children, so each one is a reference into the input chunk
+			columns.push_back(child->Cast<BoundReferenceExpression>().Index());
 		}
+		input_columns.push_back(std::move(columns));
 		aggregate_objects.emplace_back(&aggr);
 	}
 	if (!payload_types.empty()) { // for select count(*) from t; there is no payload at all
@@ -225,7 +229,7 @@ void UngroupedAggregateExecuteState::Sink(LocalUngroupedAggregateState &state, D
 		// resolve the filter (if any)
 		if (aggregate.GetFilter()) {
 			auto &filtered_data = filter_set.GetFilterData(aggr_idx);
-			chunk_count = filtered_data.ApplyFilter(input);
+			chunk_count = filtered_data.ApplyFilter(input, input_columns[aggr_idx]);
 
 			child_executor.SetChunk(filtered_data.filtered_payload);
 		} else {
@@ -349,7 +353,15 @@ void PhysicalUngroupedAggregate::SinkDistinct(ExecutionContext &context, DataChu
 
 			// Apply the filter before inserting into the hashtable
 			auto &filtered_data = sink.execute_state.filter_set.GetFilterData(idx);
-			filtered_data.ApplyFilter(chunk);
+			auto &columns = sink.execute_state.input_columns[idx];
+#ifdef D_ASSERT_IS_ENABLED
+			// the hash table groups on the aggregate's arguments, so it only reads the filtered columns
+			for (auto &group : distinct_data->grouped_aggregate_data[table_idx]->groups) {
+				auto group_column = group->Cast<BoundReferenceExpression>().Index();
+				D_ASSERT(std::find(columns.begin(), columns.end(), group_column) != columns.end());
+			}
+#endif
+			filtered_data.ApplyFilter(chunk, columns);
 
 			radix_table.Sink(context, filtered_data.filtered_payload, sink_input, empty_chunk, distinct_filter);
 		} else {

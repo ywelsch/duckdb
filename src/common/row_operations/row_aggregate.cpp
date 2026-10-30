@@ -70,7 +70,7 @@ void RowOperations::UpdateStates(RowOperationsState &state, AggregateObject &agg
 
 void RowOperations::UpdateFilteredStates(RowOperationsState &state, AggregateFilterData &filter_data,
                                          AggregateObject &aggr, Vector &addresses, DataChunk &payload, idx_t arg_idx) {
-	idx_t count = filter_data.ApplyFilter(payload);
+	idx_t count = filter_data.ApplyFilter(payload, arg_idx, aggr.child_count);
 	if (count == 0) {
 		return;
 	}

@@ -1,0 +1,24 @@
+# name: benchmark/micro/aggregate/pivot_many_filtered_aggregates.benchmark
+# description: PIVOT on 20 values with 25 USING columns, which runs as 500 filtered aggregates
+# group: [aggregate]
+
+name PIVOT With Many Filtered Aggregates
+group micro
+subgroup aggregate
+
+load
+CREATE TABLE pivot_input AS
+SELECT i % 10000 AS g, 'C' || (i % 20) AS code,
+       (i * 13) % 50 AS v0, (i * 14) % 50 AS v1, (i * 15) % 50 AS v2, (i * 16) % 50 AS v3, (i * 17) % 50 AS v4,
+       (i * 18) % 50 AS v5, (i * 19) % 50 AS v6, (i * 20) % 50 AS v7, (i * 21) % 50 AS v8, (i * 22) % 50 AS v9,
+       (i * 23) % 50 AS v10, (i * 24) % 50 AS v11, (i * 25) % 50 AS v12, (i * 26) % 50 AS v13, (i * 27) % 50 AS v14,
+       (i * 28) % 50 AS v15, (i * 29) % 50 AS v16, (i * 30) % 50 AS v17, (i * 31) % 50 AS v18, (i * 32) % 50 AS v19,
+       (i * 33) % 50 AS v20, (i * 34) % 50 AS v21, (i * 35) % 50 AS v22, (i * 36) % 50 AS v23, (i * 37) % 50 AS v24
+FROM range(1000000) t(i);
+
+run
+SELECT sum(list_sum([*COLUMNS(* EXCLUDE (g))]))
+FROM (PIVOT pivot_input ON code USING sum(COLUMNS(* EXCLUDE (g, code))) GROUP BY g);
+
+result I
+582500000
