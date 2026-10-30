@@ -1,0 +1,103 @@
+# name: test/sql/aggregate/aggregates/filter_many_aggregates.test
+# description: Filtered aggregates only slice their own inputs out of a payload shared by all aggregates
+# group: [aggregates]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CREATE TABLE t AS
+SELECT i AS id, i % 4 AS grp, 'k' || (i % 7) AS key, (i * 37) % 101 AS x, (i * 11) % 13 AS y,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE 'v' || (i % 9) END AS v
+FROM range(1000) tbl(i);
+
+# without the rewrites, DISTINCT aggregates and grouping sets are evaluated inside the aggregate operators
+foreach disabled '' 'distinct_aggregate_rewrite,grouping_sets'
+
+statement ok
+SET disabled_optimizers = {disabled};
+
+# small integer group, mixed argument counts
+query IIIIIIIII
+SELECT grp,
+       count(*) FILTER (WHERE key = 'k1') AS c1,
+       max(v) FILTER (WHERE key = 'k2') AS m2,
+       min(v) FILTER (WHERE key = 'k3' AND x > 50) AS m3,
+       sum(x) FILTER (WHERE y = 4) AS s4,
+       arg_max(v, id) FILTER (WHERE key = 'k5') AS am5,
+       count(DISTINCT v) FILTER (WHERE key = 'k6') AS d6,
+       string_agg(v, ',' ORDER BY id) FILTER (WHERE key = 'k0' AND id < 60) AS sa0,
+       max(v) FILTER (WHERE key = 'k9') AS none
+FROM t GROUP BY grp ORDER BY grp
+----
+0	36	v8	v0	961	v2	9	v1,v2	NULL
+1	36	v8	v0	909	v3	9	v3,v4	NULL
+2	35	v8	v0	958	v6	9	v5,v6	NULL
+3	36	v8	v0	1010	v0	9	v7	NULL
+
+# regular hash aggregate (string group)
+query IIIIII
+SELECT key,
+       count(*) FILTER (WHERE grp = 1) AS c1,
+       max(v) FILTER (WHERE grp = 2) AS m2,
+       min(x) FILTER (WHERE grp = 3 AND v IS NOT NULL) AS m3,
+       sum(y) FILTER (WHERE grp = 0) AS s0,
+       arg_min(v, id) FILTER (WHERE grp = 1) AS am1
+FROM t GROUP BY key ORDER BY key
+----
+k0	35	v8	0	210	v3
+k1	36	v8	1	219	v1
+k2	36	v8	0	215	v0
+k3	36	v8	2	204	v8
+k4	35	v8	1	221	v8
+k5	36	v8	2	217	v6
+k6	36	v8	4	211	v4
+
+# sliced (dictionary) input vectors from a preceding filter
+query IIIII
+SELECT grp,
+       count(*) FILTER (WHERE key = 'k1') AS c1,
+       max(v) FILTER (WHERE key = 'k2') AS m2,
+       sum(x) FILTER (WHERE y = 4) AS s4,
+       arg_max(v, id) FILTER (WHERE key = 'k5') AS am5
+FROM t WHERE id % 3 <> 0 AND x <> 7 GROUP BY grp ORDER BY grp
+----
+0	24	v8	591	v2
+1	24	v8	591	v2
+2	24	v8	612	v4
+3	23	v8	639	v8
+
+# ungrouped aggregate
+query IIIII
+SELECT count(*) FILTER (WHERE key = 'k1') AS c1,
+       max(v) FILTER (WHERE key = 'k2') AS m2,
+       sum(x) FILTER (WHERE y = 4) AS s4,
+       arg_max(v, id) FILTER (WHERE key = 'k5') AS am5,
+       count(DISTINCT v) FILTER (WHERE key = 'k6') AS d6
+FROM t WHERE id % 3 <> 0
+----
+96	v8	2433	v2	6
+
+# grouping sets with DISTINCT and regular filtered aggregates match the CASE formulation
+query I
+SELECT count(*) FROM (
+  SELECT grp, key,
+         count(DISTINCT v) FILTER (WHERE x > 50),
+         sum(x) FILTER (WHERE y = 4),
+         max(v) FILTER (WHERE id % 2 = 0),
+         arg_max(v, id) FILTER (WHERE y < 6),
+         count(*) FILTER (WHERE v IS NULL)
+  FROM t GROUP BY ROLLUP (grp, key)
+  EXCEPT ALL
+  SELECT grp, key,
+         count(DISTINCT CASE WHEN x > 50 THEN v END),
+         sum(CASE WHEN y = 4 THEN x END),
+         max(CASE WHEN id % 2 = 0 THEN v END),
+         arg_max(CASE WHEN y < 6 THEN v END, CASE WHEN y < 6 THEN id END),
+         count(CASE WHEN v IS NULL THEN 1 END)
+  FROM t GROUP BY ROLLUP (grp, key)
+)
+----
+0
+
+endloop

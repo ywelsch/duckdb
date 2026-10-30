@@ -1,5 +1,6 @@
 #include "duckdb/execution/operator/aggregate/aggregate_object.hpp"
 
+#include "duckdb/common/types/sel_cache.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_window_expression.hpp"
 
@@ -40,19 +41,41 @@ vector<AggregateObject> AggregateObject::CreateAggregateObjects(const vector<Bou
 }
 
 AggregateFilterData::AggregateFilterData(ClientContext &context, const Expression &filter_expr,
-                                         const vector<LogicalType> &payload_types)
-    : filter_executor(context, &filter_expr), true_sel(STANDARD_VECTOR_SIZE) {
-	if (payload_types.empty()) {
-		return;
-	}
-	filtered_payload.Initialize(Allocator::Get(context), payload_types);
+                                         DataChunk &filtered_payload)
+    : filter_executor(context, &filter_expr), filtered_payload(filtered_payload), true_sel(STANDARD_VECTOR_SIZE) {
 }
 
-idx_t AggregateFilterData::ApplyFilter(DataChunk &payload) {
-	filtered_payload.Reset();
+static void SliceColumn(DataChunk &filtered_payload, DataChunk &payload, idx_t column_idx, const SelectionVector &sel,
+                        idx_t count, SelCache &merge_cache) {
+	D_ASSERT(column_idx < payload.ColumnCount() && column_idx < filtered_payload.ColumnCount());
+	auto &source = payload.data[column_idx];
+	auto &target = filtered_payload.data[column_idx];
+	if (source.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
+		// already a dictionary! merge the dictionaries (like DataChunk::Slice)
+		target.Reference(source);
+		target.Slice(sel, count, merge_cache);
+	} else {
+		target.Slice(source, sel, count);
+	}
+}
 
+idx_t AggregateFilterData::ApplyFilter(DataChunk &payload, idx_t column_start, idx_t column_count) {
 	auto count = filter_executor.SelectExpression(payload, true_sel);
-	filtered_payload.Slice(payload, true_sel, count);
+	SelCache merge_cache;
+	for (idx_t col_idx = column_start; col_idx < column_start + column_count; col_idx++) {
+		SliceColumn(filtered_payload, payload, col_idx, true_sel, count, merge_cache);
+	}
+	filtered_payload.SetCardinalityUnsafe(count);
+	return count;
+}
+
+idx_t AggregateFilterData::ApplyFilter(DataChunk &payload, const vector<idx_t> &columns) {
+	auto count = filter_executor.SelectExpression(payload, true_sel);
+	SelCache merge_cache;
+	for (auto col_idx : columns) {
+		SliceColumn(filtered_payload, payload, col_idx, true_sel, count, merge_cache);
+	}
+	filtered_payload.SetCardinalityUnsafe(count);
 	return count;
 }
 
@@ -72,11 +95,14 @@ void AggregateFilterDataSet::Initialize(ClientContext &context, const vector<Agg
 		// no filters: nothing to do
 		return;
 	}
+	// the filtered payload only references slices of the payload, so it needs no buffers of its own
+	filtered_payload = make_uniq<DataChunk>();
+	filtered_payload->InitializeEmpty(payload_types);
 	filter_data.resize(aggregates.size());
 	for (idx_t aggr_idx = 0; aggr_idx < aggregates.size(); aggr_idx++) {
 		auto &aggr = aggregates[aggr_idx];
 		if (aggr.filter) {
-			filter_data[aggr_idx] = make_uniq<AggregateFilterData>(context, *aggr.filter, payload_types);
+			filter_data[aggr_idx] = make_uniq<AggregateFilterData>(context, *aggr.filter, *filtered_payload);
 		}
 	}
 }

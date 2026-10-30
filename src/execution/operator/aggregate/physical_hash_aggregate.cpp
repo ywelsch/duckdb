@@ -286,12 +286,20 @@ public:
 		}
 
 		filter_set.Initialize(context.client, aggregate_objects, payload_types);
+		if (op.distinct_collection_info) {
+			distinct_filter_chunk.InitializeEmpty(payload_types);
+			distinct_filtered_input.InitializeEmpty(op.children[0].get().GetTypes());
+		}
 	}
 
 	const PhysicalHashAggregate &op;
 	DataChunk aggregate_input_chunk;
 	vector<HashAggregateGroupingLocalState> grouping_states;
 	AggregateFilterDataSet filter_set;
+	//! The FILTER column of a DISTINCT aggregate at its payload index, the other columns are stale
+	DataChunk distinct_filter_chunk;
+	//! The filtered groups of a DISTINCT aggregate's hash table at their input index, the other columns are stale
+	DataChunk distinct_filtered_input;
 
 	bool SupportsReuse() const override {
 		return true;
@@ -377,9 +385,8 @@ void PhysicalHashAggregate::SinkDistinctGrouping(ExecutionContext &context, Data
 		OperatorSinkInput sink_input {radix_global_sink, radix_local_sink, interrupt_state};
 
 		if (aggregate.GetFilter()) {
-			DataChunk filter_chunk;
+			auto &filter_chunk = sink.distinct_filter_chunk;
 			auto &filtered_data = sink.filter_set.GetFilterData(idx);
-			filter_chunk.InitializeEmpty(filtered_data.filtered_payload.GetTypes());
 
 			// Add the filter Vector (BOOL)
 			auto &filter_ref = *aggregate.GetFilter();
@@ -388,6 +395,7 @@ void PhysicalHashAggregate::SinkDistinctGrouping(ExecutionContext &context, Data
 			D_ASSERT(it->second < chunk.data.size());
 			auto &filter_bound_ref = filter_ref.Cast<BoundReferenceExpression>();
 			filter_chunk.data[filter_bound_ref.Index()].Reference(chunk.data[it->second]);
+			filter_chunk.SetCardinalityUnsafe(chunk.size());
 
 			// We cant use the AggregateFilterData::ApplyFilter method, because the chunk we need to
 			// apply the filter to also has the groups, and the filtered_data.filtered_payload does not have those.
@@ -398,25 +406,15 @@ void PhysicalHashAggregate::SinkDistinctGrouping(ExecutionContext &context, Data
 				continue;
 			}
 
-			// Because the 'input' chunk needs to be re-used after this, we need to create
-			// a duplicate of it, that we can apply the filter to
-			DataChunk filtered_input;
-			filtered_input.InitializeEmpty(chunk.GetTypes());
-
-			for (idx_t group_idx = 0; group_idx < grouped_aggregate_data.groups.size(); group_idx++) {
-				auto &group = grouped_aggregate_data.groups[group_idx];
+			// the input chunk is re-used after this, so filter a duplicate of the columns the hash table groups on
+			auto &filtered_input = sink.distinct_filtered_input;
+			for (auto &group : distinct_data->grouped_aggregate_data[table_idx]->groups) {
 				auto &bound_ref = group->Cast<BoundReferenceExpression>();
 				auto &col = filtered_input.data[bound_ref.Index()];
 				col.Reference(chunk.data[bound_ref.Index()]);
 				col.Slice(sel_vec, count);
 			}
-			for (idx_t child_idx = 0; child_idx < aggregate.GetChildren().size(); child_idx++) {
-				auto &child = aggregate.GetChildren()[child_idx];
-				auto &bound_ref = child->Cast<BoundReferenceExpression>();
-				auto &col = filtered_input.data[bound_ref.Index()];
-				col.Reference(chunk.data[bound_ref.Index()]);
-				col.Slice(sel_vec, count);
-			}
+			filtered_input.SetCardinalityUnsafe(count);
 
 			radix_table.Sink(context, filtered_input, sink_input, empty_chunk, empty_filter);
 		} else {

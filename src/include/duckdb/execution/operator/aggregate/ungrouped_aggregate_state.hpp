@@ -92,6 +92,8 @@ public:
 	DataChunk aggregate_input_chunk;
 	//! Aggregate filter data set
 	AggregateFilterDataSet filter_set;
+	//! For each aggregate, the input columns read by its children
+	vector<vector<idx_t>> input_columns;
 
 public:
 	void Sink(LocalUngroupedAggregateState &state, DataChunk &input);

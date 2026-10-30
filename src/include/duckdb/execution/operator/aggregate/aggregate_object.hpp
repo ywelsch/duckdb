@@ -50,19 +50,24 @@ public:
 };
 
 struct AggregateFilterData {
-	AggregateFilterData(ClientContext &context, const Expression &filter_expr,
-	                    const vector<LogicalType> &payload_types);
+	AggregateFilterData(ClientContext &context, const Expression &filter_expr, DataChunk &filtered_payload);
 
-	idx_t ApplyFilter(DataChunk &payload);
+	//! Filters the payload and slices the columns [column_start, column_start + column_count) into filtered_payload
+	idx_t ApplyFilter(DataChunk &payload, idx_t column_start, idx_t column_count);
+	//! Filters the payload and slices the given columns into filtered_payload
+	idx_t ApplyFilter(DataChunk &payload, const vector<idx_t> &columns);
 
 	ExpressionExecutor filter_executor;
-	DataChunk filtered_payload;
+	//! Shared by all filters of a set: only the columns sliced by the latest ApplyFilter are valid
+	DataChunk &filtered_payload;
 	SelectionVector true_sel;
 };
 
 struct AggregateFilterDataSet {
 	AggregateFilterDataSet();
 
+	//! One filtered payload for the whole set, as the payload holds the inputs of every aggregate
+	unique_ptr<DataChunk> filtered_payload;
 	vector<unique_ptr<AggregateFilterData>> filter_data;
 
 public:
