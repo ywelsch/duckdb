@@ -540,20 +540,29 @@ void PhysicalBatchCopyToFile::RepartitionBatches(ClientContext &context, GlobalS
 	}
 	// gather all collections we can repartition
 	idx_t max_batch_index = 0;
-	vector<unique_ptr<FixedRawBatchData>> raw_batches;
+	vector<pair<idx_t, unique_ptr<FixedRawBatchData>>> raw_batches;
 	for (auto entry = gstate.raw_batches.begin(); entry != gstate.raw_batches.end();) {
 		if (entry->first >= min_index) {
 			break;
 		}
 		max_batch_index = entry->first;
-		raw_batches.push_back(std::move(entry->second));
+		raw_batches.emplace_back(entry->first, std::move(entry->second));
 		entry = gstate.raw_batches.erase(entry);
 	}
 	unique_ptr<FixedRawBatchData> append_batch;
+	idx_t append_pipeline = 0;
 	ColumnDataAppendState append_state;
 	CopyBatchSlicer batch_slicer(children[0].get().GetTypes(), batch_size_bytes);
 	// now perform the actual repartitioning
-	for (auto &current_batch : raw_batches) {
+	for (auto &raw_batch : raw_batches) {
+		auto &current_batch = raw_batch.second;
+		auto pipeline = raw_batch.first / PipelineBuildState::BATCH_INCREMENT;
+		if (append_batch && append_batch->collection->Count() > 0 && pipeline != append_pipeline &&
+		    CopyFunctionBatchAnalyzer(*current_batch->collection, batch_size, batch_size_bytes).MeetsFlushCriteria()) {
+			// end the partial batch of the previous UNION ALL child instead of shifting every batch after it
+			task_manager.AddTask(make_uniq<PrepareBatchTask>(gstate.scheduled_batch_index++, std::move(append_batch)));
+		}
+		append_pipeline = pipeline;
 		if (!append_batch) {
 			const CopyFunctionBatchAnalyzer batch_analyzer(*current_batch->collection, batch_size, batch_size_bytes);
 			if (batch_analyzer.IsAcceptable()) {
@@ -755,6 +764,10 @@ SinkNextBatchType PhysicalBatchCopyToFile::UpdateMinBatchIndex(ExecutionContext 
 }
 
 unique_ptr<LocalSinkState> PhysicalBatchCopyToFile::GetLocalSinkState(ExecutionContext &context) const {
+	if (sink_state) {
+		// a new pipeline (e.g. the next UNION ALL child) starts, so finished batches are no longer held until Finalize
+		sink_state->Cast<FixedBatchCopyGlobalState>().any_finished = false;
+	}
 	return make_uniq<FixedBatchCopyLocalState>(function.copy_to_initialize_local(context, *bind_data));
 }
 
