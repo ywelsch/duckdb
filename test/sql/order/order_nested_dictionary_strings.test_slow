@@ -1,0 +1,77 @@
+# name: test/sql/order/order_nested_dictionary_strings.test_slow
+# description: Sorting nested payloads whose strings come from dictionaries (e.g. Parquet), which the sort references instead of copying
+# group: [order]
+
+require parquet
+
+statement ok
+CREATE TABLE t AS
+SELECT i AS k,
+       CASE WHEN i % 11 = 0 THEN NULL
+            ELSE map_from_entries([{'key': 'r' || a, 'value': [CASE WHEN (i + a + b) % 13 = 0 THEN NULL ELSE {'s': repeat(md5(((i * a + b) % 7)::VARCHAR), 4)} END FOR b IN range((i + a) % 4)]} FOR a IN range(i % 3)])
+       END AS m,
+       [CASE WHEN (i + j) % 17 = 0 THEN NULL ELSE 'v' || ((i + j) % 5) || repeat('x', 20) END FOR j IN range(CASE WHEN i % 1000 = 0 THEN 3000 ELSE i % 4 END)] AS l,
+       ['h' || i || '_' || j || repeat('y', 20) FOR j IN range(i % 3)] AS unique_strings
+FROM range(20000) t(i);
+
+foreach dictionary_size_limit 4 1000000
+
+statement ok
+COPY t TO '{TEST_DIR}/nested_dictionary_strings.parquet' (ROW_GROUP_SIZE 6000, DICTIONARY_SIZE_LIMIT {dictionary_size_limit});
+
+foreach force_external false true
+
+statement ok
+PRAGMA debug_force_external={force_external}
+
+statement ok
+COPY (FROM '{TEST_DIR}/nested_dictionary_strings.parquet' ORDER BY k DESC) TO '{TEST_DIR}/nested_dictionary_strings_sorted.parquet';
+
+query I
+SELECT bool_and(k = 19999 - file_row_number) FROM read_parquet('{TEST_DIR}/nested_dictionary_strings_sorted.parquet', file_row_number=true)
+----
+true
+
+query I
+SELECT count(*) FROM '{TEST_DIR}/nested_dictionary_strings_sorted.parquet' s FULL JOIN t USING (k)
+WHERE s.m IS DISTINCT FROM t.m OR s.l IS DISTINCT FROM t.l OR s.unique_strings IS DISTINCT FROM t.unique_strings
+----
+0
+
+# window functions materialize the sorted payload into new runs
+query I
+SELECT count(*) FROM (
+	SELECT k, lag(m) OVER (ORDER BY k) AS prev_m, lead(l) OVER (ORDER BY k) AS next_l FROM '{TEST_DIR}/nested_dictionary_strings.parquet'
+	EXCEPT ALL
+	SELECT k, lag(m) OVER (ORDER BY k) AS prev_m, lead(l) OVER (ORDER BY k) AS next_l FROM t
+)
+----
+0
+
+endloop
+
+statement ok
+PRAGMA debug_force_external=false
+
+endloop
+
+# 150k rows with 4 KiB of strings each, which only fits without spilling if the sort does not copy every string
+statement ok
+COPY (SELECT i, [{'k': 'key' || k, 'v': repeat(md5(((i + k) % 8)::VARCHAR), 32)} FOR k IN range(4)] AS l FROM range(150000) t(i)) TO '{TEST_DIR}/wide_dictionary_rows.parquet';
+
+statement ok
+SET threads=4;
+
+statement ok
+SET memory_limit='300MB';
+
+statement ok
+SET temp_directory='';
+
+statement ok
+COPY (FROM '{TEST_DIR}/wide_dictionary_rows.parquet' ORDER BY i DESC) TO '{TEST_DIR}/wide_dictionary_rows_sorted.parquet';
+
+query III
+SELECT count(*), bool_and(i = 149999 - file_row_number), sum(len(l)) FROM read_parquet('{TEST_DIR}/wide_dictionary_rows_sorted.parquet', file_row_number=true)
+----
+150000	true	600000

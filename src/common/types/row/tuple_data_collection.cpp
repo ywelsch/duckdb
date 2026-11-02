@@ -108,7 +108,7 @@ idx_t TupleDataCollection::ChunkCount() const {
 }
 
 idx_t TupleDataCollection::SizeInBytes() const {
-	return data_size + stl_allocator->AllocationSize();
+	return data_size + stl_allocator->AllocationSize() + dictionary_copy_size;
 }
 
 idx_t TupleDataCollection::GetBlockAllocationSize() const {
@@ -273,6 +273,7 @@ static void InitializeVectorFormat(vector<TupleDataVectorFormat> &vector_data, c
 
 void TupleDataCollection::InitializeChunkState(TupleDataChunkState &chunk_state, vector<column_t> column_ids) {
 	TupleDataCollection::InitializeChunkState(chunk_state, layout.GetTypes(), std::move(column_ids));
+	chunk_state.reference_dictionary_strings = layout.ReferencesDictionaryStrings();
 }
 
 void TupleDataCollection::InitializeChunkState(TupleDataChunkState &chunk_state, const vector<LogicalType> &types,
@@ -320,6 +321,7 @@ void TupleDataCollection::Append(TupleDataAppendState &append_state, DataChunk &
 
 void TupleDataCollection::Append(TupleDataPinState &pin_state, TupleDataChunkState &chunk_state, DataChunk &new_chunk,
                                  const SelectionVector &append_sel, const idx_t append_count) {
+	chunk_state.reference_dictionary_strings = layout.ReferencesDictionaryStrings();
 	TupleDataCollection::ToUnifiedFormat(chunk_state, new_chunk);
 	AppendUnified(pin_state, chunk_state, new_chunk, append_sel, append_count);
 }
@@ -330,6 +332,14 @@ void TupleDataCollection::AppendUnified(TupleDataPinState &pin_state, TupleDataC
 	const idx_t actual_append_count = append_count == DConstants::INVALID_INDEX ? new_chunk.size() : append_count;
 	if (actual_append_count == 0) {
 		return;
+	}
+
+	// the scatter writes the per-list header based on the chunk state, and the gather reads it based on the layout
+	D_ASSERT(chunk_state.reference_dictionary_strings == layout.ReferencesDictionaryStrings());
+	if (chunk_state.reference_dictionary_strings) {
+		for (const auto &col_idx : chunk_state.column_ids) {
+			GetDictionaryCopies(chunk_state.vector_data[col_idx]);
+		}
 	}
 
 	if (!layout.AllConstant()) {
@@ -346,22 +356,61 @@ void TupleDataCollection::AppendUnified(TupleDataPinState &pin_state, TupleDataC
 	Scatter(chunk_state, new_chunk, append_sel, actual_append_count);
 }
 
-static inline void ToUnifiedFormatInternal(TupleDataVectorFormat &format, const Vector &vector) {
+void TupleDataCollection::GetDictionaryCopies(TupleDataVectorFormat &format) {
+	if (format.dictionary) {
+		// the rows are appended to the last segment, so its allocator keeps the copy alive
+		format.dictionary_copy =
+		    segments.back()->allocator->GetDictionaryCopy(*format.dictionary, dictionary_copy_size);
+	}
+	for (auto &child : format.children) {
+		GetDictionaryCopies(child);
+	}
+}
+
+void TupleDataCollection::ShareDictionaryCopies(const TupleDataCollection &other) {
+	dictionary_copy_size += allocator->ShareDictionaryCopies(*other.allocator);
+	for (auto &segment : other.segments) {
+		if (segment) {
+			dictionary_copy_size += allocator->ShareDictionaryCopies(*segment->allocator);
+		}
+	}
+}
+
+//! Whether the strings of this vector, which is inside a nested type, can point into a copy of its dictionary instead
+//! of being stored in the heap: the dictionary must be identifiable and flat, and not larger than the number of values
+//! that use it, so that copying a large dictionary for a few values does not cost more than storing the values
+static bool CanReferenceDictionary(const Vector &vector) {
+	if (vector.GetVectorType() != VectorType::DICTIONARY_VECTOR) {
+		return false;
+	}
+	const auto dictionary_size = DictionaryVector::DictionarySize(vector);
+	return dictionary_size.IsValid() && dictionary_size.GetIndex() > 0 && dictionary_size.GetIndex() <= vector.size() &&
+	       !DictionaryVector::DictionaryId(vector).empty() &&
+	       DictionaryVector::Child(vector).GetVectorType() == VectorType::FLAT_VECTOR;
+}
+
+static inline void ToUnifiedFormatInternal(TupleDataVectorFormat &format, const Vector &vector,
+                                           const bool reference_dictionary_strings, const bool within_collection) {
 	vector.ToUnifiedFormat(format.unified);
 	format.original_sel = format.unified.sel;
 	format.original_owned_sel.Initialize(format.unified.owned_sel);
+	format.string_list_header =
+	    reference_dictionary_strings && within_collection && vector.GetType().InternalType() == PhysicalType::VARCHAR;
+	format.dictionary = format.string_list_header && CanReferenceDictionary(vector) ? &vector : nullptr;
+	format.dictionary_copy = nullptr;
 	switch (vector.GetType().InternalType()) {
 	case PhysicalType::STRUCT: {
 		auto &entries = StructVector::GetEntries(vector);
 		D_ASSERT(format.children.size() == entries.size());
 		for (idx_t struct_col_idx = 0; struct_col_idx < entries.size(); struct_col_idx++) {
-			ToUnifiedFormatInternal(format.children[struct_col_idx], entries[struct_col_idx]);
+			ToUnifiedFormatInternal(format.children[struct_col_idx], entries[struct_col_idx],
+			                        reference_dictionary_strings, within_collection);
 		}
 		break;
 	}
 	case PhysicalType::LIST:
 		D_ASSERT(format.children.size() == 1);
-		ToUnifiedFormatInternal(format.children[0], ListVector::GetChild(vector));
+		ToUnifiedFormatInternal(format.children[0], ListVector::GetChild(vector), reference_dictionary_strings, true);
 		break;
 	case PhysicalType::ARRAY: {
 		D_ASSERT(format.children.size() == 1);
@@ -384,7 +433,7 @@ static inline void ToUnifiedFormatInternal(TupleDataVectorFormat &format, const 
 		}
 		format.unified.data = reinterpret_cast<data_ptr_t>(format.array_list_entries.get());
 
-		ToUnifiedFormatInternal(format.children[0], ArrayVector::GetChild(vector));
+		ToUnifiedFormatInternal(format.children[0], ArrayVector::GetChild(vector), reference_dictionary_strings, true);
 		break;
 	}
 	default:
@@ -395,7 +444,8 @@ static inline void ToUnifiedFormatInternal(TupleDataVectorFormat &format, const 
 void TupleDataCollection::ToUnifiedFormat(TupleDataChunkState &chunk_state, DataChunk &new_chunk) {
 	D_ASSERT(chunk_state.vector_data.size() >= chunk_state.column_ids.size()); // Needs InitializeAppend
 	for (const auto &col_idx : chunk_state.column_ids) {
-		ToUnifiedFormatInternal(chunk_state.vector_data[col_idx], new_chunk.data[col_idx]);
+		ToUnifiedFormatInternal(chunk_state.vector_data[col_idx], new_chunk.data[col_idx],
+		                        chunk_state.reference_dictionary_strings, false);
 	}
 }
 
@@ -531,6 +581,7 @@ void TupleDataCollection::Combine(TupleDataCollection &other) {
 	for (auto &other_seg : other.segments) {
 		AddSegment(std::move(other_seg));
 	}
+	dictionary_copy_size += other.dictionary_copy_size;
 	other.Reset();
 }
 
@@ -548,6 +599,7 @@ void TupleDataCollection::Combine(unique_ptr<TupleDataCollection> other) {
 void TupleDataCollection::Reset() {
 	count = 0;
 	data_size = 0;
+	dictionary_copy_size = 0;
 	// Find the first non-null segment.
 	// Segments may be null if they were moved out by a prior Combine() call.
 	idx_t live_idx = segments.size(); // sentinel: no live segment

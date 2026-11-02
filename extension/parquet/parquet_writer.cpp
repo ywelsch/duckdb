@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "parquet_crypto.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 #include "parquet_decimal_utils.hpp"
 #include "parquet_shredding.hpp"
 #include "parquet_timestamp.hpp"
@@ -705,6 +706,33 @@ void ParquetWriter::InitializePreprocessing(unique_ptr<ParquetWriteTransformData
 	transform_data = make_uniq<ParquetWriteTransformData>(context, transformed_types, std::move(transform_expressions));
 }
 
+//! Reserves the allocated size of the levels with the buffer manager while a row group is prepared. For nested
+//! types the levels take a few bytes per value at every nesting level, which for wide nested rows is hundreds of
+//! megabytes per row group, and every thread can prepare a row group at the same time.
+class LevelsMemoryReservation {
+public:
+	explicit LevelsMemoryReservation(BufferManager &buffer_manager_p) : buffer_manager(buffer_manager_p) {
+	}
+	~LevelsMemoryReservation() {
+		buffer_manager.FreeReservedMemory(reserved);
+	}
+
+	void Update(const vector<unique_ptr<ColumnWriterState>> &states) {
+		idx_t size = 0;
+		for (auto &state : states) {
+			size += state->LevelsAllocationSize();
+		}
+		if (size > reserved) {
+			buffer_manager.ReserveMemory(size - reserved);
+			reserved = size;
+		}
+	}
+
+private:
+	BufferManager &buffer_manager;
+	idx_t reserved = 0;
+};
+
 void ParquetWriter::PrepareRowGroup(ColumnDataCollection &raw_buffer, PreparedRowGroup &result,
                                     unique_ptr<ParquetWriteTransformData> &transform_data) {
 	AnalyzeSchema(raw_buffer, column_writers);
@@ -771,15 +799,18 @@ void ParquetWriter::PrepareRowGroup(ColumnDataCollection &raw_buffer, PreparedRo
 			}
 		}
 
+		LevelsMemoryReservation levels_reservation(BufferManager::GetBufferManager(context));
 		// Reserving these once at the start really pays off
 		for (auto &write_state : write_states) {
 			write_state->definition_levels.reserve(buffer.Count());
 		}
+		levels_reservation.Update(write_states);
 
 		for (auto &chunk : buffer.Chunks({column_ids})) {
 			for (idx_t i = 0; i < next; i++) {
 				col_writers[i].get().Prepare(*write_states[i], nullptr, chunk.data[i], chunk.size(), true);
 			}
+			levels_reservation.Update(write_states);
 		}
 
 		for (idx_t i = 0; i < next; i++) {
@@ -797,6 +828,7 @@ void ParquetWriter::PrepareRowGroup(ColumnDataCollection &raw_buffer, PreparedRo
 		}
 
 		for (auto &write_state : write_states) {
+			write_state->ReleaseLevels();
 			states.push_back(std::move(write_state));
 		}
 	}

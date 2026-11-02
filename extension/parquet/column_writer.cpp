@@ -169,6 +169,17 @@ bool ColumnWriter::TryExportPreparedShreddingType(ShreddingType &result) const {
 ColumnWriterState::~ColumnWriterState() {
 }
 
+idx_t ColumnWriterState::LevelsAllocationSize() const {
+	return definition_levels.capacity() * sizeof(uint16_t) + repetition_levels.capacity() * sizeof(uint16_t) +
+	       is_empty.capacity() * sizeof(uint8_t);
+}
+
+void ColumnWriterState::ReleaseLevels() {
+	unsafe_vector<uint16_t>().swap(definition_levels);
+	unsafe_vector<uint16_t>().swap(repetition_levels);
+	unsafe_vector<uint8_t>().swap(is_empty);
+}
+
 void ColumnWriter::CompressPage(MemoryStream &temp_writer, size_t &compressed_size, data_ptr_t &compressed_data,
                                 AllocatedData &compressed_buf) {
 	switch (writer.GetCodec()) {

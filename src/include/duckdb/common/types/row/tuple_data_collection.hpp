@@ -181,6 +181,9 @@ public:
 	void Combine(TupleDataCollection &other);
 	//! Appends the other TupleDataCollection to this, destroying the other data collection
 	void Combine(unique_ptr<TupleDataCollection> other);
+	//! Keeps the dictionary copies of "other" alive as well, for rows copied from it with CopyRows
+	//! (see TupleDataLayout::ReferencesDictionaryStrings)
+	void ShareDictionaryCopies(const TupleDataCollection &other);
 	//! Resets the TupleDataCollection, clearing all data
 	void Reset();
 
@@ -242,6 +245,8 @@ private:
 	void GetAllColumnIDs(vector<column_t> &column_ids);
 	//! Adds a segment to this TupleDataCollection
 	void AddSegment(unsafe_arena_ptr<TupleDataSegment> segment);
+	//! Sets the dictionary copy for every format that can point into its dictionary (copying it if needed)
+	void GetDictionaryCopies(TupleDataVectorFormat &format);
 
 	//! Computes the heap sizes for the specific Vector that will be appended
 	static void ComputeHeapSizes(Vector &heap_sizes_v, const Vector &source_v, TupleDataVectorFormat &source,
@@ -297,6 +302,8 @@ private:
 	idx_t count;
 	//! The size (in bytes) of this TupleDataCollection
 	idx_t data_size;
+	//! The size (in bytes) of the dictionary copies that strings in this TupleDataCollection point into
+	idx_t dictionary_copy_size = 0;
 	//! The data segments of the TupleDataCollection
 	unsafe_arena_vector<unsafe_arena_ptr<TupleDataSegment>> segments;
 	//! The set of scatter functions

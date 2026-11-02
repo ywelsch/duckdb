@@ -1,0 +1,57 @@
+# name: test/parquet/parquet_list_dictionary_reader.test
+# description: Reading lists and maps whose values are dictionary-encoded, which the reader returns as dictionary vectors
+# group: [parquet]
+
+require parquet
+
+statement ok
+CREATE TABLE t AS
+SELECT i,
+       CASE WHEN i % 11 = 0 THEN NULL
+            ELSE [CASE WHEN (i + k) % 13 = 0 THEN NULL ELSE 'v' || ((i * 7 + k) % 5) END FOR k IN range(i % 4)]
+       END AS l,
+       [('b' || (k % 3)) FOR k IN range(CASE WHEN i % 500 = 0 THEN 5000 ELSE i % 5 END)] AS big,
+       [CASE WHEN k = 1 THEN NULL ELSE {'a': 's' || ((i + k) % 3), 'b': k % 2} END FOR k IN range(i % 3)] AS s,
+       map_from_entries([{'key': 'r' || a, 'value': map_from_entries([{'key': 'm' || b, 'value': CASE WHEN (i + a + b) % 17 = 0 THEN NULL ELSE 'x' || ((i + a * b) % 4) END} FOR b IN range((i + a) % 3)])} FOR a IN range(i % 4)]) AS m,
+       [[('w' || ((i + k + j) % 3)) FOR j IN range(k % 3)] FOR k IN range(i % 3)] AS ll,
+       ['h' || i || '_' || k FOR k IN range(i % 3)] AS distinct_strings
+FROM range(20000) t(i);
+
+foreach dictionary_size_limit 4 1000000
+
+statement ok
+COPY t TO '{TEST_DIR}/list_dictionary_reader.parquet' (ROW_GROUP_SIZE 6000, DICTIONARY_SIZE_LIMIT {dictionary_size_limit});
+
+statement ok
+CREATE OR REPLACE VIEW p AS FROM '{TEST_DIR}/list_dictionary_reader.parquet';
+
+query I
+SELECT count(*) FROM p
+----
+20000
+
+query I
+SELECT count(*) FROM p a FULL JOIN t b USING (i)
+WHERE a.l IS DISTINCT FROM b.l OR a.big IS DISTINCT FROM b.big OR a.s IS DISTINCT FROM b.s OR a.m IS DISTINCT FROM b.m
+   OR a.ll IS DISTINCT FROM b.ll OR a.distinct_strings IS DISTINCT FROM b.distinct_strings
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM p WHERE i % 3 <> 1) a FULL JOIN (SELECT * FROM t WHERE i % 3 <> 1) b USING (i)
+WHERE a.l IS DISTINCT FROM b.l OR a.big IS DISTINCT FROM b.big OR a.s IS DISTINCT FROM b.s OR a.m IS DISTINCT FROM b.m
+   OR a.ll IS DISTINCT FROM b.ll OR a.distinct_strings IS DISTINCT FROM b.distinct_strings
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, m['r1'], s[1].a, big[4999] FROM p EXCEPT SELECT i, m['r1'], s[1].a, big[4999] FROM t)
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, unnest(big) FROM p WHERE i % 500 = 0 EXCEPT ALL SELECT i, unnest(big) FROM t WHERE i % 500 = 0)
+----
+0
+
+endloop

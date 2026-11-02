@@ -335,6 +335,7 @@ static void TemplatedReorder(ClientContext &context, unique_ptr<TupleDataCollect
 	TupleDataAppendState new_payload_data_append_state;
 	if (SORT_KEY::HAS_PAYLOAD) {
 		new_payload_data = payload_data->CreateUnique();
+		new_payload_data->ShareDictionaryCopies(*payload_data);
 		new_payload_data->InitializeAppend(new_payload_data_append_state, TupleDataPinProperties::UNPIN_AFTER_DONE);
 	}
 

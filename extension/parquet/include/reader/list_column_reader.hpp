@@ -54,9 +54,9 @@ private:
 	uint8_t *child_defines_ptr;
 	uint8_t *child_repeats_ptr;
 
-	VectorCache read_cache;
-	Vector read_vector;
-
+	//! A new vector per child read, because the pieces of earlier reads stay referenced until the batch is assembled
+	unique_ptr<Vector> read_vector;
+	idx_t overflow_offset = 0;
 	idx_t overflow_child_count;
 };
 

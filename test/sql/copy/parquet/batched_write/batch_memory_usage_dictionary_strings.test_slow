@@ -1,0 +1,23 @@
+# name: test/sql/copy/parquet/batched_write/batch_memory_usage_dictionary_strings.test_slow
+# description: Merging misaligned batches while preserving order must not expand dictionary-encoded strings
+# group: [batched_write]
+
+require parquet
+
+# 1M rows give a short last row group, so every batch of the second file is merged into a misaligned one
+statement ok
+COPY (SELECT repeat(md5((i % 16)::VARCHAR), 16) AS s FROM range(1000000) t(i)) TO '{TEST_DIR}/dictionary_strings.parquet';
+
+statement ok
+SET memory_limit='300MB';
+
+statement ok
+SET temp_directory='';
+
+statement ok
+COPY (FROM read_parquet(['{TEST_DIR}/dictionary_strings.parquet', '{TEST_DIR}/dictionary_strings.parquet'])) TO '{TEST_DIR}/dictionary_strings_out.parquet';
+
+query II
+SELECT count(*), count(DISTINCT s) FROM '{TEST_DIR}/dictionary_strings_out.parquet'
+----
+2000000	16

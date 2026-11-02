@@ -69,6 +69,36 @@ inline void TupleDataWithinListValueStore(const string_t &source, const data_ptr
 	heap_location += source.GetSize();
 }
 
+//! Stores the size of a string that points into a dictionary copy, and the pointer instead of the string
+//! (TupleDataLayout::ReferencesDictionaryStrings)
+template <class T>
+static void TupleDataWithinListDictionaryStore(const T &, const string_t *, const idx_t, const data_ptr_t &,
+                                               data_ptr_t &) {
+	throw InternalException("Only strings can point into a dictionary copy");
+}
+
+template <>
+inline void TupleDataWithinListDictionaryStore(const string_t &source, const string_t *dictionary_copy,
+                                               const idx_t dictionary_idx, const data_ptr_t &location,
+                                               data_ptr_t &heap_location) {
+	Store<uint32_t>(UnsafeNumericCast<uint32_t>(source.GetSize()), location);
+	Store<const char *>(dictionary_copy[dictionary_idx].GetData(), heap_location);
+	heap_location += sizeof(data_ptr_t);
+}
+
+template <class T>
+static T TupleDataWithinListDictionaryLoad(const data_ptr_t &, data_ptr_t &) {
+	throw InternalException("Only strings can point into a dictionary copy");
+}
+
+template <>
+inline string_t TupleDataWithinListDictionaryLoad(const data_ptr_t &location, data_ptr_t &heap_location) {
+	const auto size = Load<uint32_t>(location);
+	const auto data = Load<const char *>(heap_location);
+	heap_location += sizeof(data_ptr_t);
+	return string_t(data, size);
+}
+
 template <class T>
 void TupleDataValueVerify(const LogicalType &, const T &) {
 #ifdef DEBUG
@@ -388,16 +418,17 @@ void TupleDataCollection::StringWithinCollectionComputeHeapSizes(Vector &heap_si
 			continue;
 		}
 
-		// Size is validity mask and all string sizes
+		// Size is validity mask, the header (if any) and all string sizes
 		auto &heap_size = heap_sizes[i];
 		heap_size += ValidityBytes::SizeInBytes(list_length);
+		heap_size += source_format.string_list_header;
 		heap_size += list_length * TupleDataWithinListFixedSize<string_t>();
 
-		// Plus all the actual strings
+		// Plus all the actual strings, or a pointer to each in the dictionary copy
 		for (idx_t child_i = 0; child_i < list_length; child_i++) {
 			const auto child_source_idx = source_sel.get_index(list_offset + child_i);
 			if (source_validity.RowIsValid(child_source_idx)) {
-				heap_size += data[child_source_idx].GetSize();
+				heap_size += source_format.dictionary_copy ? sizeof(data_ptr_t) : data[child_source_idx].GetSize();
 			}
 		}
 	}
@@ -1065,6 +1096,11 @@ static void TupleDataTemplatedWithinCollectionScatter(const Vector &, const Tupl
 		child_mask.SetAllValid(list_length);
 		target_heap_location += ValidityBytes::SizeInBytes(list_length);
 
+		if (source_format.string_list_header) {
+			Store<uint8_t>(source_format.dictionary_copy != nullptr, target_heap_location);
+			target_heap_location++;
+		}
+
 		// Get the start to the fixed-size data and skip the heap pointer over it
 		const auto child_data_location = target_heap_location;
 		target_heap_location += list_length * TupleDataWithinListFixedSize<T>();
@@ -1072,12 +1108,16 @@ static void TupleDataTemplatedWithinCollectionScatter(const Vector &, const Tupl
 		// Store the data and validity belonging to this list entry
 		for (idx_t child_i = 0; child_i < list_length; child_i++) {
 			const auto child_source_idx = source_sel.get_index(list_offset + child_i);
-			if (source_validity.RowIsValid(child_source_idx)) {
+			if (!source_validity.RowIsValid(child_source_idx)) {
+				child_mask.SetInvalidUnsafe(child_i);
+			} else if (source_format.dictionary_copy) {
+				TupleDataWithinListDictionaryStore(
+				    data[child_source_idx], source_format.dictionary_copy, child_source_idx,
+				    child_data_location + child_i * TupleDataWithinListFixedSize<T>(), target_heap_location);
+			} else {
 				TupleDataWithinListValueStore<T>(data[child_source_idx],
 				                                 child_data_location + child_i * TupleDataWithinListFixedSize<T>(),
 				                                 target_heap_location);
-			} else {
-				child_mask.SetInvalidUnsafe(child_i);
 			}
 		}
 	}
@@ -1588,10 +1628,10 @@ static void TupleDataListGather(const TupleDataLayout &layout, Vector &row_locat
 //------------------------------------------------------------------------------
 template <class T>
 static void
-TupleDataTemplatedWithinCollectionGather(const TupleDataLayout &, Vector &heap_locations, const idx_t list_size_before,
-                                         const SelectionVector &, const idx_t scan_count, Vector &target,
-                                         const SelectionVector &target_sel, optional_ptr<Vector> list_vector,
-                                         const vector<TupleDataGatherFunction> &) {
+TupleDataTemplatedWithinCollectionGather(const TupleDataLayout &layout, Vector &heap_locations,
+                                         const idx_t list_size_before, const SelectionVector &, const idx_t scan_count,
+                                         Vector &target, const SelectionVector &target_sel,
+                                         optional_ptr<Vector> list_vector, const vector<TupleDataGatherFunction> &) {
 	// List parent
 	const auto list_entries = FlatVector::GetDataUnsafe<list_entry_t>(*list_vector);
 	const auto &list_validity = FlatVector::Validity(*list_vector);
@@ -1620,6 +1660,12 @@ TupleDataTemplatedWithinCollectionGather(const TupleDataLayout &, Vector &heap_l
 		ValidityBytes source_mask(source_heap_location, list_length);
 		source_heap_location += ValidityBytes::SizeInBytes(list_length);
 
+		bool references_dictionary = false;
+		if (std::is_same<T, string_t>::value && layout.ReferencesDictionaryStrings()) {
+			references_dictionary = Load<uint8_t>(source_heap_location);
+			source_heap_location++;
+		}
+
 		// Get the start to the fixed-size data and skip the heap pointer over it
 		const auto source_data_location = source_heap_location;
 		source_heap_location += list_length * TupleDataWithinListFixedSize<T>();
@@ -1628,8 +1674,10 @@ TupleDataTemplatedWithinCollectionGather(const TupleDataLayout &, Vector &heap_l
 		for (idx_t child_i = 0; child_i < list_length; child_i++) {
 			if (source_mask.RowIsValidUnsafe(child_i)) {
 				auto &target_value = target_data[target_offset + child_i];
-				target_value = TupleDataWithinListValueLoad<T>(
-				    source_data_location + child_i * TupleDataWithinListFixedSize<T>(), source_heap_location);
+				const auto value_location = source_data_location + child_i * TupleDataWithinListFixedSize<T>();
+				target_value = references_dictionary
+				                   ? TupleDataWithinListDictionaryLoad<T>(value_location, source_heap_location)
+				                   : TupleDataWithinListValueLoad<T>(value_location, source_heap_location);
 				TupleDataValueVerify(target.GetType(), target_value);
 			} else {
 				target_validity.SetInvalid(target_offset + child_i);

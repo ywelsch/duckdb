@@ -67,6 +67,8 @@ static void MapFunction(DataChunk &args, ExpressionState &, Vector &result) {
 
 	// the KEYs child vector
 	auto &keys_child_vector = ListVector::GetChildMutable(keys);
+	// the child may be a dictionary (e.g. read from a dictionary-encoded Parquet list), the code below needs it flat
+	keys_child_vector.Flatten();
 	UnifiedVectorFormat keys_child_data;
 	keys_child_vector.ToUnifiedFormat(keys_child_data);
 
@@ -77,6 +79,7 @@ static void MapFunction(DataChunk &args, ExpressionState &, Vector &result) {
 
 	// the VALUEs child vector
 	auto &values_child_vector = ListVector::GetChildMutable(values);
+	values_child_vector.Flatten();
 	UnifiedVectorFormat values_child_data;
 	values_child_vector.ToUnifiedFormat(values_child_data);
 

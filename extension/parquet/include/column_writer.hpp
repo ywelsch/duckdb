@@ -53,6 +53,12 @@ class ColumnWriterState {
 public:
 	virtual ~ColumnWriterState();
 
+	//! The allocated size of the levels of this state and its child states. The levels are not allocated through the
+	//! buffer manager, so the writer reserves this amount with it.
+	virtual idx_t LevelsAllocationSize() const;
+	//! Frees the levels of this state and its child states, which are not needed after the pages are written
+	virtual void ReleaseLevels();
+
 	unsafe_vector<uint16_t> definition_levels;
 	unsafe_vector<uint16_t> repetition_levels;
 	unsafe_vector<uint8_t> is_empty;

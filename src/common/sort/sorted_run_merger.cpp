@@ -732,6 +732,14 @@ unique_ptr<SortedRun> SortedRunMergerLocalState::TemplatedMaterializePartition(S
 	const auto payload_locations = FlatVector::GetDataMutable<data_ptr_t>(payload_data_input.row_locations);
 
 	auto sorted_run = gstate.merger.sorted_runs[0]->CreateRunForMaterialization();
+	if (sorted_run->payload_data) {
+		// the merged keys point to payload rows of every run
+		for (auto &run : gstate.merger.sorted_runs) {
+			if (run->payload_data) {
+				sorted_run->payload_data->ShareDictionaryCopies(*run->payload_data);
+			}
+		}
+	}
 
 	while (merged_partition_index < merged_partition_count) {
 		const auto count = MinValue<idx_t>(merged_partition_count - merged_partition_index, STANDARD_VECTOR_SIZE);

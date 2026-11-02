@@ -11,6 +11,8 @@
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
 #include "duckdb/common/types/row/tuple_data_states.hpp"
+#include "duckdb/common/types/string_heap.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/arena_containers/arena_vector.hpp"
 
 namespace duckdb {
@@ -52,6 +54,17 @@ public:
 	idx_t capacity;
 	//! Occupied size (in bytes)
 	idx_t size;
+};
+
+//! A copy of a dictionary that strings inside nested types point into (TupleDataLayout::ReferencesDictionaryStrings).
+//! It is allocated through the buffer manager so it counts towards the memory limit, and it is a copy because the
+//! dictionary's own strings may point into memory that its producer releases (e.g. an unpinned storage block).
+struct TupleDataDictionaryCopy {
+	TupleDataDictionaryCopy(Allocator &allocator, const Vector &dictionary, idx_t dictionary_size);
+
+	StringHeap heap;
+	AllocatedData strings;
+	idx_t size_in_bytes;
 };
 
 class TupleDataAllocator {
@@ -114,6 +127,13 @@ public:
 	void DestroyRowBlocks(idx_t row_block_begin, idx_t row_block_end);
 	void DestroyHeapBlocks(idx_t heap_block_begin, idx_t heap_block_end);
 
+	//! Returns the strings of the copy of this dictionary vector, copying it first if it was not copied yet. The size
+	//! of a new copy is added to "new_copy_size".
+	const string_t *GetDictionaryCopy(const Vector &dictionary_vector, idx_t &new_copy_size);
+	//! Keeps the dictionary copies of "other" alive as well, because rows copied from it point into them. Returns the
+	//! size of the copies that this allocator did not hold yet.
+	idx_t ShareDictionaryCopies(const TupleDataAllocator &other);
+
 private:
 	//! Builds out a single part (grabs the lock)
 	unsafe_arena_ptr<TupleDataChunkPart> BuildChunkPart(TupleDataSegment &segment, TupleDataPinState &pin_state,
@@ -158,6 +178,8 @@ private:
 	unsafe_arena_vector<TupleDataBlock> row_blocks;
 	//! Blocks storing the variable-size data of the fixed-size rows (e.g., string, list)
 	unsafe_arena_vector<TupleDataBlock> heap_blocks;
+	//! Dictionary copies by dictionary id (DictionaryVector::DictionaryId)
+	unordered_map<string, shared_ptr<TupleDataDictionaryCopy>> dictionary_copies;
 	//! Blocks can be released by parallel scans of separate segments
 	atomic<idx_t> block_allocation_size {0};
 };

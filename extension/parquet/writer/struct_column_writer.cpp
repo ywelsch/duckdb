@@ -32,6 +32,24 @@ public:
 	}
 	~StructColumnWriterState() override = default;
 
+	idx_t LevelsAllocationSize() const override {
+		auto result = ColumnWriterState::LevelsAllocationSize();
+		for (auto &child_state : child_states) {
+			result += child_state->LevelsAllocationSize();
+		}
+		return result;
+	}
+	void ReleaseLevels() override {
+		// FinalizeWrite counts the values of the struct from its definition levels
+		definition_count = definition_levels.size();
+		ColumnWriterState::ReleaseLevels();
+		for (auto &child_state : child_states) {
+			child_state->ReleaseLevels();
+		}
+	}
+
+	//! The number of definition levels, kept when the levels are released
+	idx_t definition_count = 0;
 	duckdb_parquet::RowGroup &row_group;
 	idx_t col_idx;
 	vector<unique_ptr<ColumnWriterState>> child_states;
@@ -128,7 +146,7 @@ void StructColumnWriter::PrepareWrite(ColumnWriterState &state_p) {
 
 void StructColumnWriter::FinalizeWrite(ColumnWriterState &state_p) {
 	auto &state = state_p.Cast<StructColumnWriterState>();
-	auto num_values = state.definition_levels.size() - state.parent_null_count;
+	auto num_values = MaxValue<idx_t>(state.definition_levels.size(), state.definition_count) - state.parent_null_count;
 	writer.FlushNestedColumnStats(SchemaIndex(), state.own_null_count, num_values);
 	for (idx_t child_idx = 0; child_idx < child_writers.size(); child_idx++) {
 		child_writers[child_idx]->FinalizeWrite(*state.child_states[child_idx]);

@@ -116,11 +116,21 @@ struct TupleDataVectorFormat {
 
 	// Optional: only used for ArrayVector to fake being a list vector
 	unsafe_unique_array<list_entry_t> array_list_entries;
+
+	//! Whether every non-empty list of these strings (inside a nested type) starts with a byte saying whether its
+	//! strings are stored in the heap or point into a dictionary (TupleDataLayout::ReferencesDictionaryStrings)
+	bool string_list_header = false;
+	//! The dictionary that these strings (inside a nested type) can point into, if eligible
+	optional_ptr<const Vector> dictionary;
+	//! The copy of that dictionary kept by the collection, which the strings point into (set by AppendUnified)
+	const string_t *dictionary_copy = nullptr;
 };
 
 struct TupleDataChunkState {
 	vector<TupleDataVectorFormat> vector_data;
 	vector<column_t> column_ids;
+	//! Copied from TupleDataLayout::ReferencesDictionaryStrings of the collection this state appends to
+	bool reference_dictionary_strings = false;
 
 	Vector row_locations = Vector(LogicalType::POINTER);
 	Vector heap_locations = Vector(LogicalType::POINTER);

@@ -92,6 +92,9 @@ Sort::Sort(ClientContext &client_context_p, const vector<BoundOrderByNode> &orde
 		}
 	}
 	payload_layout->Initialize(payload_types, TupleDataValidityType::CAN_HAVE_NULL_VALUES);
+	// The payload is only read back through Gather, so dictionary-encoded strings inside nested types (e.g. read from
+	// Parquet) can point into one copy of their dictionary instead of being copied into every row
+	payload_layout->SetReferenceDictionaryStrings();
 
 	// Sort the output projection columns so we're gathering the columns in order
 	std::sort(output_projection_columns.begin(), output_projection_columns.end(),

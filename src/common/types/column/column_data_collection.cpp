@@ -695,6 +695,136 @@ static ColumnDataStringAppendInfo AnalyzeColumnDataStringAppend(const UnifiedVec
 	           : AnalyzeColumnDataStringAppendInternal<false, false>(source_data, offset, vector_remaining, block_size);
 }
 
+//! Copies strings that point to the same bytes (e.g. gathered from a sort payload that points into a dictionary) once
+//! per append piece. Repeats must point into the copy in the piece's own heap segment, because the pointers of a piece
+//! are swizzled relative to that segment.
+class StringPieceDeduplicator {
+public:
+	explicit StringPieceDeduplicator(idx_t copy_count)
+	    : capacity(NextPowerOfTwo(MaxValue<idx_t>(2 * MinValue<idx_t>(copy_count, STANDARD_VECTOR_SIZE), 16))),
+	      entries(make_unsafe_uniq_array<Entry>(capacity)) {
+	}
+
+	void NextPiece() {
+		piece++;
+	}
+
+	//! Returns whether "source" was already added to this piece, and its heap offset if so
+	bool Find(const string_t &source, idx_t &heap_offset) {
+		auto &entry = Probe(source);
+		if (entry.piece != piece) {
+			return false;
+		}
+		heap_offset = entry.heap_offset;
+		return true;
+	}
+
+	void Add(const string_t &source, idx_t heap_offset) {
+		auto &entry = Probe(source);
+		entry.piece = piece;
+		entry.data = source.GetData();
+		entry.size = source.GetSize();
+		entry.heap_offset = heap_offset;
+		entry.copied = false;
+	}
+
+	//! Returns whether the bytes of "source" still have to be copied to its heap offset (true only once per piece)
+	bool NeedsCopy(const string_t &source) {
+		auto &entry = Probe(source);
+		D_ASSERT(entry.piece == piece);
+		const auto needs_copy = !entry.copied;
+		entry.copied = true;
+		return needs_copy;
+	}
+
+private:
+	struct Entry {
+		idx_t piece = 0;
+		const char *data = nullptr;
+		idx_t size = 0;
+		idx_t heap_offset = 0;
+		bool copied = false;
+	};
+
+	Entry &Probe(const string_t &source) {
+		const auto data = source.GetData();
+		const auto size = source.GetSize();
+		auto slot = (CastPointerToValue(data) >> 3) * 0x9E3779B97F4A7C15ULL;
+		while (true) {
+			auto &entry = entries[slot & (capacity - 1)];
+			if (entry.piece != piece || (entry.data == data && entry.size == size)) {
+				return entry;
+			}
+			slot++;
+		}
+	}
+
+	//! Twice the strings of a piece at most, so probing always finds a free entry
+	const idx_t capacity;
+	unsafe_unique_array<Entry> entries;
+	//! Starts at 1, so that the zero-initialized entries are free
+	idx_t piece = 1;
+};
+
+//! Like AnalyzeColumnDataStringAppend, but a string whose bytes were already added to this piece takes no heap space
+static ColumnDataStringAppendInfo AnalyzeColumnDataStringAppendDeduplicated(const UnifiedVectorFormat &source_data,
+                                                                            const idx_t offset,
+                                                                            const idx_t vector_remaining,
+                                                                            const idx_t block_size,
+                                                                            StringPieceDeduplicator &deduplicator) {
+	ColumnDataStringAppendInfo result;
+	result.source_bytes_are_contiguous = false;
+	const auto source_entries = UnifiedVectorFormat::GetData<string_t>(source_data);
+	for (idx_t i = 0; i < vector_remaining; i++) {
+		const auto source_idx = source_data.sel->get_index(offset + i);
+		if (!source_data.validity.RowIsValid(source_idx)) {
+			result.append_count++;
+			continue;
+		}
+		const auto &entry = source_entries[source_idx];
+		idx_t heap_offset;
+		if (entry.IsInlined() || deduplicator.Find(entry, heap_offset)) {
+			result.append_count++;
+			continue;
+		}
+		if (result.heap_size + entry.GetSize() > block_size) {
+			break;
+		}
+		deduplicator.Add(entry, result.heap_size);
+		result.heap_size += entry.GetSize();
+		result.append_count++;
+	}
+	if (vector_remaining != 0 && result.append_count == 0) {
+		// the string exceeds the block size, so it gets a heap of its own
+		const auto source_idx = source_data.sel->get_index(offset);
+		D_ASSERT(!source_entries[source_idx].IsInlined());
+		deduplicator.Add(source_entries[source_idx], 0);
+		result.heap_size = source_entries[source_idx].GetSize();
+		result.append_count = 1;
+	}
+	return result;
+}
+
+static bool IsComplexType(const LogicalType &type) {
+	switch (type.InternalType()) {
+	case PhysicalType::STRUCT:
+	case PhysicalType::LIST:
+	case PhysicalType::ARRAY:
+		return true;
+	default:
+		return false;
+	};
+}
+
+//! The copy functions need nested vectors to be flat, but convert the children of a nested vector themselves, so only
+//! a nested vector is flattened: a dictionary child that is not nested (e.g. the values of a list read from a
+//! dictionary-encoded Parquet column) reaches the compressed string copy as it is
+static void FlattenIfNested(Vector &vector) {
+	if (vector.GetVectorType() != VectorType::FLAT_VECTOR && IsComplexType(vector.GetType())) {
+		vector.Flatten();
+	}
+}
+
 template <>
 void ColumnDataCopy<string_t>(ColumnDataMetaData &meta_data, const UnifiedVectorFormat &source_data, Vector &source,
                               idx_t offset, idx_t copy_count) {
@@ -724,6 +854,7 @@ void ColumnDataCopy<string_t>(ColumnDataMetaData &meta_data, const UnifiedVector
 	auto current_index = meta_data.vector_data_index;
 	idx_t remaining = copy_count;
 	auto block_size = meta_data.segment.allocator->GetBufferManager().GetBlockSize();
+	StringPieceDeduplicator deduplicator(copy_count);
 	while (remaining > 0) {
 		// how many values fit in the current string vector
 		const auto vector_remaining =
@@ -735,7 +866,15 @@ void ColumnDataCopy<string_t>(ColumnDataMetaData &meta_data, const UnifiedVector
 		if (!ColumnDataCopyCompressedStrings(meta_data, current_index, child_index, source_data, source, offset,
 		                                     vector_remaining, append_count, heap_size, base_heap_ptr)) {
 			// 'append_count' is less if we cannot fit that amount of non-inlined strings on one buffer-managed block
-			const auto append_info = AnalyzeColumnDataStringAppend(source_data, offset, vector_remaining, block_size);
+			auto append_info = AnalyzeColumnDataStringAppend(source_data, offset, vector_remaining, block_size);
+			// strings whose bytes are not one contiguous range may repeat (e.g. gathered from a sort payload that
+			// points into a dictionary), so each repeat is stored once
+			const bool deduplicate = !append_info.source_bytes_are_contiguous;
+			if (deduplicate) {
+				deduplicator.NextPiece();
+				append_info = AnalyzeColumnDataStringAppendDeduplicated(source_data, offset, vector_remaining,
+				                                                        block_size, deduplicator);
+			}
 			append_count = append_info.append_count;
 			heap_size = append_info.heap_size;
 			const auto source_entries = UnifiedVectorFormat::GetData<string_t>(source_data);
@@ -783,6 +922,19 @@ void ColumnDataCopy<string_t>(ColumnDataMetaData &meta_data, const UnifiedVector
 					target_entry = source_entry;
 				} else {
 					D_ASSERT(base_heap_ptr != nullptr);
+					if (deduplicate) {
+						idx_t string_offset = 0;
+						const auto found = deduplicator.Find(source_entry, string_offset);
+						D_ASSERT(found);
+						(void)found;
+						auto target_ptr = base_heap_ptr + string_offset;
+						if (deduplicator.NeedsCopy(source_entry)) {
+							memcpy(target_ptr, source_entry.GetData(), source_entry.GetSize());
+						}
+						target_entry = source_entry;
+						target_entry.SetPointer(char_ptr_cast(target_ptr));
+						continue;
+					}
 					auto target_ptr = base_heap_ptr + heap_offset;
 					if (!append_info.source_bytes_are_contiguous) {
 						memcpy(target_ptr, source_entry.GetData(), source_entry.GetSize());
@@ -854,7 +1006,7 @@ void ColumnDataCopy<list_entry_t>(ColumnDataMetaData &meta_data, const UnifiedVe
 		ListVector::GetConsecutiveChildSelVector(source, sel, offset, copy_count);
 
 		auto sliced_child_vector = Vector(child_vector, sel, info.child_list_info.length);
-		sliced_child_vector.Flatten();
+		FlattenIfNested(sliced_child_vector);
 		info.child_list_info.offset = 0;
 
 		sliced_child_vector.ToUnifiedFormat(child_vector_data);
@@ -862,6 +1014,7 @@ void ColumnDataCopy<list_entry_t>(ColumnDataMetaData &meta_data, const UnifiedVe
 		                        info.child_list_info.length);
 
 	} else {
+		FlattenIfNested(child_vector);
 		child_vector.ToUnifiedFormat(child_vector_data);
 		child_function.function(child_meta_data, child_vector_data, child_vector, info.child_list_info.offset,
 		                        info.child_list_info.length);
@@ -893,6 +1046,7 @@ void ColumnDataCopyStruct(ColumnDataMetaData &meta_data, const UnifiedVectorForm
 		ColumnDataMetaData child_meta_data(child_function, meta_data, child_index);
 
 		UnifiedVectorFormat child_data;
+		FlattenIfNested(child_vectors[child_idx]);
 		child_vectors[child_idx].ToUnifiedFormat(child_data);
 
 		child_function.function(child_meta_data, child_data, child_vectors[child_idx], offset, copy_count);
@@ -926,6 +1080,8 @@ void ColumnDataCopyArray(ColumnDataMetaData &meta_data, const UnifiedVectorForma
 
 	UnifiedVectorFormat child_vector_data;
 	ColumnDataMetaData child_meta_data(child_function, meta_data, child_index);
+	// the NULL arrays are broadcast into the child validity by row position, so the child cannot be a dictionary
+	child_vector.Flatten();
 	child_vector.ToUnifiedFormat(child_vector_data);
 
 	// Broadcast and sync the validity of the array vector to the child vector
@@ -1029,17 +1185,6 @@ ColumnDataCopyFunction ColumnDataCollection::GetCopyFunction(const LogicalType &
 	}
 	result.function = function;
 	return result;
-}
-
-static bool IsComplexType(const LogicalType &type) {
-	switch (type.InternalType()) {
-	case PhysicalType::STRUCT:
-	case PhysicalType::LIST:
-	case PhysicalType::ARRAY:
-		return true;
-	default:
-		return false;
-	};
 }
 
 void ColumnDataCollection::Append(ColumnDataAppendState &state, DataChunk &input) {

@@ -128,6 +128,14 @@ public:
 	inline bool CanHaveNull() const {
 		return validity_type != TupleDataValidityType::CANNOT_HAVE_NULL_VALUES;
 	}
+	//! Lets strings inside nested types point into a copy of their dictionary that the collection keeps, instead of
+	//! being stored in the row's heap. Only for collections whose rows are read back through Gather (e.g. a sort
+	//! payload), as the row heap no longer holds the bytes. Applies to the struct layouts as well.
+	void SetReferenceDictionaryStrings();
+	//! Whether strings inside nested types can point into a dictionary (see SetReferenceDictionaryStrings)
+	inline bool ReferencesDictionaryStrings() const {
+		return reference_dictionary_strings;
+	}
 	//! Returns whether any of the columns are nested (they can compare equal even if there are no explicit NULLs)
 	bool HasNestedTypes() const;
 
@@ -164,6 +172,8 @@ private:
 	vector<idx_t> aggr_destructor_idxs;
 	//! Whether none of the columns have NULLs
 	TupleDataValidityType validity_type;
+	//! Whether strings inside nested types can point into a dictionary (see SetReferenceDictionaryStrings)
+	bool reference_dictionary_strings = false;
 };
 
 } // namespace duckdb

@@ -32,6 +32,7 @@ TupleDataLayout TupleDataLayout::Copy() const {
 	result.heap_size_offset = this->heap_size_offset;
 	result.aggr_destructor_idxs = this->aggr_destructor_idxs;
 	result.validity_type = this->validity_type;
+	result.reference_dictionary_strings = this->reference_dictionary_strings;
 	return result;
 }
 
@@ -238,6 +239,15 @@ void TupleDataLayout::Initialize(const vector<BoundOrderByNode> &orders, const L
 
 bool TupleDataLayout::IsSortKeyLayout() const {
 	return sort_key_type != SortKeyType::INVALID;
+}
+
+void TupleDataLayout::SetReferenceDictionaryStrings() {
+	reference_dictionary_strings = true;
+	if (struct_layouts) {
+		for (auto &entry : *struct_layouts) {
+			entry.second.SetReferenceDictionaryStrings();
+		}
+	}
 }
 
 bool TupleDataLayout::HasNestedTypes() const {

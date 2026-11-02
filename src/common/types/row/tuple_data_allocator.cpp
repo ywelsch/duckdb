@@ -92,6 +92,48 @@ TupleDataAllocator::~TupleDataAllocator() {
 	SetDestroyBufferUponUnpin();
 }
 
+TupleDataDictionaryCopy::TupleDataDictionaryCopy(Allocator &allocator, const Vector &dictionary,
+                                                 const idx_t dictionary_size)
+    : heap(allocator), strings(allocator.Allocate(dictionary_size * sizeof(string_t))) {
+	D_ASSERT(dictionary.GetVectorType() == VectorType::FLAT_VECTOR);
+	const auto source = FlatVector::GetData<string_t>(dictionary);
+	const auto &validity = FlatVector::Validity(dictionary);
+	const auto target = reinterpret_cast<string_t *>(strings.get());
+	for (idx_t i = 0; i < dictionary_size; i++) {
+		if (!validity.RowIsValid(i)) {
+			target[i] = string_t();
+		} else if (source[i].IsInlined()) {
+			target[i] = source[i];
+		} else {
+			target[i] = heap.AddBlob(source[i]);
+		}
+	}
+	size_in_bytes = heap.AllocationSize() + strings.GetSize();
+}
+
+const string_t *TupleDataAllocator::GetDictionaryCopy(const Vector &dictionary_vector, idx_t &new_copy_size) {
+	const auto &id = DictionaryVector::DictionaryId(dictionary_vector);
+	auto entry = dictionary_copies.find(id);
+	if (entry == dictionary_copies.end()) {
+		auto copy = make_shared_ptr<TupleDataDictionaryCopy>(
+		    buffer_manager.GetBufferAllocator(), DictionaryVector::Child(dictionary_vector),
+		    DictionaryVector::DictionarySize(dictionary_vector).GetIndex());
+		new_copy_size += copy->size_in_bytes;
+		entry = dictionary_copies.emplace(id, std::move(copy)).first;
+	}
+	return reinterpret_cast<const string_t *>(entry->second->strings.get());
+}
+
+idx_t TupleDataAllocator::ShareDictionaryCopies(const TupleDataAllocator &other) {
+	idx_t new_copy_size = 0;
+	for (auto &entry : other.dictionary_copies) {
+		if (dictionary_copies.emplace(entry.first, entry.second).second) {
+			new_copy_size += entry.second->size_in_bytes;
+		}
+	}
+	return new_copy_size;
+}
+
 BufferManager &TupleDataAllocator::GetBufferManager() {
 	return buffer_manager;
 }

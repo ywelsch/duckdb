@@ -1,0 +1,97 @@
+# name: test/parquet/parquet_list_dictionary_functions.test
+# description: List and map functions on lists whose child vector is a dictionary, as read from dictionary-encoded Parquet
+# group: [parquet]
+
+require parquet
+
+statement ok
+CREATE TABLE t AS
+SELECT i,
+       CASE WHEN i % 11 = 0 THEN NULL
+            ELSE [CASE WHEN (i + k) % 13 = 0 THEN NULL ELSE 'v' || ((i * 7 + k) % 5) END FOR k IN range(i % 4)]
+       END AS l,
+       [((i * 3 + k) % 4) FOR k IN range(i % 4)] AS n,
+       ['k' || k FOR k IN range(i % 4)] AS keys,
+       [[('w' || ((i + k + j) % 3)) FOR j IN range(k % 3)] FOR k IN range(i % 3)] AS ll,
+       [{'key': 'e' || ((i + k) % 7), 'value': 'x' || (k % 2)} FOR k IN range(i % 4)] AS e
+FROM range(10000) t(i);
+
+statement ok
+COPY t TO '{TEST_DIR}/list_dictionary_functions.parquet';
+
+statement ok
+CREATE VIEW p_u AS SELECT * FROM '{TEST_DIR}/list_dictionary_functions.parquet';
+
+statement ok
+CREATE VIEW t_u AS SELECT * FROM t;
+
+# a filter turns the list into a dictionary vector, so functions see the child without the list being flattened
+statement ok
+CREATE VIEW p_f AS SELECT * FROM '{TEST_DIR}/list_dictionary_functions.parquet' WHERE i % 3 <> 1;
+
+statement ok
+CREATE VIEW t_f AS SELECT * FROM t WHERE i % 3 <> 1;
+
+foreach src u f
+
+query I
+SELECT count(*) FROM (SELECT i, list_has_any(l, ['v1', 'v3']) r FROM p_{src}) a FULL JOIN (SELECT i, list_has_any(l, ['v1', 'v3']) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, list_has_all(l, ['v2']) r FROM p_{src}) a FULL JOIN (SELECT i, list_has_all(l, ['v2']) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, l && l[2:] r FROM p_{src}) a FULL JOIN (SELECT i, l && l[2:] r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, list_intersect(l, ['v4', 'v0']) r FROM p_{src}) a FULL JOIN (SELECT i, list_intersect(l, ['v4', 'v0']) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, list_select(l, n) r FROM p_{src}) a FULL JOIN (SELECT i, list_select(l, n) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, list_zip(l, n) r FROM p_{src}) a FULL JOIN (SELECT i, list_zip(l, n) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, list_concat(l, l, ['x']) r FROM p_{src}) a FULL JOIN (SELECT i, list_concat(l, l, ['x']) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, l || l r FROM p_{src}) a FULL JOIN (SELECT i, l || l r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, map(keys, n) r FROM p_{src}) a FULL JOIN (SELECT i, map(keys, n) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, flatten(ll) r FROM p_{src}) a FULL JOIN (SELECT i, flatten(ll) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT i, map_from_entries(e) r FROM p_{src}) a FULL JOIN (SELECT i, map_from_entries(e) r FROM t_{src}) b USING (i) WHERE a.r IS DISTINCT FROM b.r
+----
+0
+
+statement error
+SELECT max(cardinality(map_from_entries(e || e[1:1]))) FROM p_{src} WHERE len(e) > 0
+----
+Map keys must be unique
+
+endloop

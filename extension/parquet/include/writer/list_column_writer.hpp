@@ -18,6 +18,14 @@ public:
 	}
 	~ListColumnWriterState() override = default;
 
+	idx_t LevelsAllocationSize() const override {
+		return ColumnWriterState::LevelsAllocationSize() + child_state->LevelsAllocationSize();
+	}
+	void ReleaseLevels() override {
+		ColumnWriterState::ReleaseLevels();
+		child_state->ReleaseLevels();
+	}
+
 	duckdb_parquet::RowGroup &row_group;
 	idx_t col_idx;
 	unique_ptr<ColumnWriterState> child_state;
