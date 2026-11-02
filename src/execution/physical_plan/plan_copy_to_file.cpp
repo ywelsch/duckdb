@@ -25,8 +25,16 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalCopyToFile &op, Physi
 	} else if (op.preserve_order == PreserveOrderType::DONT_PRESERVE_ORDER) {
 		preserve_insertion_order = false;
 	}
-	if (op.per_thread_output || op.file_size_bytes.IsValid() || op.rotate || op.partition_output ||
-	    !op.partition_columns.empty() || !op.order_columns.empty()) {
+	// an ordered copy that rotates files by size uses the batch copy, which flushes the batches in order
+	bool ordered_rotation = op.preserve_order == PreserveOrderType::PRESERVE_ORDER && op.file_size_bytes.IsValid() &&
+	                        !op.batches_per_file.IsValid() && !op.per_thread_output && !op.partition_output &&
+	                        op.partition_columns.empty() && op.order_columns.empty() && !op.use_tmp_file &&
+	                        op.function.file_size_bytes;
+	if (ordered_rotation && !supports_batch_index) {
+		throw InvalidInputException("PRESERVE_ORDER with FILE_SIZE_BYTES needs a source that preserves order");
+	}
+	if (!ordered_rotation && (op.per_thread_output || op.file_size_bytes.IsValid() || op.rotate ||
+	                          op.partition_output || !op.partition_columns.empty() || !op.order_columns.empty())) {
 		if (op.preserve_order == PreserveOrderType::PRESERVE_ORDER) {
 			throw InvalidInputException("PRESERVE_ORDER is not supported with these parameters");
 		}
@@ -37,6 +45,9 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalCopyToFile &op, Physi
 	auto mode = CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE;
 	if (op.function.execution_mode) {
 		mode = op.function.execution_mode(preserve_insertion_order, supports_batch_index);
+	}
+	if (ordered_rotation && mode != CopyFunctionExecutionMode::BATCH_COPY_TO_FILE) {
+		throw InvalidInputException("PRESERVE_ORDER with FILE_SIZE_BYTES is not supported for this format");
 	}
 	if (mode == CopyFunctionExecutionMode::BATCH_COPY_TO_FILE) {
 		if (!supports_batch_index) {
@@ -55,6 +66,12 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalCopyToFile &op, Physi
 
 		cast_copy.batch_size = op.batch_size;
 		cast_copy.batch_size_bytes = op.batch_size_bytes;
+		if (ordered_rotation) {
+			cast_copy.file_size_bytes = op.file_size_bytes;
+			cast_copy.filename_pattern = op.filename_pattern;
+			cast_copy.file_extension = op.file_extension;
+			cast_copy.overwrite_mode = op.overwrite_mode;
+		}
 
 		return copy;
 	}

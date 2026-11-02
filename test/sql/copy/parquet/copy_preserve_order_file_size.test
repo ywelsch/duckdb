@@ -1,0 +1,64 @@
+# name: test/sql/copy/parquet/copy_preserve_order_file_size.test
+# description: COPY with PRESERVE_ORDER and FILE_SIZE_BYTES writes files of about that size, in order
+# group: [parquet]
+
+require parquet
+
+statement ok
+SET threads=4
+
+statement ok
+CREATE TABLE t AS SELECT (i * 7919) % 1000003 AS k, md5(i::VARCHAR) AS s FROM range(1000000) r(i)
+
+statement ok
+COPY (SELECT * FROM t ORDER BY k) TO '{TEST_DIR}/ordered_rotation' (FORMAT parquet, PRESERVE_ORDER, FILE_SIZE_BYTES '2MB', ROW_GROUP_SIZE 20000)
+
+query I
+SELECT count(*) > 3 FROM glob('{TEST_DIR}/ordered_rotation/*.parquet')
+----
+true
+
+query II
+SELECT count(*), count(DISTINCT k) FROM '{TEST_DIR}/ordered_rotation/*.parquet'
+----
+1000000	1000000
+
+# the rows are in order across the files, which are numbered in the order they were written
+query I
+SELECT count(*) FROM (
+	SELECT k, lag(k) OVER (ORDER BY f, file_row_number) AS pk
+	FROM (
+		SELECT k, file_row_number, regexp_extract(filename, 'data_([0-9]+)', 1)::INTEGER AS f
+		FROM read_parquet('{TEST_DIR}/ordered_rotation/*.parquet', filename = true, file_row_number = true)
+	)
+)
+WHERE k < pk
+----
+0
+
+# without an ORDER BY the insertion order is kept
+statement ok
+COPY t TO '{TEST_DIR}/ordered_rotation_scan' (FORMAT parquet, PRESERVE_ORDER, FILE_SIZE_BYTES '2MB', ROW_GROUP_SIZE 20000)
+
+query II
+SELECT count(*), sum(k) = (SELECT sum(k) FROM t) FROM '{TEST_DIR}/ordered_rotation_scan/*.parquet'
+----
+1000000	true
+
+# the rows keep the table's order: row i holds md5(i)
+query I
+SELECT count(*) FROM (
+	SELECT s, row_number() OVER (ORDER BY f, file_row_number) - 1 AS pos
+	FROM (
+		SELECT s, file_row_number, regexp_extract(filename, 'data_([0-9]+)', 1)::INTEGER AS f
+		FROM read_parquet('{TEST_DIR}/ordered_rotation_scan/*.parquet', filename = true, file_row_number = true)
+	)
+) WHERE s <> md5(pos::VARCHAR)
+----
+0
+
+# partitioned writes still cannot keep the order
+statement error
+COPY t TO '{TEST_DIR}/ordered_rotation_part' (FORMAT parquet, PRESERVE_ORDER, FILE_SIZE_BYTES '2MB', PARTITION_BY (k))
+----
+PRESERVE_ORDER is not supported with these parameters
