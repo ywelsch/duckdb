@@ -28,6 +28,7 @@ class DuckTransaction;
 class Expression;
 class ExpressionExecutor;
 class RowGroupCollection;
+class RowGroupCollectionAlter;
 class StorageCommitState;
 class Transaction;
 class Vector;
@@ -42,15 +43,11 @@ class LocalTableStorage : public enable_shared_from_this<LocalTableStorage> {
 public:
 	// Create a new LocalTableStorage
 	explicit LocalTableStorage(Context &context, DataTable &table);
-	//! Create a LocalTableStorage from an ALTER TYPE.
-	LocalTableStorage(ClientContext &context, DataTable &new_data_table, LocalTableStorage &parent,
-	                  const idx_t alter_column_index, const LogicalType &target_type,
-	                  const vector<StorageIndex> &bound_columns, Expression &cast_expr, TransactionData transaction);
+	//! Create a LocalTableStorage from an ADD COLUMN or ALTER TYPE, with the collection the ALTER built.
+	LocalTableStorage(DataTable &new_data_table, LocalTableStorage &parent,
+	                  shared_ptr<RowGroupCollection> new_collection, optional_idx replaced_column);
 	//! Create a LocalTableStorage from a DROP COLUMN.
 	LocalTableStorage(DataTable &new_data_table, LocalTableStorage &parent, const idx_t drop_column_index);
-	// Create a LocalTableStorage from an ADD COLUMN
-	LocalTableStorage(ClientContext &context, DataTable &table, LocalTableStorage &parent, ColumnDefinition &new_column,
-	                  ExpressionExecutor &default_executor);
 	~LocalTableStorage();
 
 	Context &context;
@@ -85,6 +82,8 @@ public:
 	//! Initialize a scan; the context of the scanning query is used for pushed down casts and zonemap checks
 	void InitializeScan(const QueryContext &context, CollectionScanState &state,
 	                    optional_ptr<TableFilterSet> table_filters = nullptr);
+	//! Whether row groups of this storage are written to disk, which is no longer the case once rows are deleted
+	bool WritesNewRowGroups() const;
 	//! Write a new row group to disk (if possible)
 	void WriteNewRowGroup(idx_t flushed_row_group_idx);
 	void FlushBlocks();
@@ -208,11 +207,20 @@ public:
 	idx_t AddedRows(DataTable &table);
 	vector<PartitionStatistics> GetPartitionStats(DataTable &table, TransactionData transaction) const;
 
-	void AddColumn(ClientContext &context, DataTable &old_dt, DataTable &new_dt, ColumnDefinition &new_column,
-	               ExpressionExecutor &default_executor);
+	//! Starts the ADD COLUMN of the rows the transaction appended to the table, if there are any
+	unique_ptr<RowGroupCollectionAlter> AddColumn(ClientContext &context, DataTable &table,
+	                                              ColumnDefinition &new_column, Expression &default_value,
+	                                              OptimisticDataWriter &writer);
 	void DropColumn(DataTable &old_dt, DataTable &new_dt, const idx_t drop_column_index);
-	void ChangeType(ClientContext &context, DataTable &old_dt, DataTable &new_dt, idx_t changed_idx,
-	                const LogicalType &target_type, const vector<StorageIndex> &bound_columns, Expression &cast_expr);
+	//! Starts the ALTER TYPE of the rows the transaction appended to the table, if there are any
+	unique_ptr<RowGroupCollectionAlter> ChangeType(ClientContext &context, DataTable &table, idx_t changed_idx,
+	                                               const LogicalType &target_type,
+	                                               const vector<StorageIndex> &bound_columns, Expression &cast_expr,
+	                                               OptimisticDataWriter &writer);
+	//! Moves the rows the transaction appended to a table version that an ADD COLUMN or ALTER TYPE replaced over to the
+	//! new version, with the collection the ALTER built for them
+	void AlterStorage(DataTable &old_dt, DataTable &new_dt, shared_ptr<RowGroupCollection> new_collection,
+	                  optional_idx replaced_column);
 
 	void MoveStorage(DataTable &old_dt, DataTable &new_dt);
 	void FetchChunk(DataTable &table, const Vector &row_ids, idx_t count, const vector<StorageIndex> &col_ids,

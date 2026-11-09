@@ -57,6 +57,7 @@ struct LocalAppendState;
 struct ParallelTableScanState;
 struct TableAppendState;
 class CommitDropState;
+class ColumnRewrite;
 
 enum class DataTableVersion {
 	MAIN_TABLE, // this is the newest version of the table - it has not been altered or dropped
@@ -71,16 +72,20 @@ public:
 	DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_manager, vector<Identifier> schema_path,
 	          Identifier table, vector<ColumnDefinition> column_definitions_p,
 	          unique_ptr<PersistentTableData> data = nullptr);
-	//! Constructs a DataTable as a delta on an existing data table with a newly added column
-	DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value);
+	//! Constructs a DataTable as a delta on an existing data table with a newly added column. With defer_rewrite, the
+	//! new column is left to the caller, which computes it through GetColumnRewrite and then calls FinishColumnRewrite.
+	DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value,
+	          bool defer_rewrite = false);
 	//! Constructs a DataTable as a delta on an existing data table but with one column removed
 	DataTable(ClientContext &context, DataTable &parent, idx_t removed_column);
-	//! Constructs a DataTable as a delta on an existing data table but with one column changed type
+	//! Constructs a DataTable as a delta on an existing data table but with one column changed type. With
+	//! defer_rewrite, the changed column is left to the caller, as for ADD COLUMN.
 	DataTable(ClientContext &context, DataTable &parent, idx_t changed_idx, const LogicalType &target_type,
 	          const vector<StorageIndex> &bound_columns, Expression &cast_expr,
-	          optional_ptr<BoundConstraint> constraint_to_verify = nullptr);
+	          optional_ptr<BoundConstraint> constraint_to_verify = nullptr, bool defer_rewrite = false);
 	//! Constructs a DataTable as a delta on an existing data table but with one column added new constraint
 	DataTable(ClientContext &context, DataTable &parent, BoundConstraint &constraint);
+	~DataTable();
 
 	//! A reference to the database instance
 	AttachedDatabase &db;
@@ -241,6 +246,15 @@ public:
 	void CommitDropTable(CommitDropState &drop_state);
 	//! Accumulates the column's on-disk blocks for reclamation into the drop state.
 	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state);
+	//! The column rewrite an ADD COLUMN or ALTER TYPE left to its caller, if it is not finished yet
+	optional_ptr<ColumnRewrite> GetColumnRewrite();
+	//! Installs the rewritten column, once every row group of the column rewrite is rewritten. The transaction-local
+	//! rows refer to table_entry, the catalog entry of this table version, if given.
+	void FinishColumnRewrite(ClientContext &context, optional_ptr<DuckTableEntry> table_entry = nullptr);
+	//! Gives back the blocks an unfinished column rewrite wrote so far
+	void AbortColumnRewrite();
+	//! Gives back the blocks of the column this table version wrote, when its ALTER fails or is rolled back
+	void RollbackWrittenColumn();
 
 	idx_t ColumnCount() const;
 	idx_t GetTotalRows() const;
@@ -337,5 +351,13 @@ private:
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table
 	atomic<DataTableVersion> version;
+	//! The column rewrite of the ADD COLUMN or ALTER TYPE that created this table version, until it is finished
+	unique_ptr<ColumnRewrite> column_rewrite;
+	//! The physical column whose data this table version wrote (ADD COLUMN or ALTER TYPE), if any
+	optional_idx written_column;
+
+private:
+	//! Rewrites the column right away, restoring the parent if that fails
+	void RunColumnRewrite(ClientContext &context);
 };
 } // namespace duckdb
