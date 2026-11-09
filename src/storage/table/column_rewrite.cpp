@@ -5,6 +5,7 @@
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/optimistic_data_writer.hpp"
 #include "duckdb/storage/statistics/column_statistics.hpp"
+#include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/row_group.hpp"
 #include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table/row_group_segment_tree.hpp"
@@ -88,7 +89,8 @@ void RowGroupCollectionAlter::Rollback() {
 	drop_state.FinalizeCommit();
 }
 
-ColumnRewrite::ColumnRewrite(DataTable &parent) : parent(parent) {
+ColumnRewrite::ColumnRewrite(DataTable &parent, DataTableVersion previous_version, unique_ptr<StorageLockKey> read_lock)
+    : parent(parent), previous_version(previous_version), read_lock(std::move(read_lock)) {
 }
 
 ColumnRewrite::~ColumnRewrite() {

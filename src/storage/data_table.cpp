@@ -106,7 +106,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	// prevent any new tuples from being added to the parent
 	unique_lock<mutex> parent_lock(parent.append_lock);
 
-	column_rewrite = make_uniq<ColumnRewrite>(parent);
+	column_rewrite = make_uniq<ColumnRewrite>(parent, parent.version.load(), parent.rewrite_lock.GetSharedLock());
 	column_rewrite->row_groups = parent.row_groups->AddColumn(context, new_column, default_value,
 	                                                          make_uniq<OptimisticDataWriter>(context, *this));
 
@@ -119,12 +119,9 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	}
 
 	// this table replaces the previous table, hence the parent is no longer the root DataTable
-	auto previous_version = parent.version.load();
 	parent.version = DataTableVersion::ALTERED;
 	parent_lock.unlock();
-	if (!defer_rewrite) {
-		RunColumnRewrite(context, previous_version);
-	}
+	RewriteColumn(context, defer_rewrite);
 }
 
 DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_column)
@@ -234,7 +231,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 		auto &transaction_manager = DuckTransactionManager::Get(db);
 		TransactionData rewrite_visibility(transaction.GetTransactionId(),
 		                                   VisibilityBound::Through(transaction_manager.GetLastCommit()));
-		column_rewrite = make_uniq<ColumnRewrite>(parent);
+		column_rewrite = make_uniq<ColumnRewrite>(parent, previous_version, parent.rewrite_lock.GetSharedLock());
 		column_rewrite->row_groups =
 		    parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
 		                                 rewrite_visibility, make_uniq<OptimisticDataWriter>(context, *this));
@@ -258,9 +255,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 		throw;
 	}
 	parent_lock.unlock();
-	if (!defer_rewrite) {
-		RunColumnRewrite(context, previous_version);
-	}
+	RewriteColumn(context, defer_rewrite);
 }
 
 DataTable::~DataTable() {
@@ -270,8 +265,13 @@ optional_ptr<ColumnRewrite> DataTable::GetColumnRewrite() {
 	return column_rewrite.get();
 }
 
-void DataTable::RunColumnRewrite(ClientContext &context, DataTableVersion previous_version) {
-	auto &parent = column_rewrite->parent;
+void DataTable::RewriteColumn(ClientContext &context, bool defer_rewrite) {
+	if (defer_rewrite) {
+		// the table version reads as empty until the caller installs the column
+		row_groups = make_shared_ptr<RowGroupCollection>(info, TableIOManager::Get(*this), GetTypes(), 0);
+		row_groups->InitializeEmpty();
+		return;
+	}
 	try {
 		for (idx_t index = 0; index < column_rewrite->RowGroupCount(); index++) {
 			column_rewrite->RewriteRowGroup(index);
@@ -279,8 +279,7 @@ void DataTable::RunColumnRewrite(ClientContext &context, DataTableVersion previo
 		FinishColumnRewrite(context);
 	} catch (...) {
 		// nothing reached the catalog, so no undo entry will restore the parent or release the written column
-		RollbackWrittenColumn();
-		parent.version = previous_version;
+		AbortColumnRewrite();
 		throw;
 	}
 }
@@ -299,12 +298,11 @@ void DataTable::FinishColumnRewrite(ClientContext &context) {
 	}
 	local_storage.AlterStorage(rewrite.parent, *this, std::move(local_row_groups), rewrite.replaced_column);
 
-	auto constraint_to_verify = std::move(rewrite.constraint_to_verify);
-	column_rewrite.reset();
 	// re-verify any column constraint that the rewrite could have violated (e.g. NOT NULL)
-	if (constraint_to_verify) {
-		VerifyNewConstraint(local_storage, *this, *constraint_to_verify);
+	if (rewrite.constraint_to_verify) {
+		VerifyNewConstraint(local_storage, *this, *rewrite.constraint_to_verify);
 	}
+	column_rewrite.reset();
 }
 
 vector<LogicalType> DataTable::GetTypes() {
@@ -1302,6 +1300,8 @@ void DataTable::RevertFailedAppend(TableAppendState &state) {
 
 void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_t count) {
 	lock_guard<mutex> lock(append_lock);
+	// a column rewrite that reads the row groups finishes first
+	auto rewrite_key = rewrite_lock.GetExclusiveLock();
 
 	// revert any appends to indexes
 	if (!info->indexes.Empty()) {
@@ -1732,6 +1732,18 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 
 void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state) {
 	row_groups->CommitDropColumn(column_index, drop_state);
+}
+
+void DataTable::AbortColumnRewrite() {
+	if (!column_rewrite) {
+		return;
+	}
+	auto &parent = column_rewrite->parent;
+	auto previous_version = column_rewrite->previous_version;
+	// this also lets the parent revert appends again
+	RollbackWrittenColumn();
+	lock_guard<mutex> parent_lock(parent.append_lock);
+	parent.version = previous_version;
 }
 
 void DataTable::RollbackWrittenColumn() {

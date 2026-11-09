@@ -12,6 +12,7 @@
 #include "duckdb/common/enums/constraint_check_mode.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/persistent_table_data.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 
@@ -248,6 +249,8 @@ public:
 	optional_ptr<ColumnRewrite> GetColumnRewrite();
 	//! Installs the rewritten column, once every row group of the column rewrite is rewritten
 	void FinishColumnRewrite(ClientContext &context);
+	//! Gives up on an unfinished column rewrite: gives back its blocks and restores the parent
+	void AbortColumnRewrite();
 	//! Gives back the blocks of the column this table version wrote, when its ALTER fails or is rolled back
 	void RollbackWrittenColumn();
 
@@ -311,6 +314,8 @@ public:
 private:
 	//! Verify the new added constraints against current persistent&local data
 	void VerifyNewConstraint(LocalStorage &local_storage, DataTable &parent, const BoundConstraint &constraint);
+	//! Rewrites the column right away, or leaves it to the caller with defer_rewrite
+	void RewriteColumn(ClientContext &context, bool defer_rewrite);
 
 	//! Verify constraints with a chunk from the Update containing only the specified column_ids
 	void VerifyUpdateConstraints(ConstraintState &state, ClientContext &context, DataChunk &chunk,
@@ -350,9 +355,7 @@ private:
 	unique_ptr<ColumnRewrite> column_rewrite;
 	//! The physical column whose data this table version wrote (ADD COLUMN or ALTER TYPE), if any
 	optional_idx written_column;
-
-private:
-	//! Rewrites the column right away, restoring the parent to its previous version if that fails
-	void RunColumnRewrite(ClientContext &context, DataTableVersion previous_version);
+	//! Held shared while a column rewrite reads the row groups, which reverting an append waits for
+	StorageLock rewrite_lock;
 };
 } // namespace duckdb

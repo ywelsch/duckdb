@@ -2,10 +2,13 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
+#include "duckdb/main/valid_checker.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/column_rewrite.hpp"
 #include "duckdb/transaction/local_storage.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 
 namespace duckdb {
 
@@ -15,6 +18,12 @@ static void InstallColumn(ClientContext &context, DuckTableEntry &table_entry) {
 	storage.FinishColumnRewrite(context);
 	// the catalog entry was created before the transaction-local rows moved over to its storage
 	LocalStorage::Get(context, storage.db).SetTableEntry(table_entry);
+}
+
+//! Gives up on a column that could not be computed, so the transaction cannot commit the table version without it
+static void AbortColumn(ClientContext &context, DuckTableEntry &table_entry) {
+	ValidChecker::Invalidate(MetaTransaction::Get(context), "an ALTER TABLE failed to compute its column");
+	table_entry.GetStorage().AbortColumnRewrite();
 }
 
 //===--------------------------------------------------------------------===//
@@ -37,13 +46,15 @@ SinkResultType PhysicalAlterColumn::Sink(ExecutionContext &context, DataChunk &c
 SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                OperatorSinkFinalizeInput &input) const {
 	auto &gstate = input.global_state.Cast<AlterColumnSinkState>();
-	// the new table version holds the column the ALTER left to us, unless it had nothing to do
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table);
-	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
-	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
+	// look the table up as Catalog::Alter did: its new version holds the column the ALTER left to us, if any
+	auto &catalog = Catalog::GetCatalog(context, table.Catalog());
+	CatalogEntryRetriever retriever(context);
+	auto lookup =
+	    catalog.LookupEntry(retriever, EntryLookupInfo(CatalogType::TABLE_ENTRY, table), OnEntryNotFound::RETURN_NULL);
+	if (!lookup.Found() || lookup.entry->type != CatalogType::TABLE_ENTRY) {
 		return SinkFinalizeType::READY;
 	}
-	auto table_entry = entry->Cast<TableCatalogEntry>().TryGetDuckTableEntry();
+	auto table_entry = lookup.entry->Cast<TableCatalogEntry>().TryGetDuckTableEntry();
 	if (!table_entry) {
 		return SinkFinalizeType::READY;
 	}
@@ -52,7 +63,12 @@ SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event,
 		return SinkFinalizeType::READY;
 	}
 	if (rewrite->RowGroupCount() == 0) {
-		InstallColumn(context, *table_entry);
+		try {
+			InstallColumn(context, *table_entry);
+		} catch (...) {
+			AbortColumn(context, *table_entry);
+			throw;
+		}
 		return SinkFinalizeType::READY;
 	}
 	gstate.table_entry = table_entry;
@@ -64,11 +80,22 @@ SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event,
 //===--------------------------------------------------------------------===//
 class AlterColumnSourceState : public GlobalSourceState {
 public:
-	explicit AlterColumnSourceState(optional_ptr<DuckTableEntry> table_entry_p)
-	    : table_entry(table_entry_p), next_row_group(0), rewritten_row_groups(0) {
+	AlterColumnSourceState(ClientContext &context, optional_ptr<DuckTableEntry> table_entry_p)
+	    : context(context), table_entry(table_entry_p), next_row_group(0), rewritten_row_groups(0) {
 		if (table_entry) {
 			rewrite = table_entry->GetStorage().GetColumnRewrite();
 			row_group_count = rewrite->RowGroupCount();
+		}
+	}
+
+	~AlterColumnSourceState() override {
+		// the tasks are done when the executor destroys this state, before the query ends the transaction
+		if (!table_entry || !table_entry->GetStorage().GetColumnRewrite()) {
+			return;
+		}
+		try {
+			AbortColumn(context, *table_entry);
+		} catch (...) { // NOLINT: the transaction rollback still gives back the blocks
 		}
 	}
 
@@ -77,6 +104,7 @@ public:
 		return rewrite && !rewrite->IsVolatile() ? row_group_count : 1;
 	}
 
+	ClientContext &context;
 	optional_ptr<DuckTableEntry> table_entry;
 	optional_ptr<ColumnRewrite> rewrite;
 	idx_t row_group_count = 0;
@@ -85,7 +113,7 @@ public:
 };
 
 unique_ptr<GlobalSourceState> PhysicalAlterColumn::GetGlobalSourceState(ClientContext &context) const {
-	return make_uniq<AlterColumnSourceState>(sink_state->Cast<AlterColumnSinkState>().table_entry);
+	return make_uniq<AlterColumnSourceState>(context, sink_state->Cast<AlterColumnSinkState>().table_entry);
 }
 
 SourceResultType PhysicalAlterColumn::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
