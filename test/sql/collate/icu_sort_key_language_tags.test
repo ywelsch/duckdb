@@ -1,0 +1,104 @@
+# name: test/sql/collate/icu_sort_key_language_tags.test
+# description: icu_sort_key applies the collation keywords of a BCP 47 language tag, and falls back from a locale to its language
+# group: [collate]
+
+require icu
+
+# ks sets the strength, ka-shifted ignores punctuation
+query II
+SELECT icu_sort_key('Ab', 'und-u-ks-level1') = icu_sort_key('ab', 'und-u-ks-level1'),
+       icu_sort_key('a-b', 'en-u-ka-shifted') = icu_sort_key('ab', 'en-u-ka-shifted');
+----
+true	true
+
+query II
+SELECT icu_sort_key('A', 'und-u-ks-level2') = icu_sort_key('a', 'und-u-ks-level2'),
+       icu_sort_key('á', 'und-u-ks-level2') = icu_sort_key('a', 'und-u-ks-level2');
+----
+true	false
+
+# kv sets the last group of characters that ka-shifted ignores: spaces, punctuation, symbols or currency symbols
+query I
+SELECT string_agg(s, ' ' ORDER BY s) FROM (VALUES ('a b'), ('a-b'), ('a+b'), ('a$b'), ('a1b')) t(s)
+WHERE icu_sort_key(s, 'en-u-ka-shifted-kv-space') = icu_sort_key('ab', 'en-u-ka-shifted-kv-space');
+----
+a b
+
+query I
+SELECT string_agg(s, ' ' ORDER BY s) FROM (VALUES ('a b'), ('a-b'), ('a+b'), ('a$b'), ('a1b')) t(s)
+WHERE icu_sort_key(s, 'en-u-ka-shifted-kv-punct') = icu_sort_key('ab', 'en-u-ka-shifted-kv-punct');
+----
+a b a-b
+
+query I
+SELECT string_agg(s, ' ' ORDER BY s) FROM (VALUES ('a b'), ('a-b'), ('a+b'), ('a$b'), ('a1b')) t(s)
+WHERE icu_sort_key(s, 'en-u-ka-shifted-kv-symbol') = icu_sort_key('ab', 'en-u-ka-shifted-kv-symbol');
+----
+a b a+b a-b
+
+query I
+SELECT string_agg(s, ' ' ORDER BY s) FROM (VALUES ('a b'), ('a-b'), ('a+b'), ('a$b'), ('a1b')) t(s)
+WHERE icu_sort_key(s, 'en-u-ka-shifted-kv-currency') = icu_sort_key('ab', 'en-u-ka-shifted-kv-currency');
+----
+a b a$b a+b a-b
+
+query I
+SELECT string_agg(DISTINCT x, ', ' ORDER BY icu_sort_key(x, 'en-u-ka-shifted-kv-symbol'), x)
+FROM (VALUES ('Dr. Pérez'), ('dr perez'), ('Dr Perez'), ('#1 Clinic'), ('+1 Clinic'), ('1 Clinic'), ('ab'), ('a-c'), ('a b'), ('a+b')) t(x);
+----
+#1 Clinic, +1 Clinic, 1 Clinic, a b, a+b, ab, a-c, dr perez, Dr Perez, Dr. Pérez
+
+# kf sorts uppercase first, kb compares accents backwards
+query II
+SELECT icu_sort_key('A', 'en-u-kf-upper') < icu_sort_key('a', 'en-u-kf-upper'), icu_sort_key('A', 'en') < icu_sort_key('a', 'en');
+----
+true	false
+
+query II
+SELECT string_agg(s, ' ' ORDER BY icu_sort_key(s, 'en')), string_agg(s, ' ' ORDER BY icu_sort_key(s, 'fr-u-kb-true'))
+FROM (VALUES ('cote'), ('côte'), ('coté'), ('côté')) t(s);
+----
+cote coté côte côté	cote côte coté côté
+
+# a locale without a collation of its own uses the one of its language
+query III
+SELECT string_agg(s, ',' ORDER BY icu_sort_key(s, 'sv_SE')), string_agg(s, ',' ORDER BY icu_sort_key(s, 'sv-SE')),
+       string_agg(s, ',' ORDER BY icu_sort_key(s, 'en-US'))
+FROM (VALUES ('z'), ('ä'), ('a')) t(s);
+----
+a,z,ä	a,z,ä	a,ä,z
+
+# tags are case insensitive, keywords that are not about collation are ignored, and the first value of a key counts
+query III
+SELECT icu_sort_key('a-b', 'EN-U-KA-SHIFTED') = icu_sort_key('ab', 'EN-U-KA-SHIFTED'),
+       icu_sort_key('a-b', 'en-u-ca-gregory-ka-shifted') = icu_sort_key('ab', 'en-u-ca-gregory-ka-shifted'),
+       icu_sort_key('a-b', 'en-u-ka-shifted-ka-noignore') = icu_sort_key('ab', 'en-u-ka-shifted-ka-noignore');
+----
+true	true	true
+
+# collation keywords that the collator does not implement are rejected instead of ignored
+statement error
+SELECT icu_sort_key('a10', 'en-u-kn-true');
+----
+Not implemented Error: The collation keyword "kn"
+
+statement error
+SELECT icu_sort_key('ä', 'de-u-co-phonebk');
+----
+Not implemented Error: The collation keyword "co"
+
+statement error
+SELECT icu_sort_key('a', 'en-u-ka-bogus');
+----
+Invalid Input Error: Invalid value "bogus" for the collation keyword "ka"
+
+statement error
+SELECT icu_sort_key('a', 'de@collation=phonebook');
+----
+Invalid Input Error: Invalid collation
+
+# an unknown language uses the root collation
+query I
+SELECT icu_sort_key('a', 'xx-nonsense') = icu_sort_key('a', 'en');
+----
+true
