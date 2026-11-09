@@ -9,26 +9,31 @@
 #pragma once
 
 #include "duckdb/execution/physical_operator.hpp"
-#include "duckdb/parser/parsed_data/alter_info.hpp"
+#include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
 
-//! PhysicalAlterColumn represents an ALTER TABLE that computes a column of a DuckDB table (ADD COLUMN, ALTER TYPE, and
-//! the struct field changes). The ALTER creates the new table version, and the column is then computed row group by
-//! row group on the executor's tasks.
+//! PhysicalAlterColumn computes the column of an ALTER TABLE of a DuckDB table (ADD COLUMN, ALTER TYPE, and the struct
+//! field changes). The PhysicalAlter below it creates the new table version but leaves its column to this operator,
+//! which computes it row group by row group on the tasks of an event from its Finalize.
 class PhysicalAlterColumn : public PhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::ALTER;
 
 public:
-	PhysicalAlterColumn(PhysicalPlan &physical_plan, unique_ptr<AlterInfo> info, idx_t estimated_cardinality)
+	PhysicalAlterColumn(PhysicalPlan &physical_plan, QualifiedName table, idx_t estimated_cardinality)
 	    : PhysicalOperator(physical_plan, PhysicalOperatorType::ALTER, {LogicalType::BOOLEAN}, estimated_cardinality),
-	      info(std::move(info)) {
+	      table(std::move(table)) {
 	}
 
-	unique_ptr<AlterInfo> info;
+	//! The altered table
+	QualifiedName table;
 
 public:
+	string GetName() const override {
+		return "ALTER_COLUMN";
+	}
+
 	// Source interface
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;

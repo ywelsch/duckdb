@@ -17,6 +17,7 @@ SourceResultType PhysicalAlter::GetDataInternal(ExecutionContext &context, DataC
 		db_manager.Alter(context.client, db_info);
 	} else {
 		auto &catalog = Catalog::GetCatalog(context.client, info->GetQualifiedName().Catalog());
+		info->defer_column_rewrite = defer_column_rewrite;
 		catalog.Alter(context.client, *info);
 	}
 	return SourceResultType::FINISHED;

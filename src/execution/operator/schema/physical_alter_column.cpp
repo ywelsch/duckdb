@@ -97,13 +97,8 @@ TaskExecutionResult AlterColumnTask::ExecuteTask(TaskExecutionMode mode) {
 
 SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                OperatorSinkFinalizeInput &input) const {
-	auto &catalog = Catalog::GetCatalog(context, info->GetQualifiedName().Catalog());
-	// the ALTER leaves computing the column to this operator
-	info->defer_column_rewrite = true;
-	catalog.Alter(context, *info);
-
 	// the new table version holds the column the ALTER left to us, unless it had nothing to do
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, info->GetQualifiedName());
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table);
 	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
 		return SinkFinalizeType::READY;
