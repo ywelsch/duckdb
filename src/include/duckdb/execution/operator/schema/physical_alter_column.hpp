@@ -21,13 +21,12 @@ public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::ALTER;
 
 public:
-	PhysicalAlterColumn(PhysicalPlan &physical_plan, unique_ptr<AlterInfo> info, idx_t estimated_cardinality);
+	PhysicalAlterColumn(PhysicalPlan &physical_plan, unique_ptr<AlterInfo> info, idx_t estimated_cardinality)
+	    : PhysicalOperator(physical_plan, PhysicalOperatorType::ALTER, {LogicalType::BOOLEAN}, estimated_cardinality),
+	      info(std::move(info)) {
+	}
 
 	unique_ptr<AlterInfo> info;
-
-public:
-	//! Whether the ALTER computes a column of a table in the given catalog
-	static bool RewritesColumn(ClientContext &context, const AlterInfo &info);
 
 public:
 	// Source interface

@@ -101,6 +101,8 @@ public:
 	AlterEntryData GetAlterEntryData() const;
 	bool IsAddPrimaryKey() const;
 	bool IsAddUniqueConstraint() const;
+	//! Whether the ALTER computes a column of the table (ADD COLUMN, ALTER TYPE and the struct field changes)
+	bool RewritesColumn() const;
 	DatabaseModificationType GetModifications() const;
 
 protected:

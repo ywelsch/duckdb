@@ -8,38 +8,11 @@
 #include "duckdb/parallel/base_pipeline_event.hpp"
 #include "duckdb/parallel/executor_task.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
-#include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/column_rewrite.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 
 namespace duckdb {
-
-PhysicalAlterColumn::PhysicalAlterColumn(PhysicalPlan &physical_plan, unique_ptr<AlterInfo> info_p,
-                                         idx_t estimated_cardinality)
-    : PhysicalOperator(physical_plan, PhysicalOperatorType::ALTER, {LogicalType::BOOLEAN}, estimated_cardinality),
-      info(std::move(info_p)) {
-	// computing the column is left to this operator
-	info->defer_column_rewrite = true;
-}
-
-bool PhysicalAlterColumn::RewritesColumn(ClientContext &context, const AlterInfo &info) {
-	if (info.type != AlterType::ALTER_TABLE) {
-		return false;
-	}
-	switch (info.Cast<AlterTableInfo>().alter_table_type) {
-	case AlterTableType::ADD_COLUMN:
-	case AlterTableType::ALTER_COLUMN_TYPE:
-	case AlterTableType::ADD_FIELD:
-	case AlterTableType::REMOVE_FIELD:
-	case AlterTableType::RENAME_FIELD:
-		break;
-	default:
-		return false;
-	}
-	auto catalog = Catalog::GetCatalogEntry(context, info.GetQualifiedName().Catalog());
-	return catalog && catalog->IsDuckCatalog();
-}
 
 //===--------------------------------------------------------------------===//
 // Sink
@@ -125,6 +98,8 @@ TaskExecutionResult AlterColumnTask::ExecuteTask(TaskExecutionMode mode) {
 SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                OperatorSinkFinalizeInput &input) const {
 	auto &catalog = Catalog::GetCatalog(context, info->GetQualifiedName().Catalog());
+	// the ALTER leaves computing the column to this operator
+	info->defer_column_rewrite = true;
 	catalog.Alter(context, *info);
 
 	// the new table version holds the column the ALTER left to us, unless it had nothing to do
