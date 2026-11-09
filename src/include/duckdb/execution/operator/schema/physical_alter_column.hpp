@@ -12,6 +12,7 @@
 #include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
+class DuckTableEntry;
 
 //! Computes the column of an ADD COLUMN or ALTER TYPE that the PhysicalAlter below it left pending
 class PhysicalAlterColumn : public PhysicalOperator {
@@ -26,6 +27,12 @@ public:
 
 	//! The altered table
 	QualifiedName table;
+
+public:
+	//! The new version of the altered table, if the ALTER left a column for this operator to compute
+	static optional_ptr<DuckTableEntry> GetPendingTable(ClientContext &context, const QualifiedName &table);
+	//! Gives up on a pending column that was not installed, so the transaction cannot commit the table without it
+	static void AbortPendingColumn(ClientContext &context, DuckTableEntry &table_entry);
 
 public:
 	string GetName() const override {
