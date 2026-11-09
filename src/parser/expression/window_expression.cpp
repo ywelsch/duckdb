@@ -8,16 +8,22 @@ namespace duckdb {
 WindowExpression::WindowExpression() : ParsedExpression(ExpressionType::INVALID, ExpressionClass::WINDOW) {
 }
 
+//! v1.x stores the offset and default of lead and lag in their own properties, not in the children
+static bool HasLegacyOffsetAndDefault(const QualifiedName &qualified_name) {
+	return qualified_name.Name() == "lead" || qualified_name.Name() == "lag";
+}
+
 vector<unique_ptr<ParsedExpression>> WindowExpression::SerializedChildren(Serializer &serializer) const {
 	vector<unique_ptr<ParsedExpression>> result;
 	idx_t nargs = arguments.size();
-	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0) &&
-	    (qualified_name.Name() == "lead" || qualified_name.Name() == "lag")) {
-		nargs = 1;
+	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0) && HasLegacyOffsetAndDefault(qualified_name)) {
+		nargs = MinValue<idx_t>(nargs, 1);
 	}
 
 	for (idx_t i = 0; i < nargs; ++i) {
-		result.emplace_back(arguments[i].GetExpression().Copy());
+		auto copy = arguments[i].GetExpression().Copy();
+		copy->SetAlias(arguments[i].GetName());
+		result.emplace_back(std::move(copy));
 	}
 
 	return result;
@@ -107,14 +113,9 @@ void WindowExpression::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<Identifier>(202, "catalog", qualified_name.Catalog());
 
 	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0)) {
-		// Legacy serialization.
-		vector<unique_ptr<ParsedExpression>> children;
-		for (auto &arg : arguments) {
-			auto copy = arg.GetExpression().Copy();
-			copy->SetAlias(arg.GetName());
-			children.push_back(std::move(copy));
-		}
-		serializer.WritePropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(203, "children", children);
+		// Legacy serialization: the offset and default of lead and lag go into properties 210 and 211 instead
+		serializer.WritePropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(203, "children",
+		                                                                          SerializedChildren(serializer));
 	}
 
 	serializer.WritePropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(204, "partitions", partitions);
@@ -176,8 +177,11 @@ unique_ptr<ParsedExpression> WindowExpression::Deserialize(Deserializer &deseria
 	deserializer.ReadProperty<WindowBoundary>(207, "end", result->end);
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(208, "start_expr", result->start_expr);
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(209, "end_expr", result->end_expr);
-	deserializer.ReadDeletedProperty<unique_ptr<ParsedExpression>>(210, "offset_expr");
-	deserializer.ReadDeletedProperty<unique_ptr<ParsedExpression>>(211, "default_expr");
+	// v1.x stores the offset and default of lead and lag here, 2.0 stores them as arguments
+	unique_ptr<ParsedExpression> legacy_offset;
+	unique_ptr<ParsedExpression> legacy_default;
+	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(210, "offset_expr", legacy_offset);
+	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(211, "default_expr", legacy_default);
 	deserializer.ReadPropertyWithDefault<bool>(212, "ignore_nulls", result->ignore_nulls);
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(213, "filter_expr", result->filter_expr);
 	deserializer.ReadPropertyWithExplicitDefault<WindowExcludeMode>(214, "exclude_clause", result->exclude_clause,
@@ -201,6 +205,14 @@ unique_ptr<ParsedExpression> WindowExpression::Deserialize(Deserializer &deseria
 	deserializer.ReadPropertyWithDefault<bool>(220, "is_legacy_function_call", is_legacy_function_call);
 	if (is_legacy_function_call) {
 		result->is_legacy_function_call = true;
+	}
+
+	// earlier 2.0 builds also wrote the offset and default as children, so only take them when the value is alone
+	if (children.size() == 1 && legacy_offset && HasLegacyOffsetAndDefault(result->qualified_name)) {
+		result->arguments.emplace_back(std::move(legacy_offset));
+		if (legacy_default) {
+			result->arguments.emplace_back(std::move(legacy_default));
+		}
 	}
 
 	return std::move(result);

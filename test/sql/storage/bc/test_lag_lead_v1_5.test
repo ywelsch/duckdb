@@ -1,0 +1,174 @@
+# name: test/sql/storage/bc/test_lag_lead_v1_5.test
+# description: Test that lead and lag stored by v1.5 keep their offset and default
+# group: [bc]
+
+# data/storage/lag_lead_v1_5.db.gz was written by DuckDB v1.5.6, which stores the offset and default of lead and lag
+# in their own properties. data/storage/lag_lead_v2_0_legacy.db.gz holds the same objects, written into a v1.5 file by
+# an earlier v2.0.1 build, which stored them both as children and in these properties.
+require vector_size 2048
+
+unzip data/storage/lag_lead_v1_5.db.gz {TEST_DIR}/lag_lead_v1_5.db
+
+unzip data/storage/lag_lead_v2_0_legacy.db.gz {TEST_DIR}/lag_lead_v2_0_legacy.db
+
+foreach db lag_lead_v1_5 lag_lead_v2_0_legacy
+
+statement ok
+ATTACH '{TEST_DIR}/{db}.db' AS old
+
+# the table macro reads t without naming its database
+statement ok
+SET search_path = 'old'
+
+query IIIIIIII
+FROM old.v_lag_lead ORDER BY x
+----
+0	NULL	NULL	-1	2	2	NULL	NULL
+1	0	NULL	-1	3	3	NULL	1
+2	1	NULL	0	4	4	NULL	1
+3	2	0	1	5	5	1	1
+4	3	1	2	6	6	1	1
+5	4	2	3	7	7	2	1
+6	5	3	4	NULL	60	4	1
+7	6	4	5	NULL	70	4	1
+
+query II
+FROM old.m_lag(3) ORDER BY x
+----
+0	NULL
+1	NULL
+2	NULL
+3	0
+4	1
+5	2
+6	3
+7	4
+
+query I
+SELECT sql LIKE '%lag(x, 3) OVER%lag(x, 2, -1) OVER%lead(x, (1 + 1), (x * 10)) OVER%lag(y, 2 IGNORE NULLS) OVER%' FROM duckdb_views() WHERE database_name = 'old' AND view_name = 'v_lag_lead'
+----
+true
+
+# a checkpoint rewrites the catalog in the v1.5 format, together with a view created by this version
+statement ok
+CREATE VIEW old.v_new AS SELECT x, lag(x, 3) OVER (ORDER BY x) AS lag3, lead(x, 2, -1) OVER (ORDER BY x) AS lead2 FROM old.t
+
+statement ok
+CREATE TABLE old.unrelated (i INTEGER)
+
+statement ok
+CHECKPOINT old
+
+statement ok
+RESET search_path
+
+statement ok
+DETACH old
+
+statement ok
+ATTACH '{TEST_DIR}/{db}.db' AS old
+
+statement ok
+SET search_path = 'old'
+
+query IIIIIIII
+FROM old.v_lag_lead ORDER BY x
+----
+0	NULL	NULL	-1	2	2	NULL	NULL
+1	0	NULL	-1	3	3	NULL	1
+2	1	NULL	0	4	4	NULL	1
+3	2	0	1	5	5	1	1
+4	3	1	2	6	6	1	1
+5	4	2	3	7	7	2	1
+6	5	3	4	NULL	60	4	1
+7	6	4	5	NULL	70	4	1
+
+query III
+FROM old.v_new ORDER BY x
+----
+0	NULL	2
+1	NULL	3
+2	NULL	4
+3	0	5
+4	1	6
+5	2	7
+6	3	-1
+7	4	-1
+
+query II
+FROM old.m_lag(3) ORDER BY x
+----
+0	NULL
+1	NULL
+2	NULL
+3	0
+4	1
+5	2
+6	3
+7	4
+
+# upgrading the database to the v2.0.0 storage keeps the offsets and defaults as well
+statement ok
+ATTACH '{TEST_DIR}/{db}_upgraded.db' AS upgraded (STORAGE_VERSION 'v2.0.0')
+
+statement ok
+COPY FROM DATABASE old TO upgraded
+
+statement ok
+DETACH upgraded
+
+statement ok
+RESET search_path
+
+statement ok
+DETACH old
+
+statement ok
+ATTACH '{TEST_DIR}/{db}_upgraded.db' AS upgraded
+
+statement ok
+SET search_path = 'upgraded'
+
+query IIIIIIII
+FROM upgraded.v_lag_lead ORDER BY x
+----
+0	NULL	NULL	-1	2	2	NULL	NULL
+1	0	NULL	-1	3	3	NULL	1
+2	1	NULL	0	4	4	NULL	1
+3	2	0	1	5	5	1	1
+4	3	1	2	6	6	1	1
+5	4	2	3	7	7	2	1
+6	5	3	4	NULL	60	4	1
+7	6	4	5	NULL	70	4	1
+
+query III
+FROM upgraded.v_new ORDER BY x
+----
+0	NULL	2
+1	NULL	3
+2	NULL	4
+3	0	5
+4	1	6
+5	2	7
+6	3	-1
+7	4	-1
+
+query II
+FROM upgraded.m_lag(3) ORDER BY x
+----
+0	NULL
+1	NULL
+2	NULL
+3	0
+4	1
+5	2
+6	3
+7	4
+
+statement ok
+RESET search_path
+
+statement ok
+DETACH upgraded
+
+endloop
