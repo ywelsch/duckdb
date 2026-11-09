@@ -15,7 +15,7 @@ namespace duckdb {
 
 //! PhysicalAlterColumn computes the column of an ALTER TABLE of a DuckDB table (ADD COLUMN, ALTER TYPE, and the struct
 //! field changes). The PhysicalAlter below it creates the new table version but leaves its column to this operator,
-//! which computes it row group by row group on the tasks of an event from its Finalize.
+//! which then computes it as a parallel source, one row group per call.
 class PhysicalAlterColumn : public PhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::ALTER;
@@ -35,15 +35,25 @@ public:
 	}
 
 	// Source interface
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
+	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 
 	bool IsSource() const override {
 		return true;
 	}
+	bool ParallelSource() const override {
+		return true;
+	}
+	OrderPreservationType SourceOrder() const override {
+		// the operator outputs no rows, so the result does not need to keep them in order
+		return OrderPreservationType::NO_ORDER;
+	}
 
 public:
 	// Sink interface
+	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
