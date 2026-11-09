@@ -7,15 +7,11 @@ namespace duckdb {
 WindowExpression::WindowExpression() : ParsedExpression(ExpressionType::INVALID, ExpressionClass::WINDOW) {
 }
 
-//! v1.x stores the offset and default of lead and lag in their own properties, not in the children
-static bool HasLegacyOffsetAndDefault(const QualifiedName &qualified_name) {
-	return qualified_name.Name() == "lead" || qualified_name.Name() == "lag";
-}
-
 vector<unique_ptr<ParsedExpression>> WindowExpression::SerializedChildren(Serializer &serializer) const {
 	vector<unique_ptr<ParsedExpression>> result;
 	idx_t nargs = arguments.size();
-	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0) && HasLegacyOffsetAndDefault(qualified_name)) {
+	if (!serializer.ShouldSerialize(StorageVersion::V2_0_0) &&
+	    (qualified_name.Name() == "lead" || qualified_name.Name() == "lag")) {
 		nargs = MinValue<idx_t>(nargs, 1);
 	}
 
@@ -176,10 +172,15 @@ unique_ptr<ParsedExpression> WindowExpression::Deserialize(Deserializer &deseria
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(208, "start_expr", result->start_expr);
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(209, "end_expr", result->end_expr);
 	// v1.x stores the offset and default of lead and lag here, 2.0 stores them as arguments
-	unique_ptr<ParsedExpression> legacy_offset;
-	unique_ptr<ParsedExpression> legacy_default;
-	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(210, "offset_expr", legacy_offset);
-	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(211, "default_expr", legacy_default);
+	unique_ptr<ParsedExpression> legacy_expr;
+	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(210, "offset_expr", legacy_expr);
+	if (legacy_expr) {
+		result->arguments.emplace_back(std::move(legacy_expr));
+	}
+	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(211, "default_expr", legacy_expr);
+	if (legacy_expr) {
+		result->arguments.emplace_back(std::move(legacy_expr));
+	}
 	deserializer.ReadPropertyWithDefault<bool>(212, "ignore_nulls", result->ignore_nulls);
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(213, "filter_expr", result->filter_expr);
 	deserializer.ReadPropertyWithExplicitDefault<WindowExcludeMode>(214, "exclude_clause", result->exclude_clause,
@@ -203,14 +204,6 @@ unique_ptr<ParsedExpression> WindowExpression::Deserialize(Deserializer &deseria
 	deserializer.ReadPropertyWithDefault<bool>(220, "is_legacy_function_call", is_legacy_function_call);
 	if (is_legacy_function_call) {
 		result->is_legacy_function_call = true;
-	}
-
-	// earlier 2.0 builds also wrote the offset and default as children, so only take them when the value is alone
-	if (children.size() == 1 && legacy_offset && HasLegacyOffsetAndDefault(result->qualified_name)) {
-		result->arguments.emplace_back(std::move(legacy_offset));
-		if (legacy_default) {
-			result->arguments.emplace_back(std::move(legacy_default));
-		}
 	}
 
 	return std::move(result);
