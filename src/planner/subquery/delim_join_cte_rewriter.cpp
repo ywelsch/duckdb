@@ -141,8 +141,7 @@ static bool ChildContainsBindings(LogicalOperator &child, const column_binding_s
 	return true;
 }
 
-static bool FilterReferencesDelimInput(LogicalComparisonJoin &delim_join, Expression &filter) {
-	D_ASSERT(delim_join.type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
+static bool FilterReferencesOnlyChild(LogicalOperator &child, Expression &filter) {
 	column_binding_set_t filter_bindings;
 	if (!GetExpressionColumnBindings(filter, filter_bindings)) {
 		return false;
@@ -150,7 +149,27 @@ static bool FilterReferencesDelimInput(LogicalComparisonJoin &delim_join, Expres
 	if (filter_bindings.empty()) {
 		return false;
 	}
-	return ChildContainsBindings(*delim_join.children[0], filter_bindings);
+	return ChildContainsBindings(child, filter_bindings);
+}
+
+static bool FilterReferencesDelimInput(LogicalComparisonJoin &delim_join, Expression &filter) {
+	D_ASSERT(delim_join.type == LogicalOperatorType::LOGICAL_DELIM_JOIN);
+	return FilterReferencesOnlyChild(*delim_join.children[0], filter);
+}
+
+//! Returns the child of the delim join that a filter above it can be pushed into: its input, or, for an inner join,
+//! its right side, as filter pushdown does for an inner delim join. A volatile filter stays above the right side, where
+//! it is evaluated once per joined row.
+static optional_ptr<unique_ptr<LogicalOperator>> FindDelimJoinChildForFilter(LogicalComparisonJoin &delim_join,
+                                                                             Expression &filter) {
+	if (FilterReferencesDelimInput(delim_join, filter)) {
+		return &delim_join.children[0];
+	}
+	if (delim_join.join_type == JoinType::INNER && !filter.IsVolatile() &&
+	    FilterReferencesOnlyChild(*delim_join.children[1], filter)) {
+		return &delim_join.children[1];
+	}
+	return nullptr;
 }
 
 static bool ExpressionReferencesChild(Expression &expr, LogicalOperator &child) {
@@ -397,10 +416,17 @@ static bool PushEligibleFilterExpressionsIntoDelimJoinInputs(unique_ptr<LogicalO
 	}
 	reference<LogicalOperator> input = *filter.children[0];
 	vector<reference<LogicalProjection>> projections;
-	while (input.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto &projection = input.get().Cast<LogicalProjection>();
-		projections.push_back(projection);
-		input = *projection.children[0];
+	while (true) {
+		if (input.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			auto &projection = input.get().Cast<LogicalProjection>();
+			projections.push_back(projection);
+			input = *projection.children[0];
+		} else if (input.get().type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+			// a CTE outputs the rows of the query that uses it, so a filter above it filters that query
+			input = *input.get().children[1];
+		} else {
+			break;
+		}
 	}
 	if (input.get().type != LogicalOperatorType::LOGICAL_DELIM_JOIN) {
 		return false;
@@ -425,18 +451,21 @@ static bool PushEligibleFilterExpressionsIntoDelimJoinInputs(unique_ptr<LogicalO
 		if (!projections.empty()) {
 			if (!ExpressionBarrier::Required(*expr) && !ExpressionBarrier::Contains(*expr)) {
 				auto rewritten = expr->Copy();
-				if (RewriteFilterThroughProjections(rewritten, projections) &&
-				    FilterReferencesDelimInput(delim_join, *rewritten)) {
-					AddFilterToOperator(delim_join.children[0], std::move(rewritten));
-					changed = true;
-					continue;
+				if (RewriteFilterThroughProjections(rewritten, projections)) {
+					auto target = FindDelimJoinChildForFilter(delim_join, *rewritten);
+					if (target) {
+						AddFilterToOperator(*target, std::move(rewritten));
+						changed = true;
+						continue;
+					}
 				}
 			}
 			remaining_expressions.push_back(std::move(expr));
 			continue;
 		}
-		if (FilterReferencesDelimInput(delim_join, *expr)) {
-			AddFilterToOperator(delim_join.children[0], std::move(expr));
+		auto target = FindDelimJoinChildForFilter(delim_join, *expr);
+		if (target) {
+			AddFilterToOperator(*target, std::move(expr));
 			changed = true;
 			continue;
 		}
