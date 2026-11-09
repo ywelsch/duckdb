@@ -26,8 +26,7 @@ class RowGroup;
 class RowGroupCollection;
 class RowGroupSegmentTree;
 
-//! Builds the collection of an ADD COLUMN or ALTER TYPE row group by row group. With a writer, the new column of every
-//! row group that is on disk is written as soon as it is filled. Different row groups can be altered at the same time.
+//! Builds the collection of an ADD COLUMN or ALTER TYPE row group by row group, from several threads at once
 class RowGroupCollectionAlter {
 public:
 	using AlterRowGroupFunction =
@@ -70,9 +69,7 @@ private:
 	vector<shared_ptr<ColumnStatistics>> new_stats;
 };
 
-//! The column that an ADD COLUMN or ALTER TYPE computes for a new table version, both for the rows of the table and for
-//! the rows the transaction appended to it. The table version computes it right away, unless the ALTER leaves it to
-//! its caller, which computes it on its own tasks and then calls DataTable::FinishColumnRewrite.
+//! The column an ADD COLUMN or ALTER TYPE computes for a new table version, see DataTable::GetColumnRewrite
 class ColumnRewrite {
 public:
 	explicit ColumnRewrite(DataTable &parent);
@@ -92,8 +89,7 @@ public:
 	//! A constraint to verify on the rewritten column
 	unique_ptr<BoundConstraint> constraint_to_verify;
 	unique_ptr<RowGroupCollectionAlter> row_groups;
-	//! The rows the transaction appended to the table, if any. These have their own writer, as their blocks are
-	//! given back on their own when the transaction deletes rows of them.
+	//! The rows the transaction appended, if any, with a writer of their own, as their blocks can be freed alone
 	unique_ptr<RowGroupCollectionAlter> local_row_groups;
 };
 

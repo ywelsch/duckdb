@@ -72,14 +72,12 @@ public:
 	DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_manager, vector<Identifier> schema_path,
 	          Identifier table, vector<ColumnDefinition> column_definitions_p,
 	          unique_ptr<PersistentTableData> data = nullptr);
-	//! Constructs a DataTable as a delta on an existing data table with a newly added column. With defer_rewrite, the
-	//! new column is left to the caller, which computes it through GetColumnRewrite and then calls FinishColumnRewrite.
+	//! Constructs a DataTable as a delta with a newly added column, which defer_rewrite leaves to the caller
 	DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value,
 	          bool defer_rewrite = false);
 	//! Constructs a DataTable as a delta on an existing data table but with one column removed
 	DataTable(ClientContext &context, DataTable &parent, idx_t removed_column);
-	//! Constructs a DataTable as a delta on an existing data table but with one column changed type. With
-	//! defer_rewrite, the changed column is left to the caller, as for ADD COLUMN.
+	//! Constructs a DataTable as a delta with one column changed type, which defer_rewrite leaves to the caller
 	DataTable(ClientContext &context, DataTable &parent, idx_t changed_idx, const LogicalType &target_type,
 	          const vector<StorageIndex> &bound_columns, Expression &cast_expr,
 	          optional_ptr<BoundConstraint> constraint_to_verify = nullptr, bool defer_rewrite = false);

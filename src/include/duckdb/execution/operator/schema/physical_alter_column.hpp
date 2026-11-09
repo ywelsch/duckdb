@@ -13,9 +13,7 @@
 
 namespace duckdb {
 
-//! PhysicalAlterColumn computes the column of an ALTER TABLE of a DuckDB table (ADD COLUMN, ALTER TYPE, and the struct
-//! field changes). The PhysicalAlter below it creates the new table version but leaves its column to this operator,
-//! which then computes it as a parallel source, one row group per call.
+//! Computes the column of an ADD COLUMN or ALTER TYPE that the PhysicalAlter below it left pending
 class PhysicalAlterColumn : public PhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::ALTER;

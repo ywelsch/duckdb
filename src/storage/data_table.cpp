@@ -226,8 +226,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 
 	// set up the statistics for the table
 	// the column that had its type changed will have the new statistics computed during conversion
-	// mark the parent altered before the rewrite takes the commits it reads, so a concurrent modification conflicts
-	// instead of being dropped by the rewrite
+	// mark the parent altered before taking the commits to read, so concurrent changes conflict instead of being lost
 	auto previous_version = parent.version.load();
 	parent.version = DataTableVersion::ALTERED;
 	try {

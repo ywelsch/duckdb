@@ -203,13 +203,11 @@ public:
 	idx_t AddedRows(DataTable &table);
 	vector<PartitionStatistics> GetPartitionStats(DataTable &table, TransactionData transaction) const;
 
-	//! The rows the transaction appended to the table, if any, which an ADD COLUMN or ALTER TYPE rewrites as well. If
-	//! their new column can be written to disk, writer is set to a writer for new_dt.
+	//! The rows the transaction appended to table, if any; writer is set if their new column can be written
 	optional_ptr<RowGroupCollection> PrepareAlter(DataTable &table, DataTable &new_dt,
 	                                              unique_ptr<OptimisticDataWriter> &writer);
 	void DropColumn(DataTable &old_dt, DataTable &new_dt, const idx_t drop_column_index);
-	//! Moves the rows the transaction appended to a table version that an ALTER replaced over to the new version, with
-	//! the collection the ALTER built for them; the blocks of replaced_column of the old collection are given back
+	//! Moves the appended rows over to new_dt with the collection an ALTER built, freeing replaced_column's blocks
 	void AlterStorage(DataTable &old_dt, DataTable &new_dt, shared_ptr<RowGroupCollection> new_collection,
 	                  optional_idx replaced_column);
 	//! Refers the rows the transaction appended to the table of the entry to that entry
