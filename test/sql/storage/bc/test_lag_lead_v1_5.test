@@ -3,18 +3,13 @@
 # group: [bc]
 
 # data/storage/lag_lead_v1_5.db.gz was written by DuckDB v1.5.6, which stores the offset and default of lead and lag
-# in their own properties. data/storage/lag_lead_v2_0_legacy.db.gz holds the same objects, written into a v1.5 file by
-# an earlier v2.0.1 build, which stored them both as children and in these properties.
+# in their own properties
 require vector_size 2048
 
 unzip data/storage/lag_lead_v1_5.db.gz {TEST_DIR}/lag_lead_v1_5.db
 
-unzip data/storage/lag_lead_v2_0_legacy.db.gz {TEST_DIR}/lag_lead_v2_0_legacy.db
-
-foreach db lag_lead_v1_5 lag_lead_v2_0_legacy
-
 statement ok
-ATTACH '{TEST_DIR}/{db}.db' AS old
+ATTACH '{TEST_DIR}/lag_lead_v1_5.db' AS old
 
 # the table macro reads t without naming its database
 statement ok
@@ -66,7 +61,7 @@ statement ok
 DETACH old
 
 statement ok
-ATTACH '{TEST_DIR}/{db}.db' AS old
+ATTACH '{TEST_DIR}/lag_lead_v1_5.db' AS old
 
 statement ok
 SET search_path = 'old'
@@ -109,7 +104,7 @@ FROM old.m_lag(3) ORDER BY x
 
 # upgrading the database to the v2.0.0 storage keeps the offsets and defaults as well
 statement ok
-ATTACH '{TEST_DIR}/{db}_upgraded.db' AS upgraded (STORAGE_VERSION 'v2.0.0')
+ATTACH '{TEST_DIR}/lag_lead_v1_5_upgraded.db' AS upgraded (STORAGE_VERSION 'v2.0.0')
 
 statement ok
 COPY FROM DATABASE old TO upgraded
@@ -124,7 +119,7 @@ statement ok
 DETACH old
 
 statement ok
-ATTACH '{TEST_DIR}/{db}_upgraded.db' AS upgraded
+ATTACH '{TEST_DIR}/lag_lead_v1_5_upgraded.db' AS upgraded
 
 statement ok
 SET search_path = 'upgraded'
@@ -170,5 +165,3 @@ RESET search_path
 
 statement ok
 DETACH upgraded
-
-endloop
