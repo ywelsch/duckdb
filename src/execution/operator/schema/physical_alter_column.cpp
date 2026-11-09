@@ -11,6 +11,7 @@
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/column_rewrite.hpp"
+#include "duckdb/transaction/local_storage.hpp"
 
 namespace duckdb {
 
@@ -43,34 +44,14 @@ bool PhysicalAlterColumn::RewritesColumn(ClientContext &context, const AlterInfo
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
-class AlterColumnGlobalState : public GlobalSinkState {
-public:
-	~AlterColumnGlobalState() override {
-		if (table) {
-			// a column that was not computed completely gives back the blocks it was written to so far
-			table->AbortColumnRewrite();
-		}
-	}
-
-	//! The table version whose column is computed
-	shared_ptr<DataTable> table;
-};
-
-unique_ptr<GlobalSinkState> PhysicalAlterColumn::GetGlobalSinkState(ClientContext &context) const {
-	return make_uniq<AlterColumnGlobalState>();
-}
-
 SinkResultType PhysicalAlterColumn::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-class AlterColumnEvent;
-
 class AlterColumnTask : public ExecutorTask {
 public:
-	AlterColumnTask(ClientContext &client, shared_ptr<Event> event_p, const PhysicalOperator &op,
-	                AlterColumnEvent &alter_event)
-	    : ExecutorTask(client, std::move(event_p), op), client(client), alter_event(alter_event) {
+	AlterColumnTask(ClientContext &client, shared_ptr<Event> event_p, const PhysicalOperator &op)
+	    : ExecutorTask(client, std::move(event_p), op), client(client) {
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override;
@@ -81,7 +62,6 @@ public:
 
 private:
 	ClientContext &client;
-	AlterColumnEvent &alter_event;
 };
 
 class AlterColumnEvent : public BasePipelineEvent {
@@ -102,13 +82,16 @@ public:
 		}
 		vector<shared_ptr<Task>> tasks;
 		for (idx_t i = 0; i < task_count; i++) {
-			tasks.push_back(make_uniq<AlterColumnTask>(context, shared_from_this(), op, *this));
+			tasks.push_back(make_uniq<AlterColumnTask>(context, shared_from_this(), op));
 		}
 		SetTasks(std::move(tasks));
 	}
 
 	void FinishEvent() override {
-		table_entry.GetStorage().FinishColumnRewrite(context, table_entry);
+		auto &storage = table_entry.GetStorage();
+		storage.FinishColumnRewrite(context);
+		// the catalog entry was created before the transaction-local rows moved over to its storage
+		LocalStorage::Get(context, storage.db).SetTableEntry(table_entry);
 	}
 
 	//! Rewrites the next row group, returns false if all of them were claimed
@@ -131,10 +114,8 @@ private:
 
 TaskExecutionResult AlterColumnTask::ExecuteTask(TaskExecutionMode mode) {
 	// one row group per step, so that an interrupted query stops between row groups
-	if (client.GetContext().IsInterrupted()) {
-		throw InterruptException();
-	}
-	if (alter_event.RewriteNextRowGroup()) {
+	client.BlockingInterruptCheck();
+	if (event->Cast<AlterColumnEvent>().RewriteNextRowGroup()) {
 		return TaskExecutionResult::TASK_NOT_FINISHED;
 	}
 	event->FinishTask();
@@ -143,7 +124,6 @@ TaskExecutionResult AlterColumnTask::ExecuteTask(TaskExecutionMode mode) {
 
 SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                OperatorSinkFinalizeInput &input) const {
-	auto &gstate = input.global_state.Cast<AlterColumnGlobalState>();
 	auto &catalog = Catalog::GetCatalog(context, info->GetQualifiedName().Catalog());
 	catalog.Alter(context, *info);
 
@@ -157,7 +137,6 @@ SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event,
 	if (!table || !table->GetStorage().GetColumnRewrite()) {
 		return SinkFinalizeType::READY;
 	}
-	gstate.table = table->GetStorage().shared_from_this();
 	event.InsertEvent(make_shared_ptr<AlterColumnEvent>(pipeline, context, *this, *table));
 	return SinkFinalizeType::READY;
 }

@@ -16,6 +16,7 @@
 #include "duckdb/storage/checkpoint/table_data_writer.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/metadata/metadata_reader.hpp"
+#include "duckdb/storage/optimistic_data_writer.hpp"
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/column_checkpoint_state.hpp"
 #include "duckdb/storage/table/column_rewrite.hpp"
@@ -2321,7 +2322,7 @@ bool RowGroupCollection::SupportsPerColumnWrites() {
 //===--------------------------------------------------------------------===//
 unique_ptr<RowGroupCollectionAlter> RowGroupCollection::AddColumn(ClientContext &context, ColumnDefinition &new_column,
                                                                   Expression &default_value,
-                                                                  optional_ptr<OptimisticDataWriter> writer) {
+                                                                  unique_ptr<OptimisticDataWriter> writer) {
 	idx_t new_column_idx = types.size();
 	auto new_types = types;
 	auto row_groups = GetRowGroups();
@@ -2331,14 +2332,13 @@ unique_ptr<RowGroupCollectionAlter> RowGroupCollection::AddColumn(ClientContext 
 	result->next_row_id = next_row_id.load();
 	result->stats.InitializeAddColumn(stats, new_column.GetType());
 
-	// fill the column with its DEFAULT value, or NULL if none is specified
+	// the column is filled with its DEFAULT value, or NULL if none is specified
 	auto &result_ref = *result;
 	auto column = make_shared_ptr<ColumnDefinition>(new_column.Copy());
-	shared_ptr<Expression> default_copy = default_value.Copy();
 	return make_uniq<RowGroupCollectionAlter>(
-	    *this, std::move(result), new_column_idx, default_value.IsVolatile(), writer,
-	    [&context, &result_ref, column, default_copy](SegmentNode<RowGroup> &node, ColumnStatistics &column_stats) {
-		    ExpressionExecutor executor(context, *default_copy);
+	    context, *this, std::move(result), new_column_idx, default_value.Copy(), std::move(writer),
+	    [&result_ref, column](SegmentNode<RowGroup> &node, ExpressionExecutor &executor,
+	                          ColumnStatistics &column_stats) {
 		    return node.GetNode().AddColumn(result_ref, *column, executor, column_stats);
 	    });
 }
@@ -2370,7 +2370,7 @@ unique_ptr<RowGroupCollectionAlter> RowGroupCollection::AlterType(ClientContext 
                                                                   const LogicalType &target_type,
                                                                   vector<StorageIndex> bound_columns,
                                                                   Expression &cast_expr, TransactionData transaction,
-                                                                  optional_ptr<OptimisticDataWriter> writer) {
+                                                                  unique_ptr<OptimisticDataWriter> writer) {
 	D_ASSERT(changed_idx < types.size());
 	auto new_types = types;
 	auto row_groups = GetRowGroups();
@@ -2391,16 +2391,14 @@ unique_ptr<RowGroupCollectionAlter> RowGroupCollection::AlterType(ClientContext 
 	}
 	auto max_row = row_groups->GetBaseRowId() + next_row_id.load();
 
-	// alter the type of the column within all of the row groups individually
+	// the type of the column is altered within all of the row groups individually
 	auto &result_ref = *result;
-	shared_ptr<Expression> cast_copy = cast_expr.Copy();
 	return make_uniq<RowGroupCollectionAlter>(
-	    *this, std::move(result), changed_idx, cast_expr.IsVolatile(), writer,
-	    [&context, this, &result_ref, target_type, changed_idx, bound_columns, scan_types, max_row, cast_copy,
-	     transaction](SegmentNode<RowGroup> &node, ColumnStatistics &column_stats) {
+	    context, *this, std::move(result), changed_idx, cast_expr.Copy(), std::move(writer),
+	    [&context, this, &result_ref, target_type, changed_idx, bound_columns, scan_types, max_row,
+	     transaction](SegmentNode<RowGroup> &node, ExpressionExecutor &executor, ColumnStatistics &column_stats) {
 		    DataChunk scan_chunk;
 		    scan_chunk.Initialize(GetAllocator(), scan_types);
-		    ExpressionExecutor executor(context, *cast_copy);
 		    TableScanState scan_state;
 		    scan_state.Initialize(bound_columns);
 		    scan_state.table_state.Initialize(context, GetTypes());

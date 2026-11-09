@@ -1,5 +1,6 @@
 #include "duckdb/storage/table/column_rewrite.hpp"
 
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/bound_constraint.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/optimistic_data_writer.hpp"
@@ -11,14 +12,15 @@
 
 namespace duckdb {
 
-RowGroupCollectionAlter::RowGroupCollectionAlter(RowGroupCollection &source, shared_ptr<RowGroupCollection> result_p,
-                                                 idx_t column_idx, bool is_volatile,
-                                                 optional_ptr<OptimisticDataWriter> writer_p,
+RowGroupCollectionAlter::RowGroupCollectionAlter(ClientContext &context, RowGroupCollection &source,
+                                                 shared_ptr<RowGroupCollection> result_p, idx_t column_idx,
+                                                 unique_ptr<Expression> expression_p,
+                                                 unique_ptr<OptimisticDataWriter> writer_p,
                                                  AlterRowGroupFunction alter_p)
-    : source_row_groups(source.GetRowGroups()), result(std::move(result_p)), column_idx(column_idx),
-      is_volatile(is_volatile), writer(writer_p), alter(std::move(alter_p)) {
+    : context(context), source_row_groups(source.GetRowGroups()), result(std::move(result_p)), column_idx(column_idx),
+      expression(std::move(expression_p)), writer(std::move(writer_p)), alter(std::move(alter_p)) {
 	if (writer && !writer->PrepareWriteColumn(source)) {
-		writer = nullptr;
+		writer.reset();
 	}
 	for (auto &node : source_row_groups->SegmentNodes()) {
 		nodes.push_back(node);
@@ -28,7 +30,8 @@ RowGroupCollectionAlter::RowGroupCollectionAlter(RowGroupCollection &source, sha
 }
 
 RowGroupCollectionAlter::~RowGroupCollectionAlter() {
-	if (finished) {
+	if (!result) {
+		// Finish handed out the new collection
 		return;
 	}
 	try {
@@ -37,10 +40,15 @@ RowGroupCollectionAlter::~RowGroupCollectionAlter() {
 	}
 }
 
+bool RowGroupCollectionAlter::IsVolatile() const {
+	return expression->IsVolatile();
+}
+
 void RowGroupCollectionAlter::AlterRowGroup(idx_t index) {
 	auto &node = nodes[index].get();
+	ExpressionExecutor executor(context, *expression);
 	new_stats[index] = ColumnStatistics::CreateEmptyStats(result->GetTypes()[column_idx]);
-	new_row_groups[index] = alter(node, *new_stats[index]);
+	new_row_groups[index] = alter(node, executor, *new_stats[index]);
 	// a row group that is not on disk yet is written as a whole later, together with its new column
 	if (writer && node.GetNode().IsPersistent()) {
 		writer->WriteColumn(*new_row_groups[index], column_idx);
@@ -61,7 +69,6 @@ shared_ptr<RowGroupCollection> RowGroupCollectionAlter::Finish() {
 	if (writer) {
 		writer->FinalFlush();
 	}
-	finished = true;
 	return std::move(result);
 }
 
@@ -81,8 +88,7 @@ void RowGroupCollectionAlter::Rollback() {
 	drop_state.FinalizeCommit();
 }
 
-ColumnRewrite::ColumnRewrite(DataTable &parent, idx_t column_idx, DataTableVersion previous_version)
-    : parent(parent), column_idx(column_idx), previous_version(previous_version) {
+ColumnRewrite::ColumnRewrite(DataTable &parent) : parent(parent) {
 }
 
 ColumnRewrite::~ColumnRewrite() {

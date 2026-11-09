@@ -12,7 +12,6 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/column_data.hpp"
-#include "duckdb/storage/table/column_rewrite.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/table/row_group.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
@@ -42,23 +41,6 @@ LocalTableStorage::LocalTableStorage(DataTable &new_data_table, LocalTableStorag
 	if (replaced_column.IsValid()) {
 		parent.row_groups->collection->CommitDropColumn(replaced_column.GetIndex());
 	}
-	row_groups = std::move(parent.row_groups);
-	row_groups->collection = std::move(new_collection);
-	row_groups->ResetCollectionAccounting();
-
-	append_indexes.Move(parent.append_indexes);
-	delete_indexes.Move(parent.delete_indexes);
-}
-
-LocalTableStorage::LocalTableStorage(DataTable &new_data_table, LocalTableStorage &parent,
-                                     const idx_t drop_column_index)
-    : context(parent.context), table_ref(new_data_table), allocator(Allocator::Get(new_data_table.db)),
-      deleted_rows(parent.deleted_rows.load()), optimistic_collections(std::move(parent.optimistic_collections)),
-      optimistic_writer(new_data_table, parent.optimistic_writer) {
-	// Remove the column from the previous table storage.
-	auto &parent_collection = *parent.row_groups->collection;
-	auto new_collection = parent_collection.RemoveColumn(drop_column_index);
-	parent_collection.CommitDropColumn(drop_column_index);
 	row_groups = std::move(parent.row_groups);
 	row_groups->collection = std::move(new_collection);
 	row_groups->ResetCollectionAccounting();
@@ -739,49 +721,29 @@ void LocalStorage::MoveStorage(DataTable &old_dt, DataTable &new_dt) {
 	table_manager.InsertEntry(new_dt, std::move(new_storage));
 }
 
-static optional_ptr<OptimisticDataWriter> PrepareAlterWriter(LocalTableStorage &storage, OptimisticDataWriter &writer) {
-	if (!storage.WritesNewRowGroups()) {
-		return nullptr;
-	}
-	// finish the blocks of the written row groups, so that these stay written in the altered storage
-	storage.GetOptimisticWriter().FinalFlush();
-	return &writer;
-}
-
-unique_ptr<RowGroupCollectionAlter> LocalStorage::AddColumn(ClientContext &context, DataTable &table,
-                                                            ColumnDefinition &new_column, Expression &default_value,
-                                                            OptimisticDataWriter &writer) {
+optional_ptr<RowGroupCollection> LocalStorage::PrepareAlter(DataTable &table, DataTable &new_dt,
+                                                            unique_ptr<OptimisticDataWriter> &writer) {
 	// check if there are any pending appends for the table
 	auto storage = table_manager.GetStorage(table);
 	if (!storage) {
 		return nullptr;
 	}
-	auto column_writer = PrepareAlterWriter(*storage, writer);
-	return storage->row_groups->collection->AddColumn(context, new_column, default_value, column_writer);
+	if (storage->WritesNewRowGroups()) {
+		// finish the blocks of the written row groups, so that these stay written in the altered storage
+		storage->GetOptimisticWriter().FinalFlush();
+		writer = make_uniq<OptimisticDataWriter>(context, new_dt);
+	}
+	return *storage->row_groups->collection;
 }
 
 void LocalStorage::DropColumn(DataTable &old_dt, DataTable &new_dt, const idx_t drop_column_index) {
 	// check if there are any pending appends for the old version of the table
-	auto storage = table_manager.MoveEntry(old_dt);
+	auto storage = table_manager.GetStorage(old_dt);
 	if (!storage) {
 		return;
 	}
-	auto new_storage = make_shared_ptr<LocalTableStorage>(new_dt, *storage, drop_column_index);
-	table_manager.InsertEntry(new_dt, std::move(new_storage));
-}
-
-unique_ptr<RowGroupCollectionAlter> LocalStorage::ChangeType(ClientContext &context, DataTable &table,
-                                                             idx_t changed_idx, const LogicalType &target_type,
-                                                             const vector<StorageIndex> &bound_columns,
-                                                             Expression &cast_expr, OptimisticDataWriter &writer) {
-	// check if there are any pending appends for the table
-	auto storage = table_manager.GetStorage(table);
-	if (!storage) {
-		return nullptr;
-	}
-	auto column_writer = PrepareAlterWriter(*storage, writer);
-	return storage->row_groups->collection->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
-	                                                  transaction, column_writer);
+	auto new_collection = storage->row_groups->collection->RemoveColumn(drop_column_index);
+	AlterStorage(old_dt, new_dt, std::move(new_collection), drop_column_index);
 }
 
 void LocalStorage::AlterStorage(DataTable &old_dt, DataTable &new_dt, shared_ptr<RowGroupCollection> new_collection,
@@ -793,6 +755,13 @@ void LocalStorage::AlterStorage(DataTable &old_dt, DataTable &new_dt, shared_ptr
 	}
 	auto new_storage = make_shared_ptr<LocalTableStorage>(new_dt, *storage, std::move(new_collection), replaced_column);
 	table_manager.InsertEntry(new_dt, std::move(new_storage));
+}
+
+void LocalStorage::SetTableEntry(DuckTableEntry &entry) {
+	auto storage = table_manager.GetStorage(entry.GetStorage());
+	if (storage) {
+		storage->table_entry = entry;
+	}
 }
 
 void LocalStorage::FetchChunk(DataTable &table, const Vector &row_ids, idx_t count, const vector<StorageIndex> &col_ids,

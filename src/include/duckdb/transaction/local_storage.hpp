@@ -26,9 +26,7 @@ class DataTable;
 class DuckTableEntry;
 class DuckTransaction;
 class Expression;
-class ExpressionExecutor;
 class RowGroupCollection;
-class RowGroupCollectionAlter;
 class StorageCommitState;
 class Transaction;
 class Vector;
@@ -43,11 +41,9 @@ class LocalTableStorage : public enable_shared_from_this<LocalTableStorage> {
 public:
 	// Create a new LocalTableStorage
 	explicit LocalTableStorage(Context &context, DataTable &table);
-	//! Create a LocalTableStorage from an ADD COLUMN or ALTER TYPE, with the collection the ALTER built.
+	//! Create a LocalTableStorage from an ADD COLUMN, DROP COLUMN or ALTER TYPE, with the collection the ALTER built.
 	LocalTableStorage(DataTable &new_data_table, LocalTableStorage &parent,
 	                  shared_ptr<RowGroupCollection> new_collection, optional_idx replaced_column);
-	//! Create a LocalTableStorage from a DROP COLUMN.
-	LocalTableStorage(DataTable &new_data_table, LocalTableStorage &parent, const idx_t drop_column_index);
 	~LocalTableStorage();
 
 	Context &context;
@@ -207,20 +203,17 @@ public:
 	idx_t AddedRows(DataTable &table);
 	vector<PartitionStatistics> GetPartitionStats(DataTable &table, TransactionData transaction) const;
 
-	//! Starts the ADD COLUMN of the rows the transaction appended to the table, if there are any
-	unique_ptr<RowGroupCollectionAlter> AddColumn(ClientContext &context, DataTable &table,
-	                                              ColumnDefinition &new_column, Expression &default_value,
-	                                              OptimisticDataWriter &writer);
+	//! The rows the transaction appended to the table, if any, which an ADD COLUMN or ALTER TYPE rewrites as well. If
+	//! their new column can be written to disk, writer is set to a writer for new_dt.
+	optional_ptr<RowGroupCollection> PrepareAlter(DataTable &table, DataTable &new_dt,
+	                                              unique_ptr<OptimisticDataWriter> &writer);
 	void DropColumn(DataTable &old_dt, DataTable &new_dt, const idx_t drop_column_index);
-	//! Starts the ALTER TYPE of the rows the transaction appended to the table, if there are any
-	unique_ptr<RowGroupCollectionAlter> ChangeType(ClientContext &context, DataTable &table, idx_t changed_idx,
-	                                               const LogicalType &target_type,
-	                                               const vector<StorageIndex> &bound_columns, Expression &cast_expr,
-	                                               OptimisticDataWriter &writer);
-	//! Moves the rows the transaction appended to a table version that an ADD COLUMN or ALTER TYPE replaced over to the
-	//! new version, with the collection the ALTER built for them
+	//! Moves the rows the transaction appended to a table version that an ALTER replaced over to the new version, with
+	//! the collection the ALTER built for them; the blocks of replaced_column of the old collection are given back
 	void AlterStorage(DataTable &old_dt, DataTable &new_dt, shared_ptr<RowGroupCollection> new_collection,
 	                  optional_idx replaced_column);
+	//! Refers the rows the transaction appended to the table of the entry to that entry
+	void SetTableEntry(DuckTableEntry &entry);
 
 	void MoveStorage(DataTable &old_dt, DataTable &new_dt);
 	void FetchChunk(DataTable &table, const Vector &row_ids, idx_t count, const vector<StorageIndex> &col_ids,

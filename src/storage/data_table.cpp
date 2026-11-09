@@ -102,26 +102,28 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	column_definitions.emplace_back(new_column.Copy());
 
 	auto &local_storage = LocalStorage::Get(context, db);
-	{
-		// prevent any new tuples from being added to the parent before it is marked altered
-		lock_guard<mutex> parent_lock(parent.append_lock);
-		column_rewrite = make_uniq<ColumnRewrite>(parent, column_definitions.size() - 1, parent.version.load());
-		column_rewrite->writer = make_uniq<OptimisticDataWriter>(context, *this);
-		column_rewrite->local_writer = make_uniq<OptimisticDataWriter>(context, *this);
 
-		// fill the column with its DEFAULT value, or NULL if none is specified
-		column_rewrite->row_groups =
-		    parent.row_groups->AddColumn(context, new_column, default_value, *column_rewrite->writer);
+	// prevent any new tuples from being added to the parent
+	unique_lock<mutex> parent_lock(parent.append_lock);
 
-		// also add this column to client local storage
+	column_rewrite = make_uniq<ColumnRewrite>(parent);
+	column_rewrite->row_groups = parent.row_groups->AddColumn(context, new_column, default_value,
+	                                                          make_uniq<OptimisticDataWriter>(context, *this));
+
+	// also add this column to client local storage
+	unique_ptr<OptimisticDataWriter> local_writer;
+	auto local_row_groups = local_storage.PrepareAlter(parent, *this, local_writer);
+	if (local_row_groups) {
 		column_rewrite->local_row_groups =
-		    local_storage.AddColumn(context, parent, new_column, default_value, *column_rewrite->local_writer);
-
-		// this table replaces the previous table, hence the parent is no longer the root DataTable
-		parent.version = DataTableVersion::ALTERED;
+		    local_row_groups->AddColumn(context, new_column, default_value, std::move(local_writer));
 	}
+
+	// this table replaces the previous table, hence the parent is no longer the root DataTable
+	auto previous_version = parent.version.load();
+	parent.version = DataTableVersion::ALTERED;
+	parent_lock.unlock();
 	if (!defer_rewrite) {
-		RunColumnRewrite(context);
+		RunColumnRewrite(context, previous_version);
 	}
 }
 
@@ -203,58 +205,62 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	auto &transaction = DuckTransaction::Get(context, db);
 	auto &local_storage = LocalStorage::Get(transaction);
-	{
-		// prevent any tuples from being added to the parent before it is marked altered
-		lock_guard<mutex> parent_lock(parent.append_lock);
-		for (auto &column_def : parent.column_definitions) {
-			column_definitions.emplace_back(column_def.Copy());
+	// prevent any tuples from being added to the parent
+	unique_lock<mutex> parent_lock(parent.append_lock);
+	for (auto &column_def : parent.column_definitions) {
+		column_definitions.emplace_back(column_def.Copy());
+	}
+
+	// Bind all indexes.
+	info->BindIndexes(context);
+
+	// first check if there are any indexes that exist that point to the changed column
+	for (const auto column_id : info->indexes.GetIndexedColumns()) {
+		if (column_id == changed_idx) {
+			throw CatalogException("Cannot change the type of this column: an index depends on it!");
+		}
+	}
+
+	// change the type in this DataTable
+	column_definitions[changed_idx].SetType(target_type);
+
+	// set up the statistics for the table
+	// the column that had its type changed will have the new statistics computed during conversion
+	// mark the parent altered before the rewrite takes the commits it reads, so a concurrent modification conflicts
+	// instead of being dropped by the rewrite
+	auto previous_version = parent.version.load();
+	parent.version = DataTableVersion::ALTERED;
+	try {
+		// read at the commits seen so far, not at this transaction's older snapshot
+		auto &transaction_manager = DuckTransactionManager::Get(db);
+		TransactionData rewrite_visibility(transaction.GetTransactionId(),
+		                                   VisibilityBound::Through(transaction_manager.GetLastCommit()));
+		column_rewrite = make_uniq<ColumnRewrite>(parent);
+		column_rewrite->row_groups =
+		    parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
+		                                 rewrite_visibility, make_uniq<OptimisticDataWriter>(context, *this));
+
+		// transform the transaction-local rows as well
+		unique_ptr<OptimisticDataWriter> local_writer;
+		auto local_row_groups = local_storage.PrepareAlter(parent, *this, local_writer);
+		if (local_row_groups) {
+			column_rewrite->local_row_groups = local_row_groups->AlterType(
+			    context, changed_idx, target_type, bound_columns, cast_expr, transaction, std::move(local_writer));
+			column_rewrite->replaced_column = changed_idx;
 		}
 
-		// Bind all indexes.
-		info->BindIndexes(context);
-
-		// first check if there are any indexes that exist that point to the changed column
-		for (const auto column_id : info->indexes.GetIndexedColumns()) {
-			if (column_id == changed_idx) {
-				throw CatalogException("Cannot change the type of this column: an index depends on it!");
-			}
-		}
-
-		// change the type in this DataTable
-		column_definitions[changed_idx].SetType(target_type);
-
-		// the column that had its type changed will have the new statistics computed during conversion
-		column_rewrite = make_uniq<ColumnRewrite>(parent, changed_idx, parent.version.load());
-		column_rewrite->replaced_column = changed_idx;
+		// a column constraint that the rewrite could violate (e.g. NOT NULL) is verified after it
 		if (constraint_to_verify) {
 			column_rewrite->constraint_to_verify = constraint_to_verify->Copy();
 		}
-		column_rewrite->writer = make_uniq<OptimisticDataWriter>(context, *this);
-		column_rewrite->local_writer = make_uniq<OptimisticDataWriter>(context, *this);
-
-		// mark the parent altered before reading, so a concurrent modification conflicts instead of
-		// being dropped by the rewrite
-		parent.version = DataTableVersion::ALTERED;
-		try {
-			// read at the commits seen so far, not at this transaction's older snapshot
-			auto &transaction_manager = DuckTransactionManager::Get(db);
-			TransactionData rewrite_visibility(transaction.GetTransactionId(),
-			                                   VisibilityBound::Through(transaction_manager.GetLastCommit()));
-			column_rewrite->row_groups =
-			    parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
-			                                 rewrite_visibility, *column_rewrite->writer);
-
-			// scan the original table, and fill the new column with the transformed value
-			column_rewrite->local_row_groups = local_storage.ChangeType(
-			    context, parent, changed_idx, target_type, bound_columns, cast_expr, *column_rewrite->local_writer);
-		} catch (...) {
-			// nothing reached the catalog, so no undo entry will restore the parent
-			parent.version = column_rewrite->previous_version;
-			throw;
-		}
+	} catch (...) {
+		// nothing reached the catalog, so no undo entry will restore the parent
+		parent.version = previous_version;
+		throw;
 	}
+	parent_lock.unlock();
 	if (!defer_rewrite) {
-		RunColumnRewrite(context);
+		RunColumnRewrite(context, previous_version);
 	}
 }
 
@@ -265,9 +271,8 @@ optional_ptr<ColumnRewrite> DataTable::GetColumnRewrite() {
 	return column_rewrite.get();
 }
 
-void DataTable::RunColumnRewrite(ClientContext &context) {
+void DataTable::RunColumnRewrite(ClientContext &context, DataTableVersion previous_version) {
 	auto &parent = column_rewrite->parent;
-	auto previous_version = column_rewrite->previous_version;
 	try {
 		for (idx_t index = 0; index < column_rewrite->RowGroupCount(); index++) {
 			column_rewrite->RewriteRowGroup(index);
@@ -281,11 +286,11 @@ void DataTable::RunColumnRewrite(ClientContext &context) {
 	}
 }
 
-void DataTable::FinishColumnRewrite(ClientContext &context, optional_ptr<DuckTableEntry> table_entry) {
+void DataTable::FinishColumnRewrite(ClientContext &context) {
 	D_ASSERT(column_rewrite);
 	auto &rewrite = *column_rewrite;
 	row_groups = rewrite.row_groups->Finish();
-	written_column = rewrite.column_idx;
+	written_column = rewrite.row_groups->ColumnIndex();
 
 	// also install the column in client local storage
 	auto &local_storage = LocalStorage::Get(context, db);
@@ -294,11 +299,6 @@ void DataTable::FinishColumnRewrite(ClientContext &context, optional_ptr<DuckTab
 		local_row_groups = rewrite.local_row_groups->Finish();
 	}
 	local_storage.AlterStorage(rewrite.parent, *this, std::move(local_row_groups), rewrite.replaced_column);
-	auto local_table_storage = local_storage.GetStorage(*this);
-	if (table_entry && local_table_storage) {
-		// the catalog entry was created before these rows were moved over, so it could not refer them to itself
-		local_table_storage->table_entry = table_entry;
-	}
 
 	auto constraint_to_verify = std::move(rewrite.constraint_to_verify);
 	column_rewrite.reset();
@@ -1735,12 +1735,9 @@ void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop
 	row_groups->CommitDropColumn(column_index, drop_state);
 }
 
-void DataTable::AbortColumnRewrite() {
-	column_rewrite.reset();
-}
-
 void DataTable::RollbackWrittenColumn() {
-	AbortColumnRewrite();
+	// an unfinished column rewrite gives back the blocks it wrote so far
+	column_rewrite.reset();
 	if (written_column.IsValid()) {
 		row_groups->CommitDropColumn(written_column.GetIndex());
 		// releasing the blocks twice would free blocks that other columns still share

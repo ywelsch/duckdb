@@ -209,16 +209,15 @@ public:
 	bool SupportsPerColumnWrites();
 	const vector<LogicalType> &GetTypes() const;
 
-	//! If a writer is given, the new column of each row group that is on disk is written to disk as soon as it is
-	//! filled
+	//! With a writer, the new column of each row group that is on disk is written as soon as it is filled
 	unique_ptr<RowGroupCollectionAlter> AddColumn(ClientContext &context, ColumnDefinition &new_column,
-	                                              Expression &default_value, optional_ptr<OptimisticDataWriter> writer);
+	                                              Expression &default_value, unique_ptr<OptimisticDataWriter> writer);
 	shared_ptr<RowGroupCollection> RemoveColumn(idx_t col_idx);
-	//! If a writer is given, the converted column of each row group that is on disk is written as soon as it is filled
+	//! With a writer, the converted column of each row group that is on disk is written as soon as it is filled
 	unique_ptr<RowGroupCollectionAlter> AlterType(ClientContext &context, idx_t changed_idx,
 	                                              const LogicalType &target_type, vector<StorageIndex> bound_columns,
 	                                              Expression &cast_expr, TransactionData transaction,
-	                                              optional_ptr<OptimisticDataWriter> writer);
+	                                              unique_ptr<OptimisticDataWriter> writer);
 	void VerifyNewConstraint(const QueryContext &context, DuckTransaction &transaction, DataTable &parent,
 	                         const BoundConstraint &constraint);
 

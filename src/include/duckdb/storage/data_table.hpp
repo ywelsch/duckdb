@@ -248,11 +248,8 @@ public:
 	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state);
 	//! The column rewrite an ADD COLUMN or ALTER TYPE left to its caller, if it is not finished yet
 	optional_ptr<ColumnRewrite> GetColumnRewrite();
-	//! Installs the rewritten column, once every row group of the column rewrite is rewritten. The transaction-local
-	//! rows refer to table_entry, the catalog entry of this table version, if given.
-	void FinishColumnRewrite(ClientContext &context, optional_ptr<DuckTableEntry> table_entry = nullptr);
-	//! Gives back the blocks an unfinished column rewrite wrote so far
-	void AbortColumnRewrite();
+	//! Installs the rewritten column, once every row group of the column rewrite is rewritten
+	void FinishColumnRewrite(ClientContext &context);
 	//! Gives back the blocks of the column this table version wrote, when its ALTER fails or is rolled back
 	void RollbackWrittenColumn();
 
@@ -357,7 +354,7 @@ private:
 	optional_idx written_column;
 
 private:
-	//! Rewrites the column right away, restoring the parent if that fails
-	void RunColumnRewrite(ClientContext &context);
+	//! Rewrites the column right away, restoring the parent to its previous version if that fails
+	void RunColumnRewrite(ClientContext &context, DataTableVersion previous_version);
 };
 } // namespace duckdb
