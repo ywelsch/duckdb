@@ -390,6 +390,45 @@ static bool RewriteFilterThroughProjections(unique_ptr<Expression> &expr,
 	return true;
 }
 
+//! A filter can sit above an inner join or cross product that combines a delim join with something else, e.g. the domain
+//! of an outer correlation. Its conditions on the input of that delim join have to reach the input, as they do when
+//! the filter sits right above the delim join: otherwise the duplicate-eliminated side is computed from rows the
+//! filter removes. Only conditions that cannot throw move below the join.
+static bool PushFilterExpressionsThroughInnerJoin(LogicalFilter &filter, LogicalOperator &join) {
+	if (join.type != LogicalOperatorType::LOGICAL_CROSS_PRODUCT &&
+	    !(join.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN &&
+	      join.Cast<LogicalComparisonJoin>().join_type == JoinType::INNER)) {
+		return false;
+	}
+	bool changed = false;
+	vector<unique_ptr<Expression>> remaining_expressions;
+	auto expressions = std::move(filter.expressions);
+	LogicalFilter::SplitPredicates(expressions);
+	for (auto &expr : expressions) {
+		bool pushed = false;
+		if (!ExpressionBarrier::Required(*expr) && !ExpressionBarrier::Contains(*expr)) {
+			for (auto &child : join.children) {
+				if (child->type != LogicalOperatorType::LOGICAL_DELIM_JOIN) {
+					continue;
+				}
+				auto &delim_join = child->Cast<LogicalComparisonJoin>();
+				if (!PropagatesBuildSide(delim_join.join_type) && FilterReferencesDelimInput(delim_join, *expr)) {
+					AddFilterToOperator(delim_join.children[0], std::move(expr));
+					pushed = true;
+					break;
+				}
+			}
+		}
+		if (pushed) {
+			changed = true;
+		} else {
+			remaining_expressions.push_back(std::move(expr));
+		}
+	}
+	filter.expressions = std::move(remaining_expressions);
+	return changed;
+}
+
 static bool PushEligibleFilterExpressionsIntoDelimJoinInputs(unique_ptr<LogicalOperator> &plan) {
 	auto &filter = plan->Cast<LogicalFilter>();
 	if (filter.HasProjectionMap()) {
@@ -403,7 +442,14 @@ static bool PushEligibleFilterExpressionsIntoDelimJoinInputs(unique_ptr<LogicalO
 		input = *projection.children[0];
 	}
 	if (input.get().type != LogicalOperatorType::LOGICAL_DELIM_JOIN) {
-		return false;
+		if (!projections.empty()) {
+			return false;
+		}
+		auto pushed = PushFilterExpressionsThroughInnerJoin(filter, input.get());
+		if (filter.expressions.empty()) {
+			plan = std::move(filter.children[0]);
+		}
+		return pushed;
 	}
 
 	bool changed = false;
