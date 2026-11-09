@@ -209,6 +209,24 @@ bool IsRecreatableByLateMaterialization(const Expression &expr) {
 	return false;
 }
 
+//! With late materialization the payload is read on the LHS of the join, so the input of the aggregate only needs the
+//! partition, order and row id columns. Prune it here: the pruning after the rewrite is skipped for late
+//! materialization, and pruning the RHS before its join exists trips debug_verify_column_bindings. Starting below the
+//! aggregate keeps the aggregate's own output, which is all the operators above refer to.
+void PruneAggregateInput(Optimizer &optimizer, LogicalOperator &aggregate) {
+	auto &input = aggregate.children[0];
+	if (HasExternalCTEReferences(*input) || HasProjectionMaps(*input)) {
+		return;
+	}
+	RemoveUnusedColumns root(optimizer);
+	RemoveUnusedColumns input_pruner(root, false);
+	// VisitExpression is protected in the pruner, so register the aggregate's references through the base class
+	LogicalOperatorVisitor &reference_collector = input_pruner;
+	LogicalOperatorVisitor::EnumerateExpressions(
+	    aggregate, [&](unique_ptr<Expression> *expression) { reference_collector.VisitExpression(expression); });
+	input_pruner.VisitOperator(input);
+}
+
 } // namespace
 
 TopNWindowElimination::TopNWindowElimination(ClientContext &context_p, Optimizer &optimizer,
@@ -310,6 +328,9 @@ unique_ptr<LogicalOperator> TopNWindowElimination::OptimizeInternal(unique_ptr<L
 	const bool used_late_materialization = late_mat_lhs != nullptr;
 
 	op = CreateAggregateOperator(window, std::move(aggregate_payload), params);
+	if (used_late_materialization && child_replacer.replacement_bindings.empty()) {
+		PruneAggregateInput(optimizer, *op);
+	}
 	op = TryCreateUnnestOperator(std::move(op), params);
 	op = CreateProjectionOperator(std::move(op), params, group_projection_idxs);
 
