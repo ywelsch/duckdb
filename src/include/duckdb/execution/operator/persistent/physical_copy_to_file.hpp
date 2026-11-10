@@ -87,7 +87,7 @@ public:
 	}
 
 	bool ParallelSink() const override {
-		return per_thread_output || partition_output || parallel;
+		return per_thread_output || (partition_output && !ordered_partitions) || parallel;
 	}
 
 public:
@@ -122,6 +122,8 @@ public:
 	bool parallel;
 	//! Whether each threads creates their own output file
 	bool per_thread_output;
+	//! Whether a partitioned write takes its rows on one thread, so each file keeps the order they arrive in
+	bool ordered_partitions = false;
 
 	//! Fine-grained control over writes
 	optional_idx batch_size;
