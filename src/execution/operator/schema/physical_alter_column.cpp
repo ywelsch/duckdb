@@ -25,10 +25,7 @@ static DataTable &GetAlteredStorage(AlterInfo &info) {
 
 //! Installs the altered entry once its column is computed
 static void InstallColumn(ClientContext &context, AlterInfo &info) {
-	auto &storage = GetAlteredStorage(info);
-	if (storage.GetColumnRewrite()) {
-		storage.FinishColumnRewrite(context);
-	}
+	GetAlteredStorage(info).FinishColumnRewrite(context);
 	// altering again installs the altered entry in the catalog
 	Catalog::GetCatalog(context, info.GetQualifiedName().Catalog()).Alter(context, info);
 }
@@ -57,7 +54,9 @@ SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event,
 		return SinkFinalizeType::READY;
 	}
 	auto rewrite = GetAlteredStorage(info).GetColumnRewrite();
-	if (!rewrite || rewrite->RowGroupCount() == 0) {
+	// every table version that an ALTER with defer_column_rewrite builds has a column to compute
+	D_ASSERT(rewrite);
+	if (rewrite->RowGroupCount() == 0) {
 		InstallColumn(context, info);
 	}
 	return SinkFinalizeType::READY;

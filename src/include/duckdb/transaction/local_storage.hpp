@@ -208,8 +208,6 @@ public:
 	//! Moves the appended rows over to new_dt with the collection an ALTER built, freeing replaced_column's blocks
 	void AlterStorage(DataTable &old_dt, DataTable &new_dt, shared_ptr<RowGroupCollection> new_collection,
 	                  optional_idx replaced_column);
-	//! Refers the rows the transaction appended to the table of the entry to that entry
-	void SetTableEntry(DuckTableEntry &entry);
 
 	void MoveStorage(DataTable &old_dt, DataTable &new_dt);
 	void FetchChunk(DataTable &table, const Vector &row_ids, idx_t count, const vector<StorageIndex> &col_ids,

@@ -355,7 +355,11 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 	if (transaction.context && value->type == CatalogType::TABLE_ENTRY) {
 		auto new_entry = value->Cast<TableCatalogEntry>().TryGetDuckTableEntry();
 		if (new_entry) {
-			LocalStorage::Get(*transaction.context, new_entry->GetStorage().db).SetTableEntry(*new_entry);
+			auto &new_storage = new_entry->GetStorage();
+			auto lstorage = LocalStorage::Get(*transaction.context, new_storage.db).GetStorage(new_storage);
+			if (lstorage) {
+				lstorage->table_entry = new_entry;
+			}
 		}
 	}
 

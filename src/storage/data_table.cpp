@@ -92,6 +92,15 @@ DataTable::DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_m
 	row_groups->Verify();
 }
 
+//! Only the main version of a table can be altered: an ALTER still building a new version from it conflicts
+static void VerifyCanAlter(DataTable &parent) {
+	if (!parent.IsMainTable()) {
+		throw TransactionException("Transaction conflict: attempting to alter table %s but it has been %s by a "
+		                           "different transaction",
+		                           parent.GetTableName(), parent.TableModification());
+	}
+}
+
 DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value,
                      bool defer_rewrite)
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
@@ -105,8 +114,9 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 
 	// prevent any new tuples from being added to the parent
 	unique_lock<mutex> parent_lock(parent.append_lock);
+	VerifyCanAlter(parent);
 
-	column_rewrite = make_uniq<ColumnRewrite>(parent, parent.version.load(), parent.rewrite_lock.GetSharedLock());
+	column_rewrite = make_uniq<ColumnRewrite>(parent, parent.rewrite_lock.GetSharedLock());
 	column_rewrite->row_groups = parent.row_groups->AddColumn(context, new_column, default_value,
 	                                                          make_uniq<OptimisticDataWriter>(context, *this));
 
@@ -129,6 +139,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 	// prevent any new tuples from being added to the parent
 	auto &local_storage = LocalStorage::Get(context, db);
 	lock_guard<mutex> parent_lock(parent.append_lock);
+	VerifyCanAlter(parent);
 
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
@@ -179,6 +190,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, BoundConstraint 
 
 	auto &local_storage = LocalStorage::Get(context, db);
 	lock_guard<mutex> parent_lock(parent.append_lock);
+	VerifyCanAlter(parent);
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -204,6 +216,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 	auto &local_storage = LocalStorage::Get(transaction);
 	// prevent any tuples from being added to the parent
 	unique_lock<mutex> parent_lock(parent.append_lock);
+	VerifyCanAlter(parent);
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -231,7 +244,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 		auto &transaction_manager = DuckTransactionManager::Get(db);
 		TransactionData rewrite_visibility(transaction.GetTransactionId(),
 		                                   VisibilityBound::Through(transaction_manager.GetLastCommit()));
-		column_rewrite = make_uniq<ColumnRewrite>(parent, previous_version, parent.rewrite_lock.GetSharedLock());
+		column_rewrite = make_uniq<ColumnRewrite>(parent, parent.rewrite_lock.GetSharedLock());
 		column_rewrite->row_groups =
 		    parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
 		                                 rewrite_visibility, make_uniq<OptimisticDataWriter>(context, *this));
@@ -1739,11 +1752,11 @@ void DataTable::AbortColumnRewrite() {
 		return;
 	}
 	auto &parent = column_rewrite->parent;
-	auto previous_version = column_rewrite->previous_version;
 	// this also lets the parent revert appends again
 	RollbackWrittenColumn();
 	lock_guard<mutex> parent_lock(parent.append_lock);
-	parent.version = previous_version;
+	// only the main version of a table can be altered, so that is what the parent was
+	parent.SetAsMainTable();
 }
 
 void DataTable::RollbackWrittenColumn() {
