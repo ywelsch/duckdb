@@ -11,7 +11,7 @@ concurrentloop k 0 4
 statement error
 ALTER TABLE t ALTER v TYPE BIGINT
 ----
-<REGEX>:.*(Could not convert|Transaction conflict).*
+<REGEX>:.*(Could not convert|write-write conflict).*
 
 endloop
 

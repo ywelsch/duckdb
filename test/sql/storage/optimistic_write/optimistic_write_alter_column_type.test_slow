@@ -130,7 +130,7 @@ SELECT used_blocks - (SELECT used_blocks FROM used_before) FROM pragma_database_
 ----
 0
 
-# a write-write conflict is found before the table is touched, so it stays usable after the other ALTER commits
+# the write-write conflict found when installing restores the table, so it stays usable after the other ALTER commits
 statement ok con1
 BEGIN
 

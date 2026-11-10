@@ -319,12 +319,6 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 		throw CatalogException("Cannot alter entry %s because it is an internal system entry", entry->name);
 	}
 
-	if (!alter_info.altered_entry) {
-		// find a write-write conflict first, as building the altered entry marks the (possibly shared) storage altered
-		unique_lock<mutex> read_lock(catalog_lock);
-		GetEntryInternal(transaction, name);
-	}
-
 	unique_ptr<CatalogEntry> value;
 	if (alter_info.altered_entry) {
 		// the caller computed the column of the entry that an earlier call built, which this call installs

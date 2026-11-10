@@ -95,9 +95,7 @@ DataTable::DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_m
 //! Only the main version of a table can be altered: an ALTER still building a new version from it conflicts
 static void VerifyCanAlter(DataTable &parent) {
 	if (!parent.IsMainTable()) {
-		throw TransactionException("Transaction conflict: attempting to alter table %s but it has been %s by a "
-		                           "different transaction",
-		                           parent.GetTableName(), parent.TableModification());
+		throw TransactionException("Catalog write-write conflict on alter with %s", parent.GetTableName());
 	}
 }
 
