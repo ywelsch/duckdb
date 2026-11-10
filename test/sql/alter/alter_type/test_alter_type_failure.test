@@ -1,5 +1,5 @@
 # name: test/sql/alter/alter_type/test_alter_type_failure.test
-# description: A failed ALTER TYPE aborts its transaction, whose rollback leaves the table as it was
+# description: An ALTER that fails to compute its column leaves the table as it was, also for other connections
 # group: [alter_type]
 
 require json
@@ -18,25 +18,64 @@ ALTER TABLE t ALTER v TYPE BIGINT
 ----
 Could not convert
 
-# the transaction is aborted, so the table version without its column is never read
 statement error con1
 SELECT COUNT(*) FROM t
 ----
 Current transaction is aborted
 
-statement ok con1
-ROLLBACK
-
-# the rollback leaves the table writable for everyone
+# the failed ALTER installed nothing, so other connections write the table before the rollback
 statement ok con2
 INSERT INTO t VALUES ('y')
 
-query I
-SELECT COUNT(*) FROM t
-----
-300002
+statement ok con1
+ROLLBACK
 
-# a parser error does not invalidate a transaction under this policy, but one from computing the column does
+statement ok con1
+BEGIN
+
+statement error con1
+ALTER TABLE t ADD COLUMN c INTEGER DEFAULT CAST('abc' AS INTEGER)
+----
+Could not convert
+
+statement ok con2
+INSERT INTO t VALUES ('z')
+
+statement ok con1
+ROLLBACK
+
+query II
+SELECT COUNT(*), (SELECT COUNT(*) FROM duckdb_columns() WHERE table_name = 't') FROM t
+----
+300003	1
+
+# a constraint the computed column violates fails after the appended rows moved to the new table version
+statement ok
+CREATE TABLE n (v VARCHAR NOT NULL)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO n VALUES ('a')
+
+statement error con1
+ALTER TABLE n ALTER v TYPE INTEGER USING NULL
+----
+NOT NULL constraint failed
+
+statement ok con1
+ROLLBACK
+
+statement ok con2
+INSERT INTO n VALUES ('b')
+
+query I
+SELECT v FROM n
+----
+b
+
+# a parser error does not invalidate a transaction under this policy, and the failed ALTER left nothing behind
 statement ok
 CREATE TABLE j AS SELECT '{}'::JSON AS j FROM range(10)
 
@@ -51,13 +90,13 @@ ALTER TABLE j ALTER j TYPE VARCHAR USING json_deserialize_sql(j)
 ----
 Error parsing json
 
-statement error con1
-SELECT COUNT(*) FROM j
+query II con1
+SELECT COUNT(*), typeof(ANY_VALUE(j)) FROM j
 ----
-Current transaction is aborted
+10	JSON
 
 statement ok con1
-ROLLBACK
+COMMIT
 
 query II
 SELECT COUNT(*), typeof(ANY_VALUE(j)) FROM j

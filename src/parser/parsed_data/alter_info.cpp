@@ -1,4 +1,5 @@
 #include "duckdb/parser/parsed_data/alter_info.hpp"
+#include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"

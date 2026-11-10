@@ -319,14 +319,17 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 		throw CatalogException("Cannot alter entry %s because it is an internal system entry", entry->name);
 	}
 
-	{
+	if (!alter_info.altered_entry) {
 		// find a write-write conflict first, as building the altered entry marks the (possibly shared) storage altered
 		unique_lock<mutex> read_lock(catalog_lock);
 		GetEntryInternal(transaction, name);
 	}
 
 	unique_ptr<CatalogEntry> value;
-	if (alter_info.type == AlterType::SET_COMMENT) {
+	if (alter_info.altered_entry) {
+		// the caller computed the column of the entry that an earlier call built, which this call installs
+		value = std::move(alter_info.altered_entry);
+	} else if (alter_info.type == AlterType::SET_COMMENT) {
 		// Copy the existing entry; we are only changing metadata here
 		if (!transaction.context) {
 			throw InternalException("Cannot AlterEntry::SET_COMMENT without client context");
@@ -338,6 +341,11 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 		value = entry->AlterEntry(transaction, alter_info);
 		if (!value) {
 			// alter failed, but did not result in an error
+			return true;
+		}
+		if (alter_info.defer_column_rewrite) {
+			// the caller computes the column of the altered entry, then alters again to install it
+			alter_info.altered_entry = std::move(value);
 			return true;
 		}
 	}

@@ -16,6 +16,7 @@
 #include "duckdb/common/enums/on_entry_not_found.hpp"
 
 namespace duckdb {
+class CatalogEntry;
 class LogicalDependencyList;
 
 enum class AlterType : uint8_t {
@@ -64,8 +65,10 @@ public:
 	bool allow_internal;
 	//! Determine whether to skip Bind
 	AlterBindMode bind_mode = AlterBindMode::BIND_ON_ALTER;
-	//! Leave the column that an ADD COLUMN or ALTER TYPE computes to the caller, see DataTable::GetColumnRewrite
+	//! Leave computing the column of an ADD COLUMN or ALTER TYPE, and installing the entry, to the caller
 	bool defer_column_rewrite = false;
+	//! The entry built with defer_column_rewrite, which altering again installs once the caller computed its column
+	unique_ptr<CatalogEntry> altered_entry;
 	//! New dependencies for the altered entry (set during binding)
 	unique_ptr<LogicalDependencyList> new_dependencies;
 

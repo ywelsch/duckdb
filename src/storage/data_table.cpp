@@ -267,9 +267,7 @@ optional_ptr<ColumnRewrite> DataTable::GetColumnRewrite() {
 
 void DataTable::RewriteColumn(ClientContext &context, bool defer_rewrite) {
 	if (defer_rewrite) {
-		// the table version reads as empty until the caller installs the column
-		row_groups = make_shared_ptr<RowGroupCollection>(info, TableIOManager::Get(*this), GetTypes(), 0);
-		row_groups->InitializeEmpty();
+		// the caller computes the column before it installs the table version
 		return;
 	}
 	try {
@@ -1736,6 +1734,8 @@ void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop
 
 void DataTable::AbortColumnRewrite() {
 	if (!column_rewrite) {
+		// the column is computed, but the table version did not reach the catalog
+		RollbackWrittenColumn();
 		return;
 	}
 	auto &parent = column_rewrite->parent;
