@@ -395,6 +395,8 @@ FlattenDependentJoins::DecorrelateSubtreeInternal(unique_ptr<LogicalOperator> &p
 				auto definition_state = DecorrelateIndependentSubtree(detached_cte->children[0]);
 				ColumnBindingRewrite::ApplyToChild(detached_cte, 0, std::move(old_definition_bindings),
 				                                   definition_state.replacement_graph);
+				// access entries cached for the definition's operators refer to operators this replaced
+				InvalidateAccessCache();
 				auto result = DecorrelateSubtree(plan, propagate_null_values, std::move(state));
 				detached_cte->children[1] = std::move(plan);
 				plan = std::move(detached_cte);
