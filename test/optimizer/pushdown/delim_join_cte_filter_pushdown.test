@@ -16,14 +16,14 @@ EXPLAIN (FORMAT compact) SELECT count(*)
 FROM docs, unnest(CAST(docs.doc AS JSON[])) AS t(thread), unnest(CAST(json_extract(thread, '$.items') AS JSON[])) AS i(item)
 WHERE json_extract_string(item, '$.type') = 'a';
 ----
-physical_plan	<REGEX>:.*FILTER[^\n]*json_extract_string\(item, '\$\.type'\) = 'a'[^\n]*\n *INOUT_FUNCTION[^\n]*Name: unnest.*
+physical_plan	<REGEX>:.*FILTER[^\n]*json_extract_string\(item, '\$\.type'\) = 'a'[^\n]*\n( *PROJECTION[^\n]*\n)* *INOUT_FUNCTION[^\n]*Name: unnest.*
 
 query II
 EXPLAIN (FORMAT compact) SELECT count(*)
 FROM docs, unnest(CAST(docs.doc AS JSON[])) AS t(thread), unnest(CAST(json_extract(thread, '$.items') AS JSON[])) AS i(item)
 WHERE json_extract_string(item, '$.type') = 'a';
 ----
-physical_plan	<!REGEX>:.*FILTER[^\n]*json_extract_string\(item[^\n]*\n *HASH_JOIN.*
+physical_plan	<!REGEX>:.*FILTER[^\n]*json_extract_string\(item[^\n]*\n( *PROJECTION[^\n]*\n)* *HASH_JOIN.*
 
 query I
 SELECT count(*)

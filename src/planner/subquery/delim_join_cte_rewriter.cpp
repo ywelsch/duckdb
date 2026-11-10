@@ -157,9 +157,7 @@ static bool FilterReferencesDelimInput(LogicalComparisonJoin &delim_join, Expres
 	return FilterReferencesOnlyChild(*delim_join.children[0], filter);
 }
 
-//! Returns the child of the delim join that a filter above it can be pushed into: its input, or, for an inner join,
-//! its right side, as filter pushdown does for an inner delim join. A volatile filter stays above the right side, where
-//! it is evaluated once per joined row.
+//! The child of the delim join a filter above it can move into: its input, or the right side of an inner join
 static optional_ptr<unique_ptr<LogicalOperator>> FindDelimJoinChildForFilter(LogicalComparisonJoin &delim_join,
                                                                              Expression &filter) {
 	if (FilterReferencesDelimInput(delim_join, filter)) {
