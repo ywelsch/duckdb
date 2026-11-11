@@ -9,25 +9,30 @@
 #pragma once
 
 #include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
-class PhysicalAlter;
-struct AlterInfo;
+class DuckTableEntry;
 
-//! Computes the column of an ADD COLUMN or ALTER TYPE whose table the PhysicalAlter below built, then installs it
+//! Computes the column of an ADD COLUMN or ALTER TYPE that the PhysicalAlter below it left pending
 class PhysicalAlterColumn : public PhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::ALTER;
 
 public:
-	PhysicalAlterColumn(PhysicalPlan &physical_plan, PhysicalAlter &alter, idx_t estimated_cardinality);
+	PhysicalAlterColumn(PhysicalPlan &physical_plan, QualifiedName table, idx_t estimated_cardinality)
+	    : PhysicalOperator(physical_plan, PhysicalOperatorType::ALTER, {LogicalType::BOOLEAN}, estimated_cardinality),
+	      table(std::move(table)) {
+	}
 
-	//! The ALTER of the PhysicalAlter below, which leaves its altered entry to this operator
-	AlterInfo &info;
+	//! The altered table
+	QualifiedName table;
 
 public:
-	//! Gives up on an altered entry that was not installed
-	static void DiscardAlteredEntry(ClientContext &context, AlterInfo &info);
+	//! The new version of the altered table, if the ALTER left a column for this operator to compute
+	static optional_ptr<DuckTableEntry> GetPendingTable(ClientContext &context, const QualifiedName &table);
+	//! Gives up on a pending column that was not installed, so the transaction cannot commit the table without it
+	static void AbortPendingColumn(ClientContext &context, DuckTableEntry &table_entry);
 
 public:
 	string GetName() const override {
@@ -53,6 +58,7 @@ public:
 
 public:
 	// Sink interface
+	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const override;
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;

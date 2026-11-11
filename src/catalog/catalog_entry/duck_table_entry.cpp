@@ -1414,9 +1414,8 @@ void DuckTableEntry::Rollback(CatalogEntry &prev_entry) {
 
 	auto &prev_table = prev_entry.Cast<DuckTableEntry>();
 	if (storage.get() != &prev_table.GetStorage()) {
-		// release the column this table version wrote to disk, if any, and make the previous version the main one again
+		// release the column this table version wrote to disk, if any
 		storage->RollbackWrittenColumn();
-		prev_table.GetStorage().SetAsMainTable();
 	}
 
 	// Rolls back any physical index creation for index-based constraints.

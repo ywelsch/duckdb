@@ -2,9 +2,10 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
-#include "duckdb/execution/operator/schema/physical_alter.hpp"
+#include "duckdb/catalog/catalog_entry_retriever.hpp"
+#include "duckdb/catalog/entry_lookup_info.hpp"
+#include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/main/valid_checker.hpp"
-#include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/column_rewrite.hpp"
 #include "duckdb/transaction/local_storage.hpp"
@@ -12,53 +13,67 @@
 
 namespace duckdb {
 
-PhysicalAlterColumn::PhysicalAlterColumn(PhysicalPlan &physical_plan, PhysicalAlter &alter, idx_t estimated_cardinality)
-    : PhysicalOperator(physical_plan, PhysicalOperatorType::ALTER, {LogicalType::BOOLEAN}, estimated_cardinality),
-      info(*alter.info) {
-	children.push_back(alter);
+//! Installs the computed column in the new table version
+static void InstallColumn(ClientContext &context, DuckTableEntry &table_entry) {
+	auto &storage = table_entry.GetStorage();
+	storage.FinishColumnRewrite(context);
+	// the catalog entry was created before the transaction-local rows moved over to its storage
+	LocalStorage::Get(context, storage.db).SetTableEntry(table_entry);
 }
 
-//! The storage of the altered entry, whose column this operator computes
-static DataTable &GetAlteredStorage(AlterInfo &info) {
-	return info.altered_entry->Cast<DuckTableEntry>().GetStorage();
-}
-
-//! Installs the altered entry once its column is computed
-static void InstallColumn(ClientContext &context, AlterInfo &info) {
-	GetAlteredStorage(info).FinishColumnRewrite(context);
-	// altering again installs the altered entry in the catalog
-	Catalog::GetCatalog(context, info.GetQualifiedName().Catalog()).Alter(context, info);
-}
-
-void PhysicalAlterColumn::DiscardAlteredEntry(ClientContext &context, AlterInfo &info) {
-	auto altered_entry = std::move(info.altered_entry);
-	auto &storage = altered_entry->Cast<DuckTableEntry>().GetStorage();
-	if (LocalStorage::Get(context, storage.db).GetStorage(storage)) {
-		// the rows the transaction appended already moved over to the discarded table version
-		ValidChecker::Invalidate(MetaTransaction::Get(context), "an ALTER TABLE failed to install the altered table");
+optional_ptr<DuckTableEntry> PhysicalAlterColumn::GetPendingTable(ClientContext &context, const QualifiedName &table) {
+	// look the table up as Catalog::Alter did
+	auto &catalog = Catalog::GetCatalog(context, table.Catalog());
+	CatalogEntryRetriever retriever(context);
+	auto lookup =
+	    catalog.LookupEntry(retriever, EntryLookupInfo(CatalogType::TABLE_ENTRY, table), OnEntryNotFound::RETURN_NULL);
+	if (!lookup.Found() || lookup.entry->type != CatalogType::TABLE_ENTRY) {
+		return nullptr;
 	}
-	storage.AbortColumnRewrite();
+	auto table_entry = lookup.entry->Cast<TableCatalogEntry>().TryGetDuckTableEntry();
+	if (!table_entry || !table_entry->GetStorage().GetColumnRewrite()) {
+		return nullptr;
+	}
+	return table_entry;
+}
+
+void PhysicalAlterColumn::AbortPendingColumn(ClientContext &context, DuckTableEntry &table_entry) {
+	if (!table_entry.GetStorage().GetColumnRewrite()) {
+		return;
+	}
+	ValidChecker::Invalidate(MetaTransaction::Get(context), "an ALTER TABLE failed to compute its column");
+	table_entry.GetStorage().AbortColumnRewrite();
 }
 
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
+class AlterColumnSinkState : public GlobalSinkState {
+public:
+	//! The new table version, if the ALTER left a column to compute
+	optional_ptr<DuckTableEntry> table_entry;
+};
+
+unique_ptr<GlobalSinkState> PhysicalAlterColumn::GetGlobalSinkState(ClientContext &context) const {
+	return make_uniq<AlterColumnSinkState>();
+}
+
 SinkResultType PhysicalAlterColumn::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
 SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                OperatorSinkFinalizeInput &input) const {
-	if (!info.altered_entry) {
-		// the ALTER had nothing to alter, e.g. ADD COLUMN IF NOT EXISTS of a column that exists
+	auto &gstate = input.global_state.Cast<AlterColumnSinkState>();
+	auto table_entry = GetPendingTable(context, table);
+	if (!table_entry) {
 		return SinkFinalizeType::READY;
 	}
-	auto rewrite = GetAlteredStorage(info).GetColumnRewrite();
-	// every table version that an ALTER with defer_column_rewrite builds has a column to compute
-	D_ASSERT(rewrite);
-	if (rewrite->RowGroupCount() == 0) {
-		InstallColumn(context, info);
+	if (table_entry->GetStorage().GetColumnRewrite()->RowGroupCount() == 0) {
+		InstallColumn(context, *table_entry);
+		return SinkFinalizeType::READY;
 	}
+	gstate.table_entry = table_entry;
 	return SinkFinalizeType::READY;
 }
 
@@ -67,9 +82,10 @@ SinkFinalizeType PhysicalAlterColumn::Finalize(Pipeline &pipeline, Event &event,
 //===--------------------------------------------------------------------===//
 class AlterColumnSourceState : public GlobalSourceState {
 public:
-	explicit AlterColumnSourceState(AlterInfo &info) : next_row_group(0), rewritten_row_groups(0) {
-		if (info.altered_entry) {
-			rewrite = GetAlteredStorage(info).GetColumnRewrite();
+	explicit AlterColumnSourceState(optional_ptr<DuckTableEntry> table_entry_p)
+	    : table_entry(table_entry_p), next_row_group(0), rewritten_row_groups(0) {
+		if (table_entry) {
+			rewrite = table_entry->GetStorage().GetColumnRewrite();
 			row_group_count = rewrite->RowGroupCount();
 		}
 	}
@@ -79,6 +95,7 @@ public:
 		return rewrite && !rewrite->IsVolatile() ? row_group_count : 1;
 	}
 
+	optional_ptr<DuckTableEntry> table_entry;
 	optional_ptr<ColumnRewrite> rewrite;
 	idx_t row_group_count = 0;
 	atomic<idx_t> next_row_group;
@@ -86,7 +103,7 @@ public:
 };
 
 unique_ptr<GlobalSourceState> PhysicalAlterColumn::GetGlobalSourceState(ClientContext &context) const {
-	return make_uniq<AlterColumnSourceState>(info);
+	return make_uniq<AlterColumnSourceState>(sink_state->Cast<AlterColumnSinkState>().table_entry);
 }
 
 SourceResultType PhysicalAlterColumn::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -100,8 +117,8 @@ SourceResultType PhysicalAlterColumn::GetDataInternal(ExecutionContext &context,
 	if (++state.rewritten_row_groups < state.row_group_count) {
 		return SourceResultType::HAVE_MORE_OUTPUT;
 	}
-	// the thread that rewrote the last row group installs the altered entry
-	InstallColumn(context.client, info);
+	// the thread that rewrote the last row group installs the column
+	InstallColumn(context.client, *state.table_entry);
 	return SourceResultType::FINISHED;
 }
 

@@ -757,6 +757,13 @@ void LocalStorage::AlterStorage(DataTable &old_dt, DataTable &new_dt, shared_ptr
 	table_manager.InsertEntry(new_dt, std::move(new_storage));
 }
 
+void LocalStorage::SetTableEntry(DuckTableEntry &entry) {
+	auto storage = table_manager.GetStorage(entry.GetStorage());
+	if (storage) {
+		storage->table_entry = entry;
+	}
+}
+
 void LocalStorage::FetchChunk(DataTable &table, const Vector &row_ids, idx_t count, const vector<StorageIndex> &col_ids,
                               DataChunk &chunk, ColumnFetchState &fetch_state) {
 	auto storage = table_manager.GetStorage(table);

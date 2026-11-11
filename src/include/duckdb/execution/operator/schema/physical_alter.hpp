@@ -26,7 +26,7 @@ public:
 	}
 
 	unique_ptr<AlterInfo> info;
-	//! Leave computing the column of an ADD COLUMN or ALTER TYPE, and installing the table, to the operator above
+	//! Leave computing the column of an ADD COLUMN or ALTER TYPE to the PhysicalAlterColumn above this operator
 	bool defer_column_rewrite;
 
 public:

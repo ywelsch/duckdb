@@ -89,8 +89,8 @@ void RowGroupCollectionAlter::Rollback() {
 	drop_state.FinalizeCommit();
 }
 
-ColumnRewrite::ColumnRewrite(DataTable &parent, unique_ptr<StorageLockKey> read_lock)
-    : parent(parent), read_lock(std::move(read_lock)) {
+ColumnRewrite::ColumnRewrite(DataTable &parent, DataTableVersion previous_version, unique_ptr<StorageLockKey> read_lock)
+    : parent(parent), previous_version(previous_version), read_lock(std::move(read_lock)) {
 }
 
 ColumnRewrite::~ColumnRewrite() {

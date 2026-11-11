@@ -319,11 +319,14 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 		throw CatalogException("Cannot alter entry %s because it is an internal system entry", entry->name);
 	}
 
+	{
+		// find a write-write conflict first, as building the altered entry marks the (possibly shared) storage altered
+		unique_lock<mutex> read_lock(catalog_lock);
+		GetEntryInternal(transaction, name);
+	}
+
 	unique_ptr<CatalogEntry> value;
-	if (alter_info.altered_entry) {
-		// the caller computed the column of the entry that an earlier call built, which this call installs
-		value = std::move(alter_info.altered_entry);
-	} else if (alter_info.type == AlterType::SET_COMMENT) {
+	if (alter_info.type == AlterType::SET_COMMENT) {
 		// Copy the existing entry; we are only changing metadata here
 		if (!transaction.context) {
 			throw InternalException("Cannot AlterEntry::SET_COMMENT without client context");
@@ -337,11 +340,6 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 			// alter failed, but did not result in an error
 			return true;
 		}
-		if (alter_info.defer_column_rewrite) {
-			// the caller computes the column of the altered entry, then alters again to install it
-			alter_info.altered_entry = std::move(value);
-			return true;
-		}
 	}
 
 	// If this ALTER produced a new DuckTableEntry, refresh the LocalTableStorage's table_entry
@@ -349,11 +347,7 @@ bool CatalogSet::AlterEntry(CatalogTransaction transaction, const Identifier &na
 	if (transaction.context && value->type == CatalogType::TABLE_ENTRY) {
 		auto new_entry = value->Cast<TableCatalogEntry>().TryGetDuckTableEntry();
 		if (new_entry) {
-			auto &new_storage = new_entry->GetStorage();
-			auto lstorage = LocalStorage::Get(*transaction.context, new_storage.db).GetStorage(new_storage);
-			if (lstorage) {
-				lstorage->table_entry = new_entry;
-			}
+			LocalStorage::Get(*transaction.context, new_entry->GetStorage().db).SetTableEntry(*new_entry);
 		}
 	}
 

@@ -247,9 +247,9 @@ public:
 	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state);
 	//! The column rewrite an ADD COLUMN or ALTER TYPE left to its caller, if it is not finished yet
 	optional_ptr<ColumnRewrite> GetColumnRewrite();
-	//! Takes over the rewritten column, and the transaction-local rows, once every row group is rewritten
+	//! Installs the rewritten column, once every row group of the column rewrite is rewritten
 	void FinishColumnRewrite(ClientContext &context);
-	//! Gives back the blocks of a column whose table version is not installed, and restores the parent if unfinished
+	//! Gives up on an unfinished column rewrite: gives back its blocks and restores the parent
 	void AbortColumnRewrite();
 	//! Gives back the blocks of the column this table version wrote, when its ALTER fails or is rolled back
 	void RollbackWrittenColumn();

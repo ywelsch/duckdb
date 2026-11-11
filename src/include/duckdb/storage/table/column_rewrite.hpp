@@ -26,6 +26,7 @@ class RowGroup;
 class RowGroupCollection;
 class RowGroupSegmentTree;
 class StorageLockKey;
+enum class DataTableVersion;
 
 //! Builds the collection of an ADD COLUMN or ALTER TYPE row group by row group, from several threads at once
 class RowGroupCollectionAlter {
@@ -73,7 +74,7 @@ private:
 //! The column an ADD COLUMN or ALTER TYPE computes for a new table version, see DataTable::GetColumnRewrite
 class ColumnRewrite {
 public:
-	ColumnRewrite(DataTable &parent, unique_ptr<StorageLockKey> read_lock);
+	ColumnRewrite(DataTable &parent, DataTableVersion previous_version, unique_ptr<StorageLockKey> read_lock);
 	~ColumnRewrite();
 
 	//! The number of row groups to rewrite
@@ -85,6 +86,8 @@ public:
 
 	//! The table version the column is rewritten from
 	DataTable &parent;
+	//! The version of the parent before the ALTER marked it altered
+	DataTableVersion previous_version;
 	//! Keeps the parent from reverting appends while its row groups are read
 	unique_ptr<StorageLockKey> read_lock;
 	//! For ALTER TYPE, the column of the transaction-local rows that the new column replaces
