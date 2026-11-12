@@ -1500,8 +1500,7 @@ private:
 	idx_t merge_rows;
 };
 
-void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkpoint_state, VacuumState &state,
-                                               optional_idx checkpoint_row_group_count) {
+void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkpoint_state, VacuumState &state) {
 	auto options = checkpoint_state.writer.GetCheckpointOptions();
 	// currently we can only vacuum deletes if we are doing a full checkpoint
 	state.can_vacuum_deletes = options.type != CheckpointType::CONCURRENT_CHECKPOINT;
@@ -1520,13 +1519,6 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	auto num_row_groups = checkpoint_state.SegmentCount();
 	state.row_group_counts.reserve(num_row_groups);
 
-	if (checkpoint_row_group_count.IsValid() && checkpoint_row_group_count.GetIndex() > num_row_groups) {
-		// we have row groups that were concurrently appended to this collection
-		// don't vacuum - otherwise we can move row groups which could cause committed row-ids to be moved around
-		// while transactions are still processing / depending on them being stable (during e.g. commit)
-		state.can_vacuum_deletes = false;
-		return;
-	}
 	bool legacy_vacuum_with_stable_row_ids =
 	    !checkpoint_state.writer.CanPersistRowIdGaps() && !state.can_change_row_ids;
 	// RowIdsChanged condition: legacy storage cannot persist rowid gaps. If we are allowed to change rowids,
@@ -1785,7 +1777,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups, checkpointed_row_group_count);
 
 	auto &vacuum_state = checkpoint_state.vacuum_state;
-	InitializeVacuumState(checkpoint_state, vacuum_state, writer.GetRowGroupCount());
+	InitializeVacuumState(checkpoint_state, vacuum_state);
 
 	auto &transaction_manager = DuckTransactionManager::Get(GetAttached());
 	auto lowest_visibility_bound = transaction_manager.LowestVisibilityBound();

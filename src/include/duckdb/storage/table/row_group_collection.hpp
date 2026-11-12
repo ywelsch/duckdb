@@ -181,8 +181,7 @@ public:
 	GetVacuumIndexStrategy(AttachedDatabase &attached,
 	                       optional_ptr<vector<shared_ptr<IndexEntry>>> remap_indexes = nullptr) const;
 
-	void InitializeVacuumState(CollectionCheckpointState &checkpoint_state, VacuumState &state,
-	                           optional_idx checkpoint_row_group_count);
+	void InitializeVacuumState(CollectionCheckpointState &checkpoint_state, VacuumState &state);
 	bool ScheduleVacuumTasks(CollectionCheckpointState &checkpoint_state, VacuumState &state, idx_t segment_idx,
 	                         bool schedule_vacuum);
 	unique_ptr<CheckpointTask> GetCheckpointTask(CollectionCheckpointState &checkpoint_state, idx_t segment_idx);
