@@ -33,6 +33,7 @@ TableDataWriter::TableDataWriter(TableCatalogEntry &table_p, Context &context_p)
 		require_legacy_start_row = true;
 	}
 	can_persist_rowid_gaps = storage_compatibility.CanPersistRowIdGaps();
+	can_persist_trailing_rowid_gaps = storage_compatibility.CanPersistTrailingRowIdGaps();
 }
 
 TableDataWriter::~TableDataWriter() {
@@ -119,6 +120,7 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 	MetaBlockPointer pointer;
 	idx_t total_rows;
 	idx_t next_row_id;
+	auto trailing_next_row_id = this->next_row_id;
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(GetDatabase());
 	if (!existing_pointer.IsValid()) {
 		auto supports_per_column_writes = collection.SupportsPerColumnWrites();
@@ -151,6 +153,9 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 			row_group_serializer.Begin();
 			RowGroup::Serialize(row_group_pointer, row_group_serializer, supports_per_column_writes);
 			row_group_serializer.End();
+		}
+		if (trailing_next_row_id.IsValid()) {
+			next_row_id = MaxValue<idx_t>(next_row_id, trailing_next_row_id.GetIndex());
 		}
 		table_data_writer.SetWrittenPointers(nullptr);
 		collection.FinalizeCheckpoint(pointer, written_pointers);

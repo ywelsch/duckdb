@@ -75,6 +75,8 @@ struct CollectionCheckpointSnapshot {
 	idx_t segment_count = 0;
 	//! The row group count recorded by the first append that saw this checkpoint, if any
 	optional_idx row_group_count;
+	//! The row id the first append after the checkpointed row groups gets
+	idx_t next_row_id = 0;
 };
 
 //! The rewritten row groups, installed by InstallCheckpoint

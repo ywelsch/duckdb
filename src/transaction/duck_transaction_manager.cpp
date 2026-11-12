@@ -22,6 +22,7 @@
 #include "duckdb/storage/checkpoint/checkpoint_options.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/storage_compatibility.hpp"
 
 namespace duckdb {
 
@@ -281,6 +282,14 @@ unique_ptr<StorageLockKey> DuckTransactionManager::SharedVacuumLock() {
 
 unique_ptr<StorageLockKey> DuckTransactionManager::TryGetVacuumLock() {
 	return vacuum_lock.TryGetExclusiveLock();
+}
+
+bool DuckTransactionManager::InsertRequiresVacuumLock() {
+	// an index rebuild scans the rows appended during the checkpoint as well
+	if (db.GetVacuumRebuildIndexThreshold() > 0) {
+		return true;
+	}
+	return !StorageCompatibility::FromDatabase(db).CanPersistTrailingRowIdGaps();
 }
 
 transaction_t DuckTransactionManager::GetCommitTimestamp() {

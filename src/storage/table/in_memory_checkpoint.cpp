@@ -37,9 +37,12 @@ void InMemoryCheckpointer::CreateCheckpoint() {
 			// a checkpoint instead of a WAL write already holds the commit lock
 			commit_lock = storage_manager.GetCommitLock();
 		}
-		if (options.type == CheckpointType::FULL_CHECKPOINT &&
+		if (options.type != CheckpointType::CONCURRENT_CHECKPOINT &&
 		    transaction_manager.GetLastCommit() >= transaction_manager.LowestVisibilityBound()) {
-			// an active snapshot still needs state a full checkpoint would vacuum away
+			// an active snapshot still needs state a vacuuming checkpoint would vacuum away
+			if (options.type == CheckpointType::VACUUM_ONLY) {
+				return;
+			}
 			options.type = CheckpointType::CONCURRENT_CHECKPOINT;
 		}
 		active_checkpoint.Begin(options);

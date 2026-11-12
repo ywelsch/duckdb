@@ -215,6 +215,27 @@ public:
 		return nodes[GetSegmentIndex(l, row_number)].get();
 	}
 
+	//! Gets a pointer to the first segment that ends after the given row, if there is any
+	optional_ptr<SegmentNode<T>> GetSegmentEndingAfter(idx_t row_number) const {
+		auto l = Lock();
+		while (nodes.empty() || (row_number >= nodes.back()->GetRowEnd())) {
+			if (!LoadNextSegment(l)) {
+				break;
+			}
+		}
+		idx_t lower = 0;
+		idx_t upper = nodes.size();
+		while (lower < upper) {
+			idx_t index = lower + (upper - lower) / 2;
+			if (row_number >= nodes[index]->GetRowEnd()) {
+				lower = index + 1;
+			} else {
+				upper = index;
+			}
+		}
+		return lower == nodes.size() ? nullptr : nodes[lower].get();
+	}
+
 	void AppendSegment(shared_ptr<T> segment) {
 		auto l = Lock();
 		AppendSegment(l, std::move(segment));

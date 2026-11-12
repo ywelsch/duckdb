@@ -56,13 +56,14 @@ SELECT rowid, i, v, added FROM rowid_gap_alter.t WHERE i IN (2047, 4096) ORDER B
 2047	2047	2047	7
 2048	4096	4096	7
 
+# The insert continues past the row ids that were in use before the rewrite.
 statement ok
 INSERT INTO rowid_gap_alter.t VALUES (999999, 9999990, 7);
 
 query II
 SELECT rowid, i FROM rowid_gap_alter.t WHERE i = 999999;
 ----
-4096	999999
+6144	999999
 
 statement ok
 CREATE UNIQUE INDEX idx_i_after_alter ON rowid_gap_alter.t(i);
@@ -81,7 +82,7 @@ SELECT rowid, i, v, added FROM rowid_gap_alter.t WHERE i IN (2047, 4096, 999999)
 ----
 2047	2047	2047	7
 2048	4096	4096	7
-4096	999999	9999990	7
+6144	999999	9999990	7
 
 query I
 SELECT count(*) FROM rowid_gap_alter.t WHERE rowid >= 2048 AND rowid < 4096;

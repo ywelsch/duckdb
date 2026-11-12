@@ -299,7 +299,7 @@ void RowGroupCollection::Verify() {
 		current_rowid_end = entry.GetRowStart() + row_group.count;
 	}
 	D_ASSERT(current_total_rows == total_rows.load());
-	D_ASSERT(row_groups->GetBaseRowId() + next_row_id.load() == current_rowid_end);
+	D_ASSERT(row_groups->GetBaseRowId() + next_row_id.load() >= current_rowid_end);
 #endif
 }
 
@@ -653,8 +653,12 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 	// Otherwise we evaluate the row_group_append_mode
 	if (!needs_new_row_group) {
 		auto last_row_group = state.row_groups->GetLastSegment(l);
-		D_ASSERT(last_row_group->GetRowEnd() == state.row_groups->GetBaseRowId() + next_row_id);
-		if (info->GetIndexes().Empty() || GetVacuumIndexStrategy(GetAttached()) != VacuumIndexStrategy::KEEP_ROW_IDS) {
+		D_ASSERT(last_row_group->GetRowEnd() <= state.row_groups->GetBaseRowId() + next_row_id);
+		if (last_row_group->GetRowEnd() != state.row_groups->GetBaseRowId() + next_row_id) {
+			// the row ids behind the last row group were used before: continue past them
+			needs_new_row_group = true;
+		} else if (info->GetIndexes().Empty() ||
+		           GetVacuumIndexStrategy(GetAttached()) != VacuumIndexStrategy::KEEP_ROW_IDS) {
 			// Honor SUGGEST_NEW if vacuum can compact the table later, either because there are no indexes or because
 			// the existing indexes can be rebuilt or remapped after vacuuming.
 			needs_new_row_group = row_group_append_mode == RowGroupAppendMode::SUGGEST_NEW;
@@ -850,21 +854,17 @@ void RowGroupCollection::RevertFailedAppend(TableAppendState &state) {
 
 void RowGroupCollection::CleanupAppend(VisibilityBound lowest_visibility_bound, idx_t start, idx_t count) {
 	auto row_groups = GetRowGroups();
-	auto row_group = row_groups->GetSegment(start);
-	D_ASSERT(row_group);
-	idx_t current_row = start;
-	idx_t remaining = count;
-	while (true) {
+	// a vacuuming checkpoint may have replaced row groups of the append: clean up what is left of its row ids
+	idx_t end = start + count;
+	auto row_group = row_groups->GetSegmentEndingAfter(start);
+	while (row_group && row_group->GetRowStart() < end) {
 		auto &current_row_group = row_group->GetNode();
-		idx_t start_in_row_group = current_row - row_group->GetRowStart();
-		idx_t append_count = MinValue<idx_t>(current_row_group.count - start_in_row_group, remaining);
-
-		current_row_group.CleanupAppend(lowest_visibility_bound, start_in_row_group, append_count);
-
-		current_row += append_count;
-		remaining -= append_count;
-		if (remaining == 0) {
-			break;
+		idx_t row_group_start = row_group->GetRowStart();
+		idx_t start_in_row_group = MaxValue<idx_t>(start, row_group_start) - row_group_start;
+		idx_t end_in_row_group = MinValue<idx_t>(end - row_group_start, current_row_group.count);
+		if (end_in_row_group > start_in_row_group) {
+			current_row_group.CleanupAppend(lowest_visibility_bound, start_in_row_group,
+			                                end_in_row_group - start_in_row_group);
 		}
 		row_group = row_groups->GetNextSegment(*row_group);
 	}
@@ -1757,6 +1757,13 @@ CollectionCheckpointSnapshot RowGroupCollection::SnapshotForCheckpoint(TableData
 	snapshot.segment_count = snapshot.row_groups->GetSegmentCount();
 	snapshot.row_group_count = info->CheckpointRowGroupCount(writer.GetCheckpointOptions());
 	writer.SetRowGroupCount(snapshot.row_group_count);
+	snapshot.next_row_id = next_row_id.load();
+	if (snapshot.row_group_count.IsValid() && snapshot.row_group_count.GetIndex() < snapshot.segment_count) {
+		// appends that saw the checkpoint started a row group at that row id
+		auto appended_index = UnsafeNumericCast<int64_t>(snapshot.row_group_count.GetIndex());
+		auto appended = snapshot.row_groups->GetSegmentByIndex(appended_index);
+		snapshot.next_row_id = appended->GetRowStart() - snapshot.row_groups->GetBaseRowId();
+	}
 	return snapshot;
 }
 
@@ -1861,6 +1868,9 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 				checkpoint_total_rows += count;
 				checkpoint_next_row_id =
 				    MaxValue<idx_t>(checkpoint_next_row_id, entry->GetRowStart() + count - base_row_id);
+			}
+			if (writer.CanPersistTrailingRowIdGaps()) {
+				checkpoint_next_row_id = MaxValue<idx_t>(checkpoint_next_row_id, snapshot.next_row_id);
 			}
 			writer.WriteUnchangedTable(metadata_pointer, metadata_pointers, checkpoint_total_rows,
 			                           checkpoint_next_row_id);
@@ -2132,6 +2142,12 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	// Flush before installing row groups, since flushing changes their segment locations.
 	if (!writer.CanDeferPublication()) {
 		writer.FlushPartialBlocks();
+	}
+
+	if (writer.CanPersistTrailingRowIdGaps()) {
+		// rows appended since the snapshot keep their row ids, so the next row id never moves back
+		new_next_row_id = MaxValue<idx_t>(new_next_row_id, snapshot.next_row_id);
+		writer.SetNextRowId(new_next_row_id);
 	}
 
 	CollectionCheckpointResult result;

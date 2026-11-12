@@ -71,6 +71,10 @@ bool StorageCompatibility::CanPersistRowIdGaps() const {
 	return Compare(StorageVersion::V2_0_0);
 }
 
+bool StorageCompatibility::CanPersistTrailingRowIdGaps() const {
+	return Compare(StorageVersion::V2_1_0);
+}
+
 bool StorageCompatibility::CompareVersionString(const string &property_version) const {
 	auto property_version_val = GetSerializationVersionDeprecated(property_version.c_str());
 	auto deprecated_serialization_version = GetSerializationVersionDeprecated(duckdb_version.c_str());

@@ -80,6 +80,8 @@ public:
 	unique_ptr<StorageLockKey> TryUpgradeCheckpointLock(StorageLockKey &lock);
 	unique_ptr<StorageLockKey> SharedVacuumLock();
 	unique_ptr<StorageLockKey> TryGetVacuumLock();
+	//! Whether a transaction that inserts has to exclude vacuuming checkpoints
+	bool InsertRequiresVacuumLock();
 
 	//! Returns the current version of the catalog (incremented whenever anything changes, not stored between restarts)
 	DUCKDB_API idx_t GetCatalogVersion(Transaction &transaction);

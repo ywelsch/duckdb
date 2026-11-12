@@ -79,6 +79,13 @@ public:
 	bool CanPersistRowIdGaps() const {
 		return can_persist_rowid_gaps;
 	}
+	bool CanPersistTrailingRowIdGaps() const {
+		return can_persist_trailing_rowid_gaps;
+	}
+	//! Sets a next row id past the end of the last row group
+	void SetNextRowId(idx_t next_row_id_p) {
+		next_row_id = next_row_id_p;
+	}
 	void SetRowIdsChanged() {
 		row_ids_changed = true;
 	}
@@ -101,6 +108,8 @@ protected:
 	bool rebuild_indexes = false;
 	bool require_legacy_start_row = false;
 	bool can_persist_rowid_gaps = false;
+	bool can_persist_trailing_rowid_gaps = false;
+	optional_idx next_row_id;
 	atomic<bool> row_ids_changed {false};
 };
 

@@ -28,6 +28,8 @@ public:
 	StorageVersion GetStorageVersionCompatibility() const;
 	//! Whether this storage version can persist rowid gaps (i.e. serialize next_row_id), added in v2.0.0.
 	bool CanPersistRowIdGaps() const;
+	//! Whether readers of this storage version handle a next_row_id past the end of the last row group
+	bool CanPersistTrailingRowIdGaps() const;
 
 public:
 	//! The user provided version
