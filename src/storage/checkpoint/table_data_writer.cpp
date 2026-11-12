@@ -120,7 +120,6 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 	MetaBlockPointer pointer;
 	idx_t total_rows;
 	idx_t next_row_id;
-	auto trailing_next_row_id = this->next_row_id;
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(GetDatabase());
 	if (!existing_pointer.IsValid()) {
 		auto supports_per_column_writes = collection.SupportsPerColumnWrites();
@@ -153,9 +152,6 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 			row_group_serializer.Begin();
 			RowGroup::Serialize(row_group_pointer, row_group_serializer, supports_per_column_writes);
 			row_group_serializer.End();
-		}
-		if (trailing_next_row_id.IsValid()) {
-			next_row_id = MaxValue<idx_t>(next_row_id, trailing_next_row_id.GetIndex());
 		}
 		table_data_writer.SetWrittenPointers(nullptr);
 		collection.FinalizeCheckpoint(pointer, written_pointers);
@@ -208,6 +204,8 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 		}
 	}
 
+	// rows appended since the table was snapshotted keep their row ids
+	next_row_id = MaxValue<idx_t>(next_row_id, min_next_row_id);
 	D_ASSERT(next_row_id >= total_rows);
 	// Now begin the metadata as a unit
 	// Pointer to the table itself goes to the metadata stream.

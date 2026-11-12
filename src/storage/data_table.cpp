@@ -85,7 +85,8 @@ DataTable::DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_m
 		this->row_groups->Initialize(*data);
 		row_groups->SetRowGroupAppendMode(RowGroupAppendMode::SUGGEST_NEW);
 	} else {
-		this->row_groups->InitializeEmpty();
+		// a table without row groups still continues behind the row ids that were used before
+		this->row_groups->InitializeEmpty(data ? data->next_row_id : 0);
 		D_ASSERT(row_groups->GetTotalRows() == 0);
 	}
 	row_groups->Verify();

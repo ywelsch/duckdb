@@ -242,8 +242,9 @@ void RowGroupCollection::SetRowGroupAppendMode(RowGroupAppendMode mode) {
 	}
 }
 
-void RowGroupCollection::InitializeEmpty() {
+void RowGroupCollection::InitializeEmpty(idx_t next_row_id_p) {
 	stats.InitializeEmpty(types);
+	next_row_id = next_row_id_p;
 }
 
 ColumnDataType GetColumnDataType(idx_t row_start) {
@@ -1757,12 +1758,16 @@ CollectionCheckpointSnapshot RowGroupCollection::SnapshotForCheckpoint(TableData
 	snapshot.segment_count = snapshot.row_groups->GetSegmentCount();
 	snapshot.row_group_count = info->CheckpointRowGroupCount(writer.GetCheckpointOptions());
 	writer.SetRowGroupCount(snapshot.row_group_count);
-	snapshot.next_row_id = next_row_id.load();
-	if (snapshot.row_group_count.IsValid() && snapshot.row_group_count.GetIndex() < snapshot.segment_count) {
-		// appends that saw the checkpoint started a row group at that row id
-		auto appended_index = UnsafeNumericCast<int64_t>(snapshot.row_group_count.GetIndex());
-		auto appended = snapshot.row_groups->GetSegmentByIndex(appended_index);
-		snapshot.next_row_id = appended->GetRowStart() - snapshot.row_groups->GetBaseRowId();
+	if (writer.CanPersistTrailingRowIdGaps()) {
+		// rows appended from here on keep their row ids, so the next row id never moves back
+		snapshot.next_row_id = next_row_id.load();
+		if (snapshot.row_group_count.IsValid() && snapshot.row_group_count.GetIndex() < snapshot.segment_count) {
+			// appends that saw the checkpoint started a row group at that row id
+			auto appended_index = UnsafeNumericCast<int64_t>(snapshot.row_group_count.GetIndex());
+			auto appended = snapshot.row_groups->GetSegmentByIndex(appended_index);
+			snapshot.next_row_id = appended->GetRowStart() - snapshot.row_groups->GetBaseRowId();
+		}
+		writer.SetMinNextRowId(snapshot.next_row_id);
 	}
 	return snapshot;
 }
@@ -1868,9 +1873,6 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 				checkpoint_total_rows += count;
 				checkpoint_next_row_id =
 				    MaxValue<idx_t>(checkpoint_next_row_id, entry->GetRowStart() + count - base_row_id);
-			}
-			if (writer.CanPersistTrailingRowIdGaps()) {
-				checkpoint_next_row_id = MaxValue<idx_t>(checkpoint_next_row_id, snapshot.next_row_id);
 			}
 			writer.WriteUnchangedTable(metadata_pointer, metadata_pointers, checkpoint_total_rows,
 			                           checkpoint_next_row_id);
@@ -2144,16 +2146,10 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 		writer.FlushPartialBlocks();
 	}
 
-	if (writer.CanPersistTrailingRowIdGaps()) {
-		// rows appended since the snapshot keep their row ids, so the next row id never moves back
-		new_next_row_id = MaxValue<idx_t>(new_next_row_id, snapshot.next_row_id);
-		writer.SetNextRowId(new_next_row_id);
-	}
-
 	CollectionCheckpointResult result;
 	result.row_groups = std::move(new_row_groups);
 	result.total_rows = new_total_rows;
-	result.next_row_id = new_next_row_id;
+	result.next_row_id = MaxValue<idx_t>(new_next_row_id, snapshot.next_row_id);
 	result.checkpointed_row_group_count = checkpointed_row_group_count;
 	return result;
 }

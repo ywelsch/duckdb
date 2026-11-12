@@ -1,0 +1,240 @@
+# name: test/sql/storage/vacuum_checkpoint_concurrent_insert_mixed.test_slow
+# description: Bulk inserts, a failing commit and an insert that skips conflicts while a vacuuming checkpoint remaps a primary key index
+# group: [storage]
+
+load {TEST_DIR}/vacuum_checkpoint_concurrent_insert_mixed.db readwrite v2.1.0
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+CREATE TABLE test (i INTEGER PRIMARY KEY, s VARCHAR);
+
+# four row groups
+statement ok
+INSERT INTO test SELECT i, 'base' FROM range(400000) t(i);
+
+statement ok
+CHECKPOINT
+
+# the last two row groups are deleted completely, the first two keep half of their rows
+statement ok
+DELETE FROM test WHERE i >= 245760 OR i % 2 = 0
+
+# the timing table lives in a database the checkpoint does not write
+statement ok
+ATTACH ':memory:' AS mem
+
+statement ok
+CREATE TABLE mem.timing (who VARCHAR, t TIMESTAMP);
+
+# the checkpoint sleeps for four seconds after it became active, before it writes any table, and again for six
+# seconds after it vacuumed the row groups, before it replaces them
+statement ok
+SET debug_checkpoint_sleep_ms=4000
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=6000
+
+concurrentloop threadid 0 4
+
+sleep 1000 millisecond
+
+onlyif threadid=0
+statement ok
+INSERT INTO mem.timing VALUES ('checkpoint start', now())
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+onlyif threadid=0
+statement ok
+INSERT INTO mem.timing VALUES ('checkpoint end', now())
+
+sleep 2000 millisecond
+
+# during the first sleep: a transaction whose commit fails later, the conflicting key is in its second chunk
+onlyif threadid=2
+statement ok
+BEGIN
+
+onlyif threadid=2
+statement ok
+INSERT INTO test SELECT CASE WHEN i = 2500 THEN -5 ELSE -100000 - i END, 'loser' FROM range(3000) t(i)
+
+sleep 500 millisecond
+
+# during the first sleep: a single row and more than a row group
+onlyif threadid=1
+statement ok
+INSERT INTO test VALUES (-5, 'winner')
+
+onlyif threadid=1
+statement ok
+INSERT INTO test SELECT 1000000 + i, 'bulk' FROM range(130000) t(i)
+
+onlyif threadid=1
+statement ok
+INSERT INTO mem.timing VALUES ('first', now())
+
+sleep 4000 millisecond
+
+# during the pause: after the row groups were vacuumed, before they are replaced
+onlyif threadid=2
+statement error
+COMMIT
+----
+<REGEX>:.*PRIMARY KEY or UNIQUE constraint violation.*
+
+onlyif threadid=2
+statement ok
+INSERT INTO mem.timing VALUES ('loser', now())
+
+onlyif threadid=3
+statement ok
+INSERT INTO test VALUES (-2, 'second')
+
+onlyif threadid=3
+statement ok
+INSERT INTO mem.timing VALUES ('second', now())
+
+# conflicts with a row the checkpoint moved and with a row inserted while it ran
+# the insert looks for the conflicts with an index scan, which waits for the checkpoint
+onlyif threadid=3
+statement ok
+INSERT INTO test VALUES (1, 'ignored'), (-5, 'ignored'), (-6, 'third') ON CONFLICT DO NOTHING
+
+endloop
+
+# the inserts committed while the checkpoint was running
+query I
+SELECT COUNT(*) FROM mem.timing f, mem.timing s WHERE f.who = 'first' AND s.who = 'checkpoint start' AND f.t > s.t AND f.t < s.t + INTERVAL 4 SECOND
+----
+1
+
+query I
+SELECT COUNT(*) FROM mem.timing w, mem.timing s, mem.timing e WHERE w.who IN ('second', 'loser') AND s.who = 'checkpoint start' AND e.who = 'checkpoint end' AND w.t > s.t + INTERVAL 4 SECOND AND w.t < e.t - INTERVAL 2 SECOND
+----
+2
+
+statement ok
+SET debug_checkpoint_sleep_ms=0
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) = COUNT(DISTINCT rowid) FROM test
+----
+252883	153549429387	true
+
+# the inserts keep the row ids they got behind the row groups the checkpoint dropped
+query III
+SELECT rowid, i, s FROM test WHERE i < 0 ORDER BY rowid
+----
+400000	-5	winner
+530001	-2	second
+530002	-6	third
+
+query III
+SELECT min(rowid), max(rowid), count(*) FROM test WHERE s = 'bulk'
+----
+400001	530000	130000
+
+query I
+SELECT max(rowid) FROM test WHERE s = 'base'
+----
+122879
+
+# changes that address the inserted rows and a vacuumed row by row id
+statement ok
+DELETE FROM test WHERE s = 'winner'
+
+statement ok
+DELETE FROM test WHERE s = 'bulk' AND i % 2 = 0
+
+statement ok
+UPDATE test SET s = 'updated' WHERE s = 'second'
+
+statement ok
+DELETE FROM test WHERE i = 1
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) = COUNT(DISTINCT rowid) FROM test
+----
+187881	84324494391	true
+
+# WAL replay of the inserts, the deletes and the update
+restart
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) = COUNT(DISTINCT rowid) FROM test
+----
+187881	84324494391	true
+
+query III
+SELECT rowid, i, s FROM test WHERE i < 3 ORDER BY rowid
+----
+530001	-2	updated
+530002	-6	third
+
+query III
+SELECT min(rowid), max(rowid), count(*) FROM test WHERE s = 'bulk'
+----
+400002	530000	65000
+
+statement ok
+INSERT INTO test VALUES (-5, 'again')
+
+query II
+SELECT rowid, s FROM test WHERE i = -5
+----
+530003	again
+
+statement ok
+CHECKPOINT
+
+restart
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) = COUNT(DISTINCT rowid) FROM test
+----
+187882	84324494386	true
+
+# the index finds rows the checkpoint moved and rows inserted while it ran
+query II
+SELECT i, s FROM test WHERE i = 245759
+----
+245759	base
+
+query II
+SELECT i, s FROM test WHERE i = 1000001
+----
+1000001	bulk
+
+query I
+SELECT COUNT(*) FROM test WHERE i = 1000000 OR i = -100000
+----
+0
+
+statement error
+INSERT INTO test VALUES (245759, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+statement error
+INSERT INTO test VALUES (1129999, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+statement error
+INSERT INTO test VALUES (-6, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+statement ok
+INSERT INTO test VALUES (-100000, 'again'), (1000000, 'again')

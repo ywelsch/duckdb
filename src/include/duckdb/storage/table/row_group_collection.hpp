@@ -104,7 +104,7 @@ public:
 
 	void Initialize(PersistentCollectionData &data);
 	void Initialize(PersistentTableData &data);
-	void InitializeEmpty();
+	void InitializeEmpty(idx_t next_row_id = 0);
 	void FinalizeCheckpoint(MetaBlockPointer pointer, const vector<MetaBlockPointer> &existing_pointers);
 
 	bool IsEmpty() const;

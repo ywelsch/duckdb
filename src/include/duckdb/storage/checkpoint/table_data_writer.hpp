@@ -82,9 +82,9 @@ public:
 	bool CanPersistTrailingRowIdGaps() const {
 		return can_persist_trailing_rowid_gaps;
 	}
-	//! Sets a next row id past the end of the last row group
-	void SetNextRowId(idx_t next_row_id_p) {
-		next_row_id = next_row_id_p;
+	//! Sets the row id that the next row id of the table does not move back from
+	void SetMinNextRowId(idx_t next_row_id) {
+		min_next_row_id = next_row_id;
 	}
 	void SetRowIdsChanged() {
 		row_ids_changed = true;
@@ -109,7 +109,7 @@ protected:
 	bool require_legacy_start_row = false;
 	bool can_persist_rowid_gaps = false;
 	bool can_persist_trailing_rowid_gaps = false;
-	optional_idx next_row_id;
+	idx_t min_next_row_id = 0;
 	atomic<bool> row_ids_changed {false};
 };
 
