@@ -152,10 +152,11 @@ void FixedSizeAllocator::VisitBlockIds(BlockIdVisitor &visitor) const {
 	}
 }
 
-void FixedSizeAllocator::DisownBlocks() {
+void FixedSizeAllocator::DisownBuffers() {
 	for (auto &buffer : buffers) {
-		buffer.second->block_pointer = BlockPointer();
+		buffer.second->DisownBlock();
 	}
+	Reset();
 }
 
 idx_t FixedSizeAllocator::GetInMemorySize() const {
@@ -389,8 +390,9 @@ void FixedSizeAllocator::Init(const FixedSizeAllocatorInfo &info) {
 		// create the FixedSizeBuffer
 		if (info.transient_block_handles) {
 			D_ASSERT(info.transient_block_handles->size() == info.buffer_ids.size());
+			// The storage information keeps its handle, so that a bind that fails after this point can be retried.
 			buffers[buffer_id] = make_shared_ptr<FixedSizeBuffer>(block_manager, segment_count, allocation_size,
-			                                                      std::move((*info.transient_block_handles)[i]));
+			                                                      (*info.transient_block_handles)[i]);
 		} else {
 			buffers[buffer_id] =
 			    make_shared_ptr<FixedSizeBuffer>(block_manager, segment_count, allocation_size, buffer_block_pointer);

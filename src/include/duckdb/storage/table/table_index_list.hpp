@@ -47,7 +47,7 @@ public:
 	//! Visits the on-disk blocks of every index, once per use
 	void VisitBlockIds(BlockIdVisitor &visitor);
 	//! Disowns the on-disk blocks of every index: destroying an index no longer frees them
-	void DisownBlocks();
+	void DisownStorage();
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.
