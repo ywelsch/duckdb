@@ -4,6 +4,7 @@
 #include "duckdb/common/logical_type_info.hpp"
 #include "duckdb/parser/constraint.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/storage/table/column_rewrite.hpp"
 
 namespace duckdb {
 

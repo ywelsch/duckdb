@@ -1,0 +1,41 @@
+# name: test/sql/alter/add_col/test_add_col_concurrent_insert.test_slow
+# description: a row committed while ADD COLUMN scans the table makes the ALTER conflict instead of being lost
+# group: [add_col]
+
+require skip_reload
+
+statement ok
+ATTACH '{TEST_DIR}/test_add_col_concurrent_insert.db' AS db
+
+statement ok
+CREATE TABLE db.t AS SELECT i FROM range(10000000) t(i)
+
+statement ok
+CHECKPOINT db
+
+concurrentloop k 0 2
+
+onlyif k=0
+statement error
+ALTER TABLE db.t ADD COLUMN IF NOT EXISTS c VARCHAR DEFAULT md5(md5(md5(md5(random()::VARCHAR))))
+----
+the table changed while the new column was computed
+
+onlyif k=1
+sleep 500 milliseconds
+
+onlyif k=1
+statement ok
+INSERT INTO db.t VALUES (-1)
+
+endloop
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (i = -1) FROM db.t
+----
+10000001	1
+
+query I
+SELECT COUNT(*) FROM duckdb_columns() WHERE table_name = 't' AND database_name = 'db'
+----
+1

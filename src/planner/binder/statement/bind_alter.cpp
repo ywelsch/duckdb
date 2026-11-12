@@ -17,6 +17,8 @@
 #include "duckdb/planner/operator/logical_create_index.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_alter.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 
 namespace duckdb {
 
@@ -78,6 +80,55 @@ BoundStatement Binder::BindAlterAddIndex(BoundStatement &result, CatalogEntry &e
 	auto alter_table_info = unique_ptr_cast<AlterInfo, AlterTableInfo>(std::move(alter_info));
 	result.plan = table.catalog.BindAlterAddIndex(*this, table, std::move(bound_table.plan),
 	                                              std::move(create_index_info), std::move(alter_table_info));
+	return std::move(result);
+}
+
+//! Whether the ALTER adds a column to a DuckDB table, which the plan computes from a scan of the table
+static bool ComputesAddedColumn(CatalogEntry &entry, AlterInfo &info) {
+	if (info.type != AlterType::ALTER_TABLE || entry.type != CatalogType::TABLE_ENTRY ||
+	    !entry.ParentCatalog().IsDuckCatalog()) {
+		return false;
+	}
+	auto &table_info = info.Cast<AlterTableInfo>();
+	if (table_info.alter_table_type != AlterTableType::ADD_COLUMN) {
+		return false;
+	}
+	// an existing column leaves nothing to compute, the ALTER does nothing or throws
+	auto &add_info = table_info.Cast<AddColumnInfo>();
+	return !entry.Cast<TableCatalogEntry>().ColumnExists(add_info.new_column.GetName());
+}
+
+BoundStatement Binder::BindAlterAddColumn(BoundStatement &result, CatalogEntry &entry,
+                                          unique_ptr<AlterInfo> alter_info) {
+	auto &table = entry.Cast<TableCatalogEntry>();
+	auto &add_info = alter_info->Cast<AddColumnInfo>();
+
+	// scan the row id of every row slot of the table
+	TableDescription table_description(add_info.GetQualifiedName());
+	auto table_ref = make_uniq<BaseTableRef>(table_description);
+	auto bound_table = Bind(*table_ref);
+	if (bound_table.plan->type != LogicalOperatorType::LOGICAL_GET) {
+		throw BinderException("can only add a column to a base table");
+	}
+	auto &get = bound_table.plan->Cast<LogicalGet>();
+	get.bind_data->Cast<TableScanBindData>().is_alter_scan = true;
+	get.ClearColumnIds();
+	auto row_id_index = get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
+
+	// the projection computes the DEFAULT value of the new column for each row, NULL without one
+	vector<unique_ptr<Expression>> bound_defaults;
+	BindDefaultValue(add_info.new_column, bound_defaults, table.ParentCatalog().GetName().GetIdentifierName(),
+	                 table.ParentSchema().GetSchemaPath());
+	vector<unique_ptr<Expression>> expressions;
+	expressions.push_back(std::move(bound_defaults.back()));
+	expressions.push_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::ROW_TYPE, ColumnBinding(get.table_index, row_id_index)));
+	auto projection = make_uniq<LogicalProjection>(GenerateTableIndex(), std::move(expressions));
+	projection->children.push_back(std::move(bound_table.plan));
+
+	auto alter = make_uniq<LogicalAlter>(std::move(alter_info));
+	alter->children.push_back(std::move(projection));
+	result.plan = std::move(alter);
 	return std::move(result);
 }
 
@@ -178,6 +229,9 @@ BoundStatement Binder::Bind(AlterStatement &stmt) {
 	properties.RegisterDBModify(catalog, context, stmt.info->GetModifications());
 	stmt.info->SetQualifiedName(entry->ParentSchema().GetQualifiedName(stmt.info->GetQualifiedName().Name()));
 
+	if (ComputesAddedColumn(*entry, *stmt.info)) {
+		return BindAlterAddColumn(result, *entry, std::move(stmt.info));
+	}
 	if (!stmt.info->IsAddUniqueConstraint()) {
 		result.plan = make_uniq<LogicalAlter>(std::move(stmt.info));
 		return result;

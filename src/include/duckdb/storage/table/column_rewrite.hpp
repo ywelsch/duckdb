@@ -9,7 +9,9 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/enums/compression_type.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/types.hpp"
 #include "duckdb/storage/table/segment_tree.hpp"
 
 #include <functional>
@@ -17,6 +19,8 @@
 namespace duckdb {
 class BoundConstraint;
 class ClientContext;
+class ColumnData;
+class ColumnDefinition;
 class ColumnStatistics;
 class DataTable;
 class Expression;
@@ -69,6 +73,49 @@ private:
 	AlterRowGroupFunction alter;
 	vector<unique_ptr<RowGroup>> new_row_groups;
 	vector<shared_ptr<ColumnStatistics>> new_stats;
+};
+
+//! The column of an ADD COLUMN that a scan of the table computed, as one ColumnData per row group of the table
+class ComputedColumn {
+public:
+	ComputedColumn(ClientContext &context, DataTable &table, const ColumnDefinition &new_column);
+	~ComputedColumn();
+
+	idx_t RowGroupCount() const {
+		return nodes.size();
+	}
+	idx_t ColumnIndex() const {
+		return column_idx;
+	}
+	//! The index of the row group that holds the given row, if it is one of the computed row groups
+	optional_idx FindRowGroup(idx_t row) const;
+	idx_t RowGroupStart(idx_t index) const;
+	idx_t RowGroupRowCount(idx_t index) const;
+	//! An empty column to fill with the values of a row group
+	shared_ptr<ColumnData> CreateColumn() const;
+	//! Hands over the filled column of a row group, which is written to disk if the row group is on disk
+	void SetColumn(idx_t index, shared_ptr<ColumnData> column, shared_ptr<ColumnStatistics> stats);
+	//! Builds the collection with the new column on the row groups of source, which must be the ones computed for
+	shared_ptr<RowGroupCollection> Install(RowGroupCollection &source);
+
+private:
+	//! Gives back the blocks the column was written to
+	void Rollback();
+
+private:
+	ClientContext &context;
+	//! The row groups of the table as the scan saw them
+	shared_ptr<RowGroupSegmentTree> source_row_groups;
+	vector<reference<SegmentNode<RowGroup>>> nodes;
+	idx_t total_rows;
+	//! The new collection, until Install hands it out
+	shared_ptr<RowGroupCollection> result;
+	idx_t column_idx;
+	LogicalType type;
+	CompressionType compression;
+	unique_ptr<OptimisticDataWriter> writer;
+	vector<shared_ptr<ColumnData>> columns;
+	vector<shared_ptr<ColumnStatistics>> column_stats;
 };
 
 //! The column an ADD COLUMN or ALTER TYPE computes for a new table version, see DataTable::GetColumnRewrite

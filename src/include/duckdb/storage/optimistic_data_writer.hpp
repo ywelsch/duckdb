@@ -50,7 +50,9 @@ public:
 	//! Prepare writing single columns of the collection's row groups, returns false if they should stay in memory
 	bool PrepareWriteColumn(const RowGroupCollection &collection);
 	//! Write a single column of a row group to disk after PrepareWriteColumn, can be called from several threads
-	void WriteColumn(RowGroup &row_group, idx_t column_idx);
+	shared_ptr<ColumnData> WriteColumn(RowGroup &row_group, idx_t column_idx);
+	//! WriteColumn for a column that the table of this writer does not have yet
+	shared_ptr<ColumnData> WriteColumn(RowGroup &row_group, idx_t column_idx, CompressionType compression);
 	//! Final flush of the optimistic writer - fully flushes the partial block manager
 	void FinalFlush();
 	//! Merge the partially written blocks from one optimistic writer into another

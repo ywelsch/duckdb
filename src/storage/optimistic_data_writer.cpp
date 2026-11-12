@@ -199,14 +199,21 @@ bool OptimisticDataWriter::PrepareWriteColumn(const RowGroupCollection &collecti
 	return PrepareWrite();
 }
 
-void OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
+shared_ptr<ColumnData> OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx) {
+	return WriteColumn(row_group, column_idx, table.Columns()[column_idx].CompressionType());
+}
+
+shared_ptr<ColumnData> OptimisticDataWriter::WriteColumn(RowGroup &row_group, idx_t column_idx,
+                                                         CompressionType compression) {
 	D_ASSERT(partial_manager);
 	vector<CompressionType> compression_types;
 	for (auto &column : table.Columns()) {
 		compression_types.push_back(column.CompressionType());
 	}
+	compression_types.resize(column_idx + 1);
+	compression_types[column_idx] = compression;
 	RowGroupWriteInfo info(*partial_manager, compression_types);
-	row_group.WriteColumnToDisk(info, column_idx);
+	return row_group.WriteColumnToDisk(info, column_idx);
 }
 
 void OptimisticDataWriter::FlushToDisk(OptimisticWriteCollection &collection,

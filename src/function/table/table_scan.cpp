@@ -585,6 +585,9 @@ public:
 			if (bind_data.is_create_index) {
 				storage.CreateIndexScan(l_state.scan_state, output);
 				UpdateScanProgress(l_state, l_state.scan_state);
+			} else if (bind_data.is_alter_scan) {
+				storage.AlterScan(l_state.scan_state, output);
+				UpdateScanProgress(l_state, l_state.scan_state);
 			} else if (read_ahead) {
 				if (!ScanWithReadAhead(context, data_p, l_state, output) &&
 				    data_p.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
@@ -700,7 +703,7 @@ unique_ptr<GlobalTableFunctionState> DuckTableScanInitGlobal(ClientContext &cont
 	g_state->InitializeScanInfo(input);
 	const bool repeatable_percentage_sample =
 	    input.sample_options && input.sample_options->repeatable && input.sample_options->is_percentage;
-	if (!bind_data.is_create_index && !repeatable_percentage_sample) {
+	if (!bind_data.is_create_index && !bind_data.is_alter_scan && !repeatable_percentage_sample) {
 		g_state->read_ahead = CreateTableScanReadAhead(context, storage);
 	}
 	if (!input.CanRemoveFilterColumns()) {
@@ -1151,6 +1154,7 @@ static void TableScanSerialize(Serializer &serializer, const optional_ptr<Functi
 	serializer.WritePropertyWithDefault(105, "result_ids", unsafe_vector<row_t>());
 	serializer.WritePropertyWithDefault<QualifiedName>(
 	    106, "qualified_name", bind_data.table.schema.GetQualifiedName(bind_data.table.name), QualifiedName());
+	serializer.WritePropertyWithDefault<bool>(107, "is_alter_scan", bind_data.is_alter_scan, false);
 }
 
 static unique_ptr<FunctionData> TableScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
@@ -1166,6 +1170,7 @@ static unique_ptr<FunctionData> TableScanDeserialize(Deserializer &deserializer,
 	if (qualified_name.Path().empty()) {
 		qualified_name = QualifiedName(catalog, schema, table);
 	}
+	auto is_alter_scan = deserializer.ReadPropertyWithExplicitDefault<bool>(107, "is_alter_scan", false);
 	auto &catalog_entry = Catalog::GetEntry<TableCatalogEntry>(deserializer.Get<ClientContext &>(), qualified_name);
 	if (catalog_entry.type != CatalogType::TABLE_ENTRY) {
 		throw SerializationException("Cant find table for %s.%s", schema, table);
@@ -1173,6 +1178,7 @@ static unique_ptr<FunctionData> TableScanDeserialize(Deserializer &deserializer,
 	auto result = make_uniq<TableScanBindData>(catalog_entry.Cast<DuckTableEntry>());
 	result->is_index_scan = is_index_scan;
 	result->is_create_index = is_create_index;
+	result->is_alter_scan = is_alter_scan;
 	return std::move(result);
 }
 

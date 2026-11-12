@@ -560,7 +560,10 @@ unique_ptr<RowGroup> RowGroup::AddColumn(RowGroupCollection &new_collection, Col
 		}
 		added_column->FinalizeAppend(nullptr, state);
 	}
+	return AddColumn(new_collection, std::move(added_column));
+}
 
+unique_ptr<RowGroup> RowGroup::AddColumn(RowGroupCollection &new_collection, shared_ptr<ColumnData> added_column) {
 	if (!new_collection.SupportsPerColumnWrites()) {
 		// ensure all columns are loaded, as checkpointing will need to load them anyway, and it's better to fail-fast
 		// in case these don't fit in memory here
@@ -1568,9 +1571,10 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriteInfo &info) const {
 	return std::move(result[0]);
 }
 
-void RowGroup::WriteColumnToDisk(RowGroupWriteInfo &info, idx_t column_idx) {
+shared_ptr<ColumnData> RowGroup::WriteColumnToDisk(RowGroupWriteInfo &info, idx_t column_idx) {
 	RowGroupWriteData write_data;
 	columns[column_idx] = CheckpointColumn(*this, column_idx, info, write_data);
+	return columns[column_idx];
 }
 
 idx_t RowGroup::GetCommittedRowCount() {

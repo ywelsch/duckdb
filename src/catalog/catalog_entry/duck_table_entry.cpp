@@ -626,7 +626,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::AddColumn(ClientContext &context, AddCo
 	}
 	SetAlterDependencies(context, *bound_create_info, info);
 	auto new_storage = make_shared_ptr<DataTable>(context, *storage, info.new_column, *bound_defaults.back(),
-	                                              info.defer_column_rewrite);
+	                                              info.defer_column_rewrite, std::move(info.computed_column));
 	return make_uniq<DuckTableEntry>(catalog, schema, *bound_create_info, new_storage, triggers);
 }
 

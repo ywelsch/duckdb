@@ -209,6 +209,8 @@ public:
 	bool SupportsPerColumnWrites();
 	const vector<LogicalType> &GetTypes() const;
 
+	//! An empty collection with the rows of this one and an added column of the given type
+	shared_ptr<RowGroupCollection> CreateCollectionWithColumn(const LogicalType &type);
 	//! With a writer, the new column of each row group that is on disk is written as soon as it is filled
 	unique_ptr<RowGroupCollectionAlter> AddColumn(ClientContext &context, ColumnDefinition &new_column,
 	                                              Expression &default_value, unique_ptr<OptimisticDataWriter> writer);
@@ -260,6 +262,7 @@ public:
 
 private:
 	friend class RowGroupCollectionAlter;
+	friend class ComputedColumn;
 
 	optional_ptr<SegmentNode<RowGroup>> NextUpdateRowGroup(RowGroupSegmentTree &row_groups, row_t *ids, idx_t &pos,
 	                                                       idx_t count) const;

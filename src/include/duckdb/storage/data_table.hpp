@@ -59,6 +59,7 @@ struct ParallelTableScanState;
 struct TableAppendState;
 class CommitDropState;
 class ColumnRewrite;
+class ComputedColumn;
 
 enum class DataTableVersion {
 	MAIN_TABLE, // this is the newest version of the table - it has not been altered or dropped
@@ -75,7 +76,7 @@ public:
 	          unique_ptr<PersistentTableData> data = nullptr);
 	//! Constructs a DataTable as a delta with a newly added column, which defer_rewrite leaves to the caller
 	DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value,
-	          bool defer_rewrite = false);
+	          bool defer_rewrite = false, shared_ptr<ComputedColumn> computed = nullptr);
 	//! Constructs a DataTable as a delta on an existing data table but with one column removed
 	DataTable(ClientContext &context, DataTable &parent, idx_t removed_column);
 	//! Constructs a DataTable as a delta with one column changed type, which defer_rewrite leaves to the caller
@@ -269,6 +270,8 @@ public:
 
 	//! Scans the next chunk for the CREATE INDEX operator
 	bool CreateIndexScan(TableScanState &state, DataChunk &result);
+	//! Scans every row slot of the row groups, deleted ones included, as an ALTER that computes a column needs
+	bool AlterScan(TableScanState &state, DataChunk &result);
 	//! Initialize constraint verification state
 	unique_ptr<ConstraintState> InitializeConstraintState(TableCatalogEntry &table,
 	                                                      const vector<unique_ptr<BoundConstraint>> &bound_constraints);

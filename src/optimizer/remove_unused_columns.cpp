@@ -998,7 +998,8 @@ void RemoveUnusedColumns::VisitOperator(unique_ptr<LogicalOperator> &op_ref) {
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_COPY_TO_FILE:
-	case LogicalOperatorType::LOGICAL_PIVOT: {
+	case LogicalOperatorType::LOGICAL_PIVOT:
+	case LogicalOperatorType::LOGICAL_ALTER: {
 		everything_referenced = true;
 		break;
 	}

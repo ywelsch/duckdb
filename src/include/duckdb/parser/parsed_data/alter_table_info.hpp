@@ -15,6 +15,7 @@
 
 #include "duckdb/common/identifier.hpp"
 namespace duckdb {
+class ComputedColumn;
 
 enum class AlterForeignKeyType : uint8_t { AFT_ADD = 0, AFT_DELETE = 1 };
 
@@ -201,6 +202,8 @@ struct AddColumnInfo : public AlterTableInfo {
 	bool if_column_not_exists;
 	//! Constraints applied via extra ALTER statements after the column is added
 	AddColumnConstraints add_column_constraints;
+	//! The column a scan of the table computed, which the ALTER installs instead of computing it (not serialized)
+	shared_ptr<ComputedColumn> computed_column;
 
 public:
 	unique_ptr<AlterInfo> Copy() const override;

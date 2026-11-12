@@ -306,6 +306,8 @@ public:
 	static void VerifyConstraintCheckModeStorageVersion(const Constraint &constraint, Catalog &catalog, bool temporary);
 
 	BoundStatement BindAlterAddIndex(BoundStatement &result, CatalogEntry &entry, unique_ptr<AlterInfo> alter_info);
+	//! Plans an ADD COLUMN as a scan of the table whose projection computes the column of every row slot
+	BoundStatement BindAlterAddColumn(BoundStatement &result, CatalogEntry &entry, unique_ptr<AlterInfo> alter_info);
 
 	void SetCatalogLookupCallback(catalog_entry_callback_t callback);
 	void BindCreateViewInfo(CreateViewInfo &base);

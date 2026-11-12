@@ -93,7 +93,7 @@ DataTable::DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_m
 }
 
 DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value,
-                     bool defer_rewrite)
+                     bool defer_rewrite, shared_ptr<ComputedColumn> computed)
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
 	// add the column definitions from this DataTable
 	for (auto &column_def : parent.column_definitions) {
@@ -105,6 +105,32 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 
 	// prevent any new tuples from being added to the parent
 	unique_lock<mutex> parent_lock(parent.append_lock);
+
+	if (computed) {
+		// a scan of the table computed the column, which installs on the row groups if nothing changed them since
+		row_groups = computed->Install(*parent.row_groups);
+		written_column = row_groups->GetTypes().size() - 1;
+		try {
+			// the transaction-local rows are not part of the scan, their column is computed here
+			unique_ptr<OptimisticDataWriter> local_writer;
+			auto local_row_groups = local_storage.PrepareAlter(parent, *this, local_writer);
+			shared_ptr<RowGroupCollection> new_local_row_groups;
+			if (local_row_groups) {
+				auto local_alter =
+				    local_row_groups->AddColumn(context, new_column, default_value, std::move(local_writer));
+				for (idx_t index = 0; index < local_alter->RowGroupCount(); index++) {
+					local_alter->AlterRowGroup(index);
+				}
+				new_local_row_groups = local_alter->Finish();
+			}
+			local_storage.AlterStorage(parent, *this, std::move(new_local_row_groups), optional_idx());
+		} catch (...) {
+			RollbackWrittenColumn();
+			throw;
+		}
+		parent.version = DataTableVersion::ALTERED;
+		return;
+	}
 
 	column_rewrite = make_uniq<ColumnRewrite>(parent, parent.version.load(), parent.rewrite_lock.GetSharedLock());
 	column_rewrite->row_groups = parent.row_groups->AddColumn(context, new_column, default_value,
@@ -418,6 +444,10 @@ void DataTable::Scan(DuckTransaction &transaction, DataChunk &result, TableScanS
 
 bool DataTable::CreateIndexScan(TableScanState &state, DataChunk &result) {
 	return state.table_state.Scan(result, TableScanType::TABLE_SCAN_OMIT_PERMANENTLY_DELETED);
+}
+
+bool DataTable::AlterScan(TableScanState &state, DataChunk &result) {
+	return state.table_state.Scan(result, TableScanType::TABLE_SCAN_ALL_ROWS);
 }
 
 //===--------------------------------------------------------------------===//

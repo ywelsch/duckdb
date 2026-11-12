@@ -2320,17 +2320,21 @@ bool RowGroupCollection::SupportsPerColumnWrites() {
 //===--------------------------------------------------------------------===//
 // Alter
 //===--------------------------------------------------------------------===//
+shared_ptr<RowGroupCollection> RowGroupCollection::CreateCollectionWithColumn(const LogicalType &type) {
+	auto new_types = types;
+	new_types.push_back(type);
+	auto result = make_shared_ptr<RowGroupCollection>(
+	    info, block_manager, std::move(new_types), GetRowGroups()->GetBaseRowId(), total_rows.load(), row_group_size);
+	result->next_row_id = next_row_id.load();
+	result->stats.InitializeAddColumn(stats, type);
+	return result;
+}
+
 unique_ptr<RowGroupCollectionAlter> RowGroupCollection::AddColumn(ClientContext &context, ColumnDefinition &new_column,
                                                                   Expression &default_value,
                                                                   unique_ptr<OptimisticDataWriter> writer) {
 	idx_t new_column_idx = types.size();
-	auto new_types = types;
-	auto row_groups = GetRowGroups();
-	new_types.push_back(new_column.GetType());
-	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
-	                                                  row_groups->GetBaseRowId(), total_rows.load(), row_group_size);
-	result->next_row_id = next_row_id.load();
-	result->stats.InitializeAddColumn(stats, new_column.GetType());
+	auto result = CreateCollectionWithColumn(new_column.GetType());
 
 	// the column is filled with its DEFAULT value, or NULL if none is specified
 	auto &result_ref = *result;

@@ -67,7 +67,6 @@ bool AlterInfo::RewritesColumn() const {
 		return false;
 	}
 	switch (Cast<AlterTableInfo>().alter_table_type) {
-	case AlterTableType::ADD_COLUMN:
 	case AlterTableType::ALTER_COLUMN_TYPE:
 	case AlterTableType::ADD_FIELD:
 	case AlterTableType::REMOVE_FIELD:
