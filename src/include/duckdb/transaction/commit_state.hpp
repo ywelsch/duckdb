@@ -17,6 +17,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
+class BlockHandle;
 class BlockManager;
 class CatalogEntry;
 class TableIndexList;
@@ -57,10 +58,8 @@ public:
 	void DropColumn(shared_ptr<DataTable> table, idx_t column_index);
 	//! Removes the dropped indexes from their tables, which keep them for checkpoints until they are destroyed.
 	void DetachIndexes();
-	//! Loads the dropped tables for older snapshots and excludes the dropped storage from checkpoints, once
-	void ExcludeFromCheckpoints();
-	//! Frees the dropped storage
-	void Free();
+	//! Frees the dropped storage, once: its blocks stay registered while older snapshots can read them
+	void Free(bool readers_remain);
 	//! True if no work has been queued.
 	bool Empty() const;
 
@@ -76,8 +75,10 @@ private:
 	vector<shared_ptr<DataTable>> dropped_tables;
 	vector<pair<shared_ptr<DataTable>, idx_t>> dropped_columns;
 	vector<DroppedIndex> dropped_indexes;
-	//! Whether ExcludeFromCheckpoints ran
-	bool excluded = false;
+	//! Keeps the freed blocks from being reused while older snapshots read them
+	vector<shared_ptr<BlockHandle>> block_handles;
+	//! Whether Free ran
+	bool freed = false;
 };
 
 struct IndexDataRemover {

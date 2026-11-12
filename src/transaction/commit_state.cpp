@@ -12,6 +12,7 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/storage/block_manager.hpp"
+#include "duckdb/storage/buffer/block_handle.hpp"
 #include "duckdb/storage/table/chunk_info.hpp"
 #include "duckdb/storage/table/column_data.hpp"
 #include "duckdb/storage/table/row_version_manager.hpp"
@@ -58,26 +59,6 @@ void CommitDropState::DetachIndexes() {
 	}
 }
 
-void CommitDropState::ExcludeFromCheckpoints() {
-	if (excluded) {
-		return;
-	}
-	// older snapshots still read the dropped tables, whose metadata the checkpoint frees
-	for (auto &table : dropped_tables) {
-		for (auto &row_group : table->GetRowGroupCollection()->GetRowGroups()->Segments()) {
-			row_group.LoadMetadata();
-		}
-	}
-	excluded = true;
-	Collect();
-	if (!block_manager) {
-		return;
-	}
-	for (auto block_id : dropped_block_ids) {
-		block_manager->MarkBlockAsExcluded(block_id);
-	}
-}
-
 void CommitDropState::Collect() {
 	// nothing uses the detached indexes any more
 	for (auto &index : dropped_indexes) {
@@ -95,27 +76,44 @@ void CommitDropState::Collect() {
 	}
 }
 
-void CommitDropState::Free() {
-	if (!excluded) {
-		// no snapshot reads the dropped tables any more
+void CommitDropState::Free(bool readers_remain) {
+	if (!freed) {
+		freed = true;
+		if (readers_remain) {
+			// older snapshots still read the dropped tables, whose metadata the checkpoint frees
+			for (auto &table : dropped_tables) {
+				for (auto &row_group : table->GetRowGroupCollection()->GetRowGroups()->Segments()) {
+					row_group.LoadMetadata();
+				}
+			}
+		}
 		Collect();
-	}
-	// the index blocks are freed with the others, not when the indexes are destroyed
-	for (auto &table : dropped_tables) {
-		table->GetDataTableInfo()->GetIndexes().DisownBlocks();
-	}
-	if (block_manager) {
-		for (auto block_id : dropped_block_ids) {
-			if (excluded) {
-				block_manager->MarkExcludedBlockAsModified(block_id);
-			} else {
+		if (block_manager) {
+			for (auto block_id : dropped_block_ids) {
+				if (readers_remain) {
+					// a registered block is not reused, also once a checkpoint lists it as free
+					auto handle = block_manager->TryGetBlock(block_id);
+					if (!handle) {
+						// only overflow string blocks are registered lazily
+						handle = block_manager->RegisterBlock(block_id, MemoryTag::OVERFLOW_STRINGS);
+					}
+					block_handles.push_back(std::move(handle));
+				}
 				block_manager->MarkBlockAsModified(block_id);
 			}
 		}
+		// assert that !block_manager -> dropped_block_ids.empty()
+		D_ASSERT(block_manager || dropped_block_ids.empty());
+		dropped_block_ids.clear();
 	}
-	// assert that !block_manager -> dropped_block_ids.empty()
-	D_ASSERT(block_manager || dropped_block_ids.empty());
-	dropped_block_ids.clear();
+	if (readers_remain) {
+		return;
+	}
+	// the index blocks were freed with the others, not when the indexes are destroyed
+	for (auto &table : dropped_tables) {
+		table->GetDataTableInfo()->GetIndexes().DisownStorage();
+	}
+	block_handles.clear();
 }
 
 bool CommitDropState::Empty() const {

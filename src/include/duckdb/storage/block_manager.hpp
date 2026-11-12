@@ -63,13 +63,6 @@ public:
 	//! Mark a block as "modified"; modified blocks are added to the free list after a checkpoint (i.e. their data is
 	//! assumed to be rewritten)
 	virtual void MarkBlockAsModified(block_id_t block_id) = 0;
-	//! Mark a use of a block as excluded: checkpoints no longer write it, but it stays in use until marked as modified
-	virtual void MarkBlockAsExcluded(block_id_t block_id) {
-	}
-	//! Mark an excluded use of a block as modified
-	virtual void MarkExcludedBlockAsModified(block_id_t block_id) {
-		MarkBlockAsModified(block_id);
-	}
 	//! Increase the reference count of a block. The block should hold at least one reference before this method is
 	//! called.
 	virtual void IncreaseBlockReferenceCount(block_id_t block_id) = 0;
@@ -112,6 +105,8 @@ public:
 
 	//! Register a block with the given block id in the base file, an already registered block must have the same tag
 	shared_ptr<BlockHandle> RegisterBlock(block_id_t block_id, MemoryTag tag = MemoryTag::BASE_TABLE);
+	//! Returns the registered block with the given block id, if any
+	shared_ptr<BlockHandle> TryGetBlock(block_id_t block_id);
 	//! Convert an existing in-memory buffer into a persistent disk-backed block
 	//! If mode is set to destructive (default) - the old_block will be destroyed as part of this method
 	//! This can only be safely used when there is no other (lingering) usage of old_block
@@ -185,7 +180,6 @@ public:
 
 protected:
 	bool BlockIsRegistered(block_id_t block_id);
-	shared_ptr<BlockHandle> TryGetBlock(block_id_t block_id);
 
 public:
 	template <class TARGET>

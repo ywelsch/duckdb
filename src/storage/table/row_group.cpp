@@ -656,7 +656,7 @@ void RowGroup::CommitDropColumn(const idx_t column_index, CommitDropState &drop_
 void RowGroup::CommitDrop() {
 	CommitDropState drop_state(&GetBlockManager());
 	CommitDrop(drop_state);
-	drop_state.Free();
+	drop_state.Free(false);
 }
 
 void RowGroup::FinishVector(CollectionScanState &state) {

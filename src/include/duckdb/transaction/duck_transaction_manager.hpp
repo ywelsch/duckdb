@@ -71,8 +71,8 @@ public:
 	void ResetActiveCheckpoint();
 	//! Detaches the indexes a commit dropped, and keeps its storage until FreeDroppedStorage frees it
 	CommitDropState &AddDroppedStorage(unique_ptr<CommitDropState> drop_state);
-	//! Excludes the storage dropped by commits below the bound of a starting checkpoint, which does not write it
-	void ExcludeDroppedStorage(VisibilityBound visibility_bound);
+	//! Frees the storage dropped by commits below the bound of a starting checkpoint, which does not write it
+	void FreeDroppedStorage(VisibilityBound visibility_bound);
 	//! Frees the storage a commit dropped, once its cleanup knows that no snapshot reads it any more
 	void FreeDroppedStorage(CommitDropState &drop_state);
 
@@ -163,8 +163,8 @@ private:
 	atomic<idx_t> active_checkpoint;
 	//! Lock for dropped_storage
 	mutex dropped_storage_lock;
-	//! Held while excluding or freeing dropped storage: a checkpoint that starts waits for storage freed at cleanup
-	mutex exclude_or_free_lock;
+	//! Held while freeing dropped storage: a checkpoint that starts waits for storage freed at cleanup
+	mutex free_dropped_storage_lock;
 	//! Storage dropped by committed transactions that are not cleaned up yet
 	vector<unique_ptr<CommitDropState>> dropped_storage;
 	//! Source of checkpoint identities

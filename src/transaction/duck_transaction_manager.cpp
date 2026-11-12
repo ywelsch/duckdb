@@ -131,8 +131,8 @@ CommitDropState &DuckTransactionManager::AddDroppedStorage(unique_ptr<CommitDrop
 	return result;
 }
 
-void DuckTransactionManager::ExcludeDroppedStorage(VisibilityBound visibility_bound) {
-	lock_guard<mutex> exclude_or_free_guard(exclude_or_free_lock);
+void DuckTransactionManager::FreeDroppedStorage(VisibilityBound visibility_bound) {
+	lock_guard<mutex> free_guard(free_dropped_storage_lock);
 	vector<reference<CommitDropState>> drop_states;
 	{
 		lock_guard<mutex> guard(dropped_storage_lock);
@@ -143,12 +143,13 @@ void DuckTransactionManager::ExcludeDroppedStorage(VisibilityBound visibility_bo
 		}
 	}
 	for (auto &drop_state : drop_states) {
-		drop_state.get().ExcludeFromCheckpoints();
+		// older snapshots can still read the storage
+		drop_state.get().Free(true);
 	}
 }
 
 void DuckTransactionManager::FreeDroppedStorage(CommitDropState &drop_state) {
-	lock_guard<mutex> exclude_or_free_guard(exclude_or_free_lock);
+	lock_guard<mutex> free_guard(free_dropped_storage_lock);
 	unique_ptr<CommitDropState> owned_state;
 	{
 		lock_guard<mutex> guard(dropped_storage_lock);
@@ -164,7 +165,7 @@ void DuckTransactionManager::FreeDroppedStorage(CommitDropState &drop_state) {
 		throw InternalException("FreeDroppedStorage called with storage that is not registered");
 	}
 	// removed first: if freeing fails, the state is destroyed while unwinding
-	owned_state->Free();
+	owned_state->Free(false);
 }
 
 DuckTransactionManager::CheckpointDecision::CheckpointDecision(string reason_p)
