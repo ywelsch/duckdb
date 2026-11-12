@@ -543,19 +543,10 @@ unordered_set<column_t> TableIndexList::GetIndexedColumns() const {
 	return column_ids;
 }
 
-vector<shared_ptr<IndexEntry>> TableIndexList::FindEntries(const unordered_set<idx_t> &index_oids) const {
-	vector<shared_ptr<IndexEntry>> result;
-	for (const auto &entry : index_entries) {
-		if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
-			result.push_back(entry);
-		}
-	}
-	for (const auto &entry : detached_index_entries) {
-		// dropped after the bound of the checkpoint that asks
-		if (index_oids.find(entry->GetIndexOid()) != index_oids.end()) {
-			result.push_back(entry);
-		}
-	}
+vector<shared_ptr<IndexEntry>> TableIndexList::CheckpointEntries() const {
+	auto result = index_entries;
+	// detached by a drop after the bound of the checkpoint: still in its catalog
+	result.insert(result.end(), detached_index_entries.begin(), detached_index_entries.end());
 	return result;
 }
 
@@ -588,12 +579,10 @@ private:
 } // namespace
 
 vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndexWriter &writer) {
-	auto &index_oids = writer.GetIndexOids();
 	vector<shared_ptr<IndexEntry>> entries;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		// the indexes of the catalog that the checkpoint writes: the list can also have uncommitted or later ones
-		entries = FindEntries(index_oids);
+		entries = CheckpointEntries();
 	}
 
 	// written without the list lock, which every commit that changes the table takes
@@ -610,11 +599,11 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 	}
 
 #ifdef D_ASSERT_IS_ENABLED
-	// the list lock was not needed: the entries of the catalog's indexes did not change meanwhile
+	// the list lock was not needed: no index was added or removed meanwhile, a drop only detaches
 	vector<shared_ptr<IndexEntry>> current;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		current = FindEntries(index_oids);
+		current = CheckpointEntries();
 	}
 	auto entry_set = [](const vector<shared_ptr<IndexEntry>> &list) {
 		unordered_set<const IndexEntry *> result;
