@@ -25,8 +25,6 @@
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
-#include "duckdb/storage/table/row_group_collection.hpp"
-#include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
@@ -41,83 +39,44 @@ void CommitDropState::DropBlock(block_id_t block_id) {
 	dropped_block_ids.push_back(block_id);
 }
 
-void CommitDropState::DropIndex(shared_ptr<DataTableInfo> info, idx_t index_oid) {
-	dropped_indexes.push_back(DroppedIndex {std::move(info), index_oid, nullptr});
+void CommitDropState::RemoveIndex(TableIndexList &indexes, idx_t index_oid) {
+	pending_index_removals.push_back(PendingIndexRemoval {indexes, index_oid});
 }
 
-void CommitDropState::DropTable(shared_ptr<DataTable> table) {
-	dropped_tables.push_back(std::move(table));
-}
-
-void CommitDropState::DropColumn(shared_ptr<DataTable> table, idx_t column_index) {
-	dropped_columns.emplace_back(std::move(table), column_index);
-}
-
-void CommitDropState::DetachIndexes() {
-	for (auto &index : dropped_indexes) {
-		index.detached_entry = index.info->GetIndexes().DetachIndex(index.index_oid);
-	}
-}
-
-void CommitDropState::Collect() {
-	// nothing uses the detached indexes any more
-	for (auto &index : dropped_indexes) {
-		if (index.detached_entry) {
-			index.info->GetIndexes().RemoveDetachedIndex(*index.detached_entry);
+void CommitDropState::FinalizeCommit() {
+	if (block_manager) {
+		for (auto block_id : dropped_block_ids) {
+			block_manager->MarkBlockAsModified(block_id);
 		}
 	}
-	dropped_indexes.clear();
-	// collected now: a checkpoint that wrote the table frees the blocks it replaced itself
-	for (auto &table : dropped_tables) {
-		table->CommitDropTable(*this);
+	// assert that !block_manager -> dropped_block_ids.empty()
+	D_ASSERT(block_manager || dropped_block_ids.empty());
+
+	for (auto &removal : pending_index_removals) {
+		removal.indexes.get().DetachIndex(removal.index_oid);
 	}
-	for (auto &column : dropped_columns) {
-		column.first->CommitDropColumn(column.second, *this);
-	}
+	dropped_block_ids.clear();
+	pending_index_removals.clear();
 }
 
-void CommitDropState::Free(bool readers_remain) {
-	if (!freed) {
-		freed = true;
-		if (readers_remain) {
-			// older snapshots still read the dropped tables, whose metadata the checkpoint frees
-			for (auto &table : dropped_tables) {
-				for (auto &row_group : table->GetRowGroupCollection()->GetRowGroups()->Segments()) {
-					row_group.LoadMetadata();
-				}
-			}
+void CommitDropState::FinalizeBlocksInUse(vector<shared_ptr<BlockHandle>> &block_handles) {
+	D_ASSERT(pending_index_removals.empty());
+	D_ASSERT(block_manager || dropped_block_ids.empty());
+	for (auto block_id : dropped_block_ids) {
+		// a registered block is not reused, also once a checkpoint lists it as free
+		auto handle = block_manager->TryGetBlock(block_id);
+		if (!handle) {
+			// only overflow string blocks are registered lazily
+			handle = block_manager->RegisterBlock(block_id, MemoryTag::OVERFLOW_STRINGS);
 		}
-		Collect();
-		if (block_manager) {
-			for (auto block_id : dropped_block_ids) {
-				if (readers_remain) {
-					// a registered block is not reused, also once a checkpoint lists it as free
-					auto handle = block_manager->TryGetBlock(block_id);
-					if (!handle) {
-						// only overflow string blocks are registered lazily
-						handle = block_manager->RegisterBlock(block_id, MemoryTag::OVERFLOW_STRINGS);
-					}
-					block_handles.push_back(std::move(handle));
-				}
-				block_manager->MarkBlockAsModified(block_id);
-			}
-		}
-		// assert that !block_manager -> dropped_block_ids.empty()
-		D_ASSERT(block_manager || dropped_block_ids.empty());
-		dropped_block_ids.clear();
+		block_handles.push_back(std::move(handle));
+		block_manager->MarkBlockAsModified(block_id);
 	}
-	if (readers_remain) {
-		return;
-	}
-	// the index blocks were freed with the others, not when the indexes are destroyed
-	for (auto &table : dropped_tables) {
-		table->GetDataTableInfo()->GetIndexes().DisownStorage();
-	}
-	block_handles.clear();
+	dropped_block_ids.clear();
 }
 
 bool CommitDropState::Empty() const {
-	return dropped_tables.empty() && dropped_columns.empty() && dropped_indexes.empty();
+	return dropped_block_ids.empty() && pending_index_removals.empty();
 }
 
 //===--------------------------------------------------------------------===//
@@ -289,17 +248,14 @@ void CommitState::CommitEntryDrop(CatalogEntry &entry, data_ptr_t dataptr, Commi
 		break;
 	case CatalogType::DELETED_ENTRY:
 		switch (entry.type) {
-		case CatalogType::TABLE_ENTRY: {
-			auto &table_entry = entry.Cast<DuckTableEntry>();
-			D_ASSERT(table_entry.IsDuckTable());
-
-			// If the table was renamed, we do not need to drop the DataTable.
-			table_entry.CommitDrop(drop_state);
+		case CatalogType::TABLE_ENTRY:
+			// the cleanup of the drop frees the table's storage
+			info.has_dropped_storage = true;
 			break;
-		}
 		case CatalogType::INDEX_ENTRY: {
 			auto &index_entry = entry.Cast<DuckIndexEntry>();
 			index_entry.CommitDrop(drop_state);
+			info.has_dropped_storage = true;
 			break;
 		}
 		default:

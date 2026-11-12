@@ -14,6 +14,7 @@
 #include "duckdb/common/enums/active_transaction_state.hpp"
 
 namespace duckdb {
+class BlockHandle;
 class BufferManager;
 class ClientContext;
 class CommitDropState;
@@ -29,6 +30,16 @@ struct UndoBufferProperties {
 	bool has_deletes = false;
 	bool has_index_deletes = false;
 	bool has_catalog_changes = false;
+};
+
+//! Where the storage of the tables and indexes that a transaction dropped is at
+enum class DroppedStorageState : uint8_t {
+	//! The transaction dropped no storage
+	NONE,
+	//! The cleanup of the transaction frees the storage
+	PENDING,
+	//! A checkpoint freed the storage ahead of the cleanup
+	FREED_BY_CHECKPOINT
 };
 
 //! The undo buffer of a transaction is used to hold previous versions of tuples
@@ -55,6 +66,8 @@ public:
 
 	//! Cleanup the undo buffer
 	void Cleanup(VisibilityBound lowest_visibility_bound);
+	//! Frees the dropped storage ahead of the cleanup, for a checkpoint that starts: snapshots can still read it
+	void FreeDroppedStorage();
 	//! Commit the changes made in the UndoBuffer: should be called on commit
 	void WriteToWAL(WriteAheadLog &wal, optional_ptr<StorageCommitState> commit_state);
 	//! Iterate the undo buffer and commit each entry. Deferred drop side effects accumulate in
@@ -72,6 +85,10 @@ private:
 	ActiveTransactionState active_transaction_state = ActiveTransactionState::UNSET;
 	//! Number of entries already cleaned up, so that a cleanup that threw part-way can be resumed
 	idx_t cleaned_up_entries = 0;
+	//! Set by the commit, read by the cleanup and by a checkpoint that starts before it
+	DroppedStorageState dropped_storage = DroppedStorageState::NONE;
+	//! Keeps the blocks that a checkpoint freed ahead of the cleanup from being reused
+	vector<shared_ptr<BlockHandle>> dropped_block_handles;
 
 private:
 	template <class T>

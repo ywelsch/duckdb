@@ -34,6 +34,7 @@
 #include "duckdb/storage/table/delete_state.hpp"
 #include "duckdb/storage/table/persistent_table_data.hpp"
 #include "duckdb/storage/table/row_group.hpp"
+#include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table/update_state.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
@@ -1697,7 +1698,15 @@ struct DroppedBlockCollector : public BlockIdVisitor {
 
 void DataTable::CommitDropTable(CommitDropState &drop_state) {
 	row_groups->CommitDropTable(drop_state);
-	// the indexes stay usable for older snapshots until the drop frees the blocks
+}
+
+void DataTable::CommitDropTableInUse(CommitDropState &drop_state) {
+	// snapshots load the metadata lazily, from blocks that the checkpoint frees
+	for (auto &row_group : row_groups->GetRowGroups()->Segments()) {
+		row_group.LoadMetadata();
+	}
+	row_groups->CommitDropTable(drop_state);
+	// the indexes stay usable: the cleanup of the drop disowns their blocks
 	DroppedBlockCollector collector(drop_state);
 	info->GetIndexes().VisitBlockIds(collector);
 }

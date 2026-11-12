@@ -32,6 +32,8 @@ struct CommitInfo {
 	optional_ptr<CommitDropState> drop_state;
 	//! WAL offset covering the commit's flush marker (0 if no WAL was written)
 	idx_t wal_sync_offset = 0;
+	//! Whether the commit dropped storage that the cleanup of the transaction frees
+	bool has_dropped_storage = false;
 };
 
 class DuckTransaction : public Transaction {
@@ -90,6 +92,8 @@ public:
 	ErrorData Rollback();
 	//! Cleanup the undo buffer
 	void Cleanup(VisibilityBound lowest_visibility_bound);
+	//! Frees the storage dropped by this committed transaction for a starting checkpoint, ahead of its cleanup
+	void FreeDroppedStorage();
 
 	bool ChangesMade();
 	UndoBufferProperties GetUndoProperties();
@@ -127,8 +131,6 @@ private:
 	unique_ptr<StorageLockKey> checkpoint_lock;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
-	//! The storage this transaction dropped, which the transaction manager owns until the cleanup frees it
-	optional_ptr<CommitDropState> dropped_storage;
 	//! Lock for accessing sequence_usage
 	mutex sequence_lock;
 	//! Map of all sequences that were used during the transaction and the value they had in this transaction

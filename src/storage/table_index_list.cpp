@@ -221,21 +221,20 @@ void TableIndexList::RemoveIndex(idx_t index_oid) {
 	}
 }
 
-shared_ptr<IndexEntry> TableIndexList::DetachIndex(idx_t index_oid) {
+void TableIndexList::DetachIndex(idx_t index_oid) {
 	annotated_lock_guard lock(index_entries_lock);
 	auto entry = ExtractIndex(index_oid);
 	if (entry) {
-		detached_index_entries.push_back(entry);
+		detached_index_entries.push_back(std::move(entry));
 	}
-	return entry;
 }
 
-void TableIndexList::RemoveDetachedIndex(const IndexEntry &entry) {
+void TableIndexList::RemoveDetachedIndex(idx_t index_oid) {
 	shared_ptr<IndexEntry> removed_entry;
 	{
 		annotated_lock_guard lock(index_entries_lock);
 		for (idx_t i = 0; i < detached_index_entries.size(); i++) {
-			if (detached_index_entries[i].get() == &entry) {
+			if (detached_index_entries[i]->GetIndexOid() == index_oid) {
 				removed_entry = std::move(detached_index_entries[i]);
 				detached_index_entries.erase_at(i);
 				break;

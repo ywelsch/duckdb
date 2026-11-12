@@ -287,8 +287,8 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 	if (db.HasStorageManager()) {
 		block_manager = db.GetStorageManager().GetBlockManager();
 	}
-	auto drop_state = make_uniq<CommitDropState>(block_manager);
-	commit_info.drop_state = drop_state.get();
+	CommitDropState drop_state(block_manager);
+	commit_info.drop_state = &drop_state;
 
 	ErrorData error_data;
 	try {
@@ -304,10 +304,7 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 			bool sync_now = commit_info.active_transactions == ActiveTransactionState::NO_OTHER_TRANSACTIONS;
 			commit_info.wal_sync_offset = commit_state->FlushCommit(sync_now);
 		}
-		if (!drop_state->Empty()) {
-			drop_state->commit_id = commit_info.commit_id;
-			dropped_storage = GetTransactionManager().AddDroppedStorage(std::move(drop_state));
-		}
+		drop_state.FinalizeCommit();
 		return ErrorData();
 	} catch (std::exception &ex) {
 		// Record the error and run RevertCommit() outside this try-catch: RevertCommit() iterates the
@@ -355,13 +352,10 @@ ErrorData DuckTransaction::Rollback() {
 
 void DuckTransaction::Cleanup(VisibilityBound lowest_visibility_bound) {
 	undo_buffer.Cleanup(lowest_visibility_bound);
-	if (dropped_storage) {
-		// no snapshot reads the dropped storage any more, and no checkpoint writes it
-		D_ASSERT(commit_id < lowest_visibility_bound);
-		auto &drop_state = *dropped_storage;
-		dropped_storage = nullptr;
-		GetTransactionManager().FreeDroppedStorage(drop_state);
-	}
+}
+
+void DuckTransaction::FreeDroppedStorage() {
+	undo_buffer.FreeDroppedStorage();
 }
 
 unique_ptr<StorageLockKey> DuckTransaction::GetCheckpointLockForStatement() {

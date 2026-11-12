@@ -312,7 +312,7 @@ void LocalTableStorage::Rollback() {
 	}
 	optimistic_collections.clear();
 	row_groups->collection->CommitDropTable(drop_state);
-	drop_state.Free(false);
+	drop_state.FinalizeCommit();
 }
 
 //===--------------------------------------------------------------------===//

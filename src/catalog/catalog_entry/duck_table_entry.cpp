@@ -1537,11 +1537,11 @@ void DuckTableEntry::CommitAlter(string &column_name, CommitDropState &drop_stat
 	}
 	auto logical_column_index = LogicalIndex(logical_column_idx.GetIndex());
 	auto column_index = columns.LogicalToPhysical(logical_column_index).index;
-	drop_state.DropColumn(storage, column_index);
+	storage->CommitDropColumn(column_index, drop_state);
 }
 
 void DuckTableEntry::CommitDrop(CommitDropState &drop_state) {
-	drop_state.DropTable(storage);
+	storage->CommitDropTable(drop_state);
 }
 
 DataTable &DuckTableEntry::GetStorage() {

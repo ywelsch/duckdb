@@ -67,9 +67,9 @@ public:
 	//! Removes an index entry from the list of index entries and release any storage the index owns.
 	void RemoveIndex(idx_t index_oid);
 	//! Removes an index entry without releasing it: checkpoints still write it until RemoveDetachedIndex
-	shared_ptr<IndexEntry> DetachIndex(idx_t index_oid);
+	void DetachIndex(idx_t index_oid);
 	//! Removes an index entry detached by DetachIndex and releases any storage the index owns.
-	void RemoveDetachedIndex(const IndexEntry &entry);
+	void RemoveDetachedIndex(idx_t index_oid);
 	//! Returns the entry matching the index OID.
 	shared_ptr<IndexEntry> FindEntry(const IndexEntry &index) const;
 	shared_ptr<IndexEntry> FindEntry(idx_t index_oid) const;

@@ -237,8 +237,10 @@ public:
 	void Checkpoint(TableDataWriter &writer, Serializer &serializer);
 	//! Install checkpointed row groups.
 	void PublishCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats);
-	//! Accumulates the table's on-disk blocks, and those of its indexes, for reclamation into the drop state.
+	//! Accumulates the table's on-disk blocks for reclamation into the drop state.
 	void CommitDropTable(CommitDropState &drop_state);
+	//! As CommitDropTable for a table that snapshots still read: loads its metadata, adds the blocks of its indexes.
+	void CommitDropTableInUse(CommitDropState &drop_state);
 	//! Accumulates the column's on-disk blocks for reclamation into the drop state.
 	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state);
 

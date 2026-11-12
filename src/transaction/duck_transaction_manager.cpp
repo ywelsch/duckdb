@@ -12,7 +12,6 @@
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
-#include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection_manager.hpp"
@@ -122,50 +121,25 @@ void DuckTransactionManager::ResetActiveCheckpoint() {
 	active_checkpoint = 0;
 }
 
-CommitDropState &DuckTransactionManager::AddDroppedStorage(unique_ptr<CommitDropState> drop_state) {
-	D_ASSERT(drop_state->commit_id != 0);
-	drop_state->DetachIndexes();
-	auto &result = *drop_state;
-	lock_guard<mutex> guard(dropped_storage_lock);
-	dropped_storage.push_back(std::move(drop_state));
-	return result;
-}
-
 void DuckTransactionManager::FreeDroppedStorage(VisibilityBound visibility_bound) {
-	lock_guard<mutex> free_guard(free_dropped_storage_lock);
-	vector<reference<CommitDropState>> drop_states;
+	// no cleanup runs meanwhile: the transactions below stay alive
+	lock_guard<mutex> c_lock(cleanup_lock);
+	vector<reference<DuckTransaction>> transactions;
 	{
-		lock_guard<mutex> guard(dropped_storage_lock);
-		for (auto &drop_state : dropped_storage) {
-			if (drop_state->commit_id < visibility_bound) {
-				drop_states.push_back(*drop_state);
-			}
-		}
-	}
-	for (auto &drop_state : drop_states) {
-		// older snapshots can still read the storage
-		drop_state.get().Free(true);
-	}
-}
-
-void DuckTransactionManager::FreeDroppedStorage(CommitDropState &drop_state) {
-	lock_guard<mutex> free_guard(free_dropped_storage_lock);
-	unique_ptr<CommitDropState> owned_state;
-	{
-		lock_guard<mutex> guard(dropped_storage_lock);
-		for (idx_t i = 0; i < dropped_storage.size(); i++) {
-			if (dropped_storage[i].get() == &drop_state) {
-				owned_state = std::move(dropped_storage[i]);
-				dropped_storage.erase_at(i);
+		lock_guard<mutex> t_lock(transaction_lock);
+		for (auto &transaction : recently_committed_transactions) {
+			if (transaction->commit_id >= visibility_bound) {
 				break;
 			}
+			transactions.push_back(*transaction);
 		}
 	}
-	if (!owned_state) {
-		throw InternalException("FreeDroppedStorage called with storage that is not registered");
+	for (auto &transaction : transactions) {
+		// older snapshots can still read the storage
+		transaction.get().FreeDroppedStorage();
 	}
-	// removed first: if freeing fails, the state is destroyed while unwinding
-	owned_state->Free(false);
+	// drops that no snapshot reads are queued: their cleanup frees the storage
+	CleanupQueuedTransactions();
 }
 
 DuckTransactionManager::CheckpointDecision::CheckpointDecision(string reason_p)
@@ -362,6 +336,16 @@ void DuckTransactionManager::WaitForDurability() {
 
 void DuckTransactionManager::CleanupTransactions() {
 	lock_guard<mutex> c_lock(cleanup_lock);
+	try {
+		CleanupQueuedTransactions();
+	} catch (FatalException &) {
+		throw;
+	} catch (std::exception &) {
+		return;
+	}
+}
+
+void DuckTransactionManager::CleanupQueuedTransactions() {
 	while (true) {
 		DuckCleanupInfo *top_cleanup_info = nullptr;
 		{
@@ -372,13 +356,7 @@ void DuckTransactionManager::CleanupTransactions() {
 			}
 			top_cleanup_info = cleanup_queue.front().get();
 		}
-		try {
-			top_cleanup_info->Cleanup();
-		} catch (FatalException &) {
-			throw;
-		} catch (std::exception &) {
-			return;
-		}
+		top_cleanup_info->Cleanup();
 		{
 			lock_guard<mutex> q_lock(cleanup_queue_lock);
 			cleanup_queue.pop();
