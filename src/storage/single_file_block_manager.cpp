@@ -906,7 +906,7 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 		multi_use_blocks[block_id] = usage_count;
 	}
 	GetMetadataManager().Read(reader);
-	GetMetadataManager().MarkBlocksAsModified(0);
+	GetMetadataManager().MarkBlocksAsModified();
 }
 
 bool SingleFileBlockManager::IsRootBlock(MetaBlockPointer root) {
@@ -1367,7 +1367,7 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	// now handle the free list
 	auto &metadata_manager = GetMetadataManager();
 	// the metadata blocks that the checkpoint no longer uses are free: older transactions can still load them
-	bool has_pending_metadata = metadata_manager.MarkBlocksAsModified(read_stamp);
+	auto freed_metadata_blocks = metadata_manager.MarkBlocksAsModified();
 
 	unique_lock<mutex> lock(single_file_block_lock);
 	// set the iteration count
@@ -1457,16 +1457,19 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	active_header = 1 - active_header;
 	//! Ensure the header write ends up on disk
 	handle->Sync();
-	if (checkpoint_freed_blocks.empty() && !has_pending_metadata) {
+	if (checkpoint_freed_blocks.empty() && freed_metadata_blocks.empty()) {
 		return;
 	}
 	// a transaction that started before the header can still read the freed blocks
 	lock_guard<mutex> release_lock(single_file_block_lock);
-	auto &freed_blocks = pending_reuse_batches[read_stamp];
+	auto &freed = pending_reuse_batches[read_stamp];
 	for (auto &block : checkpoint_freed_blocks) {
 		modified_blocks.erase(block);
-		freed_blocks.push_back(block);
+		freed.blocks.push_back(block);
 		free_blocks_pending_reuse.insert(block);
+	}
+	for (auto &metadata_block : freed_metadata_blocks) {
+		freed.metadata_blocks[metadata_block.first] |= metadata_block.second;
 	}
 	lowest_pending_reuse_stamp = pending_reuse_batches.begin()->first;
 }
@@ -1476,15 +1479,16 @@ void SingleFileBlockManager::ReuseFreedBlocks(transaction_t lowest_active_start)
 		// nothing waits, or a transaction that started before the first batch is still active
 		return;
 	}
-	GetMetadataManager().ReuseFreedBlocks(lowest_active_start);
 	set<block_id_t> fully_freed_blocks;
+	vector<unordered_map<block_id_t, idx_t>> metadata_blocks;
 	{
 		unique_lock<mutex> lock(single_file_block_lock);
 		// the batches are ordered by stamp
 		auto end = pending_reuse_batches.upper_bound(lowest_active_start);
 		vector<block_id_t> blocks;
 		for (auto entry = pending_reuse_batches.begin(); entry != end; entry++) {
-			blocks.insert(blocks.end(), entry->second.begin(), entry->second.end());
+			blocks.insert(blocks.end(), entry->second.blocks.begin(), entry->second.blocks.end());
+			metadata_blocks.push_back(std::move(entry->second.metadata_blocks));
 		}
 		pending_reuse_batches.erase(pending_reuse_batches.begin(), end);
 		lowest_pending_reuse_stamp =
@@ -1496,6 +1500,9 @@ void SingleFileBlockManager::ReuseFreedBlocks(transaction_t lowest_active_start)
 				fully_freed_blocks.insert(block);
 			}
 		}
+	}
+	for (auto &freed : metadata_blocks) {
+		GetMetadataManager().ReuseFreedBlocks(freed);
 	}
 	// Release the free fully freed blocks to the filesystem.
 	TrimFreeBlocks(fully_freed_blocks);

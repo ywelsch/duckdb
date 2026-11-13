@@ -207,6 +207,13 @@ private:
 	bool BlockIsFreeListed(block_id_t block_id);
 
 private:
+	//! What a header freed: blocks, and metadata blocks as a mask per storage block
+	struct FreedByHeader {
+		vector<block_id_t> blocks;
+		unordered_map<block_id_t, idx_t> metadata_blocks;
+	};
+
+private:
 	AttachedDatabase &db;
 	//! The active DatabaseHeader, either 0 (h1) or 1 (h2)
 	uint8_t active_header;
@@ -230,8 +237,8 @@ private:
 	unordered_set<block_id_t> modified_blocks;
 	//! The list of blocks that a header freed, but cannot yet be re-used because an older transaction may read them
 	unordered_set<block_id_t> free_blocks_pending_reuse;
-	//! The same blocks per header, by the start time before which a transaction may still read them
-	map<transaction_t, vector<block_id_t>> pending_reuse_batches;
+	//! What the headers freed, by the start time before which a transaction may still read it
+	map<transaction_t, FreedByHeader> pending_reuse_batches;
 	//! The lowest stamp in pending_reuse_batches, MAX_TRANSACTION_ID if it is empty: readable without the lock
 	atomic<transaction_t> lowest_pending_reuse_stamp {MAX_TRANSACTION_ID};
 	//! The current meta block id

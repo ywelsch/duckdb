@@ -9,13 +9,14 @@
 
 namespace duckdb {
 
-MetadataBlock::MetadataBlock() : block_id(INVALID_BLOCK), dirty(false) {
+MetadataBlock::MetadataBlock() : block_id(INVALID_BLOCK), pending_reuse(0), dirty(false) {
 }
 
-MetadataBlock::MetadataBlock(MetadataBlock &&other) noexcept : dirty(false) {
+MetadataBlock::MetadataBlock(MetadataBlock &&other) noexcept : pending_reuse(0), dirty(false) {
 	std::swap(block, other.block);
 	std::swap(block_id, other.block_id);
 	std::swap(free_blocks, other.free_blocks);
+	std::swap(pending_reuse, other.pending_reuse);
 	auto dirty_val = dirty.load();
 	dirty = other.dirty.load();
 	other.dirty = dirty_val;
@@ -25,6 +26,7 @@ MetadataBlock &MetadataBlock::operator=(MetadataBlock &&other) noexcept {
 	std::swap(block, other.block);
 	std::swap(block_id, other.block_id);
 	std::swap(free_blocks, other.free_blocks);
+	std::swap(pending_reuse, other.pending_reuse);
 	auto dirty_val = dirty.load();
 	dirty = other.dirty.load();
 	other.dirty = dirty_val;
@@ -333,10 +335,8 @@ void MetadataManager::Write(WriteStream &sink) {
 	for (auto &kv : blocks) {
 		auto &block = kv.second;
 		// the blocks that wait for older transactions are free on disk
-		auto pending = pending_reuse_blocks.find(block.block_id);
-		idx_t pending_list = pending == pending_reuse_blocks.end() ? 0 : pending->second;
 		sink.Write<block_id_t>(block.block_id);
-		sink.Write<idx_t>(block.FreeBlocksToInteger() | pending_list);
+		sink.Write<idx_t>(block.FreeBlocksToInteger() | block.pending_reuse);
 	}
 }
 
@@ -399,9 +399,9 @@ void MetadataBlock::FreeBlocksFromInteger(idx_t free_list) {
 	free_blocks = BlocksFromInteger(free_list);
 }
 
-bool MetadataManager::MarkBlocksAsModified(transaction_t read_stamp) {
+unordered_map<block_id_t, idx_t> MetadataManager::MarkBlocksAsModified() {
 	unique_lock<mutex> guard(block_lock);
-	bool has_pending_blocks = false;
+	unordered_map<block_id_t, idx_t> freed_blocks;
 	// for any blocks that were modified in the last checkpoint - they are free now
 	for (auto &kv : modified_blocks) {
 		auto block_id = kv.first;
@@ -410,9 +410,8 @@ bool MetadataManager::MarkBlocksAsModified(transaction_t read_stamp) {
 		D_ASSERT(entry != blocks.end());
 		if (modified_list != 0) {
 			// a transaction that started before the header can still load these blocks
-			pending_reuse_blocks[block_id] |= modified_list;
-			pending_reuse_batches[read_stamp].emplace_back(block_id, modified_list);
-			has_pending_blocks = true;
+			entry->second.pending_reuse |= modified_list;
+			freed_blocks[block_id] = modified_list;
 			continue;
 		}
 		if (entry->second.FreeBlocksToInteger() == NumericLimits<idx_t>::Maximum()) {
@@ -429,37 +428,24 @@ bool MetadataManager::MarkBlocksAsModified(transaction_t read_stamp) {
 
 	for (auto &kv : blocks) {
 		auto &block = kv.second;
-		idx_t free_list = block.FreeBlocksToInteger();
-		auto pending = pending_reuse_blocks.find(block.block_id);
-		if (pending != pending_reuse_blocks.end()) {
-			free_list |= pending->second;
-		}
+		idx_t free_list = block.FreeBlocksToInteger() | block.pending_reuse;
 		idx_t occupied_list = ~free_list;
 		modified_blocks[block.block_id] = occupied_list;
 	}
-	return has_pending_blocks;
+	return freed_blocks;
 }
 
-void MetadataManager::ReuseFreedBlocks(transaction_t lowest_active_start) {
+void MetadataManager::ReuseFreedBlocks(const unordered_map<block_id_t, idx_t> &freed_blocks) {
 	lock_guard<mutex> guard(block_lock);
-	// the batches are ordered by stamp
-	auto end = pending_reuse_batches.upper_bound(lowest_active_start);
-	for (auto batch = pending_reuse_batches.begin(); batch != end; batch++) {
-		for (auto &freed : batch->second) {
-			auto entry = blocks.find(freed.first);
-			if (entry == blocks.end()) {
-				throw InternalException("ReuseFreedBlocks - Block id %llu not found in blocks", freed.first);
-			}
-			auto &block = entry->second;
-			block.FreeBlocksFromInteger(block.FreeBlocksToInteger() | freed.second);
-			auto pending = pending_reuse_blocks.find(freed.first);
-			pending->second &= ~freed.second;
-			if (pending->second == 0) {
-				pending_reuse_blocks.erase(pending);
-			}
+	for (auto &freed : freed_blocks) {
+		auto entry = blocks.find(freed.first);
+		if (entry == blocks.end()) {
+			throw InternalException("ReuseFreedBlocks - Block id %llu not found in blocks", freed.first);
 		}
+		auto &block = entry->second;
+		block.FreeBlocksFromInteger(block.FreeBlocksToInteger() | freed.second);
+		block.pending_reuse &= ~freed.second;
 	}
-	pending_reuse_batches.erase(pending_reuse_batches.begin(), end);
 }
 
 void MetadataManager::ClearModifiedBlocks(const vector<MetaBlockPointer> &pointers) {

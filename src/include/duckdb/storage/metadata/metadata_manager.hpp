@@ -12,7 +12,6 @@
 #include "duckdb/storage/block.hpp"
 #include "duckdb/storage/block_manager.hpp"
 #include "duckdb/common/atomic.hpp"
-#include "duckdb/common/map.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
 
 namespace duckdb {
@@ -31,6 +30,8 @@ struct MetadataBlock {
 	shared_ptr<BlockHandle> block;
 	block_id_t block_id;
 	vector<uint8_t> free_blocks;
+	//! The blocks that are free on disk but cannot be reused yet, as a mask
+	idx_t pending_reuse;
 	atomic<bool> dirty;
 
 	static MetadataBlock Read(ReadStream &source);
@@ -83,11 +84,11 @@ public:
 	bool BlockIsModified(const MetaBlockPointer &ptr);
 	bool BlockHasBeenCleared(const MetaBlockPointer &ptr);
 
-	//! Frees the blocks that the checkpoint no longer uses: they are reused once the transactions that started before
-	//! read_stamp have ended. Returns whether any block waits for them
-	bool MarkBlocksAsModified(transaction_t read_stamp);
-	//! Lets the blocks be reused that were freed before every active transaction started
-	void ReuseFreedBlocks(transaction_t lowest_active_start);
+	//! Frees the blocks that the checkpoint no longer uses and returns them, as a mask per storage block
+	//! They are free on disk but stay unused until ReuseFreedBlocks: an older transaction can still load them
+	unordered_map<block_id_t, idx_t> MarkBlocksAsModified();
+	//! Lets blocks that MarkBlocksAsModified returned be reused
+	void ReuseFreedBlocks(const unordered_map<block_id_t, idx_t> &freed_blocks);
 	void ClearModifiedBlocks(const vector<MetaBlockPointer> &pointers);
 	//! Sets the storage version of the file, which decides whether keeping a block also keeps its next block
 	void SetStorageVersion(StorageVersion storage_version);
@@ -109,10 +110,6 @@ protected:
 	mutable mutex block_lock;
 	unordered_map<block_id_t, MetadataBlock> blocks;
 	unordered_map<block_id_t, idx_t> modified_blocks;
-	//! The blocks that are free on disk but cannot be reused yet, as a mask per storage block
-	unordered_map<block_id_t, idx_t> pending_reuse_blocks;
-	//! The same blocks by the start time before which a transaction may still read them
-	map<transaction_t, vector<pair<block_id_t, idx_t>>> pending_reuse_batches;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;
