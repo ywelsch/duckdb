@@ -328,9 +328,15 @@ void MetadataManager::Flush(QueryContext context) {
 }
 
 void MetadataManager::Write(WriteStream &sink) {
+	lock_guard<mutex> guard(block_lock);
 	sink.Write<uint64_t>(blocks.size());
 	for (auto &kv : blocks) {
-		kv.second.Write(sink);
+		auto &block = kv.second;
+		// the blocks that wait for older transactions are free on disk
+		auto pending = pending_reuse_blocks.find(block.block_id);
+		idx_t pending_list = pending == pending_reuse_blocks.end() ? 0 : pending->second;
+		sink.Write<block_id_t>(block.block_id);
+		sink.Write<idx_t>(block.FreeBlocksToInteger() | pending_list);
 	}
 }
 
@@ -349,11 +355,6 @@ void MetadataManager::Read(ReadStream &source) {
 			entry->second.free_blocks = std::move(block.free_blocks);
 		}
 	}
-}
-
-void MetadataBlock::Write(WriteStream &sink) {
-	sink.Write<block_id_t>(block_id);
-	sink.Write<idx_t>(FreeBlocksToInteger());
 }
 
 idx_t MetadataManager::GetMetadataBlockSize() const {
@@ -398,28 +399,29 @@ void MetadataBlock::FreeBlocksFromInteger(idx_t free_list) {
 	free_blocks = BlocksFromInteger(free_list);
 }
 
-void MetadataManager::MarkBlocksAsModified() {
+bool MetadataManager::MarkBlocksAsModified(transaction_t read_stamp) {
 	unique_lock<mutex> guard(block_lock);
-	// for any blocks that were modified in the last checkpoint - set them to free blocks currently
+	bool has_pending_blocks = false;
+	// for any blocks that were modified in the last checkpoint - they are free now
 	for (auto &kv : modified_blocks) {
 		auto block_id = kv.first;
 		idx_t modified_list = kv.second;
 		auto entry = blocks.find(block_id);
 		D_ASSERT(entry != blocks.end());
-		auto &block = entry->second;
-		idx_t current_free_blocks = block.FreeBlocksToInteger();
-		// merge the current set of free blocks with the modified blocks
-		idx_t new_free_blocks = current_free_blocks | modified_list;
-		if (new_free_blocks == NumericLimits<idx_t>::Maximum()) {
-			// if new free_blocks is all blocks - mark entire block as modified
+		if (modified_list != 0) {
+			// a transaction that started before the header can still load these blocks
+			pending_reuse_blocks[block_id] |= modified_list;
+			pending_reuse_batches[read_stamp].emplace_back(block_id, modified_list);
+			has_pending_blocks = true;
+			continue;
+		}
+		if (entry->second.FreeBlocksToInteger() == NumericLimits<idx_t>::Maximum()) {
+			// all blocks are free and none waits - mark entire block as modified
 			blocks.erase(entry);
 
 			guard.unlock();
 			block_manager.MarkBlockAsModified(block_id);
 			guard.lock();
-		} else {
-			// set the new set of free blocks
-			block.FreeBlocksFromInteger(new_free_blocks);
 		}
 	}
 
@@ -428,9 +430,36 @@ void MetadataManager::MarkBlocksAsModified() {
 	for (auto &kv : blocks) {
 		auto &block = kv.second;
 		idx_t free_list = block.FreeBlocksToInteger();
+		auto pending = pending_reuse_blocks.find(block.block_id);
+		if (pending != pending_reuse_blocks.end()) {
+			free_list |= pending->second;
+		}
 		idx_t occupied_list = ~free_list;
 		modified_blocks[block.block_id] = occupied_list;
 	}
+	return has_pending_blocks;
+}
+
+void MetadataManager::ReuseFreedBlocks(transaction_t lowest_active_start) {
+	lock_guard<mutex> guard(block_lock);
+	// the batches are ordered by stamp
+	auto end = pending_reuse_batches.upper_bound(lowest_active_start);
+	for (auto batch = pending_reuse_batches.begin(); batch != end; batch++) {
+		for (auto &freed : batch->second) {
+			auto entry = blocks.find(freed.first);
+			if (entry == blocks.end()) {
+				throw InternalException("ReuseFreedBlocks - Block id %llu not found in blocks", freed.first);
+			}
+			auto &block = entry->second;
+			block.FreeBlocksFromInteger(block.FreeBlocksToInteger() | freed.second);
+			auto pending = pending_reuse_blocks.find(freed.first);
+			pending->second &= ~freed.second;
+			if (pending->second == 0) {
+				pending_reuse_blocks.erase(pending);
+			}
+		}
+	}
+	pending_reuse_batches.erase(pending_reuse_batches.begin(), end);
 }
 
 void MetadataManager::ClearModifiedBlocks(const vector<MetaBlockPointer> &pointers) {
