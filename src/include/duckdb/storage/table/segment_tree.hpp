@@ -215,12 +215,29 @@ public:
 		return nodes[GetSegmentIndex(l, row_number)].get();
 	}
 
-	//! Gets a pointer to the first segment that ends after the given row, if there is any
-	optional_ptr<SegmentNode<T>> GetSegmentEndingAfter(idx_t row_number) const {
-		auto l = Lock();
-		idx_t segment_index;
-		TryGetSegmentIndex(l, row_number, segment_index);
-		return segment_index < nodes.size() ? nodes[segment_index].get() : nullptr;
+	//! Calls fun(segment, start in the segment, count) for the rows of the range that the tree holds
+	//! Returns the number of those rows
+	template <class FUN>
+	idx_t ScanRowRange(idx_t row_start, idx_t count, FUN &&fun) const {
+		idx_t row_end = row_start + count;
+		optional_ptr<SegmentNode<T>> node;
+		{
+			auto l = Lock();
+			idx_t segment_index;
+			TryGetSegmentIndex(l, row_start, segment_index);
+			node = segment_index < nodes.size() ? nodes[segment_index].get() : nullptr;
+		}
+		idx_t found = 0;
+		for (; node && node->GetRowStart() < row_end; node = GetNextSegment(*node)) {
+			idx_t segment_start = node->GetRowStart();
+			idx_t start_in_segment = MaxValue<idx_t>(row_start, segment_start) - segment_start;
+			idx_t end_in_segment = MinValue<idx_t>(row_end, node->GetRowEnd()) - segment_start;
+			if (end_in_segment > start_in_segment) {
+				fun(node->GetNode(), start_in_segment, end_in_segment - start_in_segment);
+				found += end_in_segment - start_in_segment;
+			}
+		}
+		return found;
 	}
 
 	void AppendSegment(shared_ptr<T> segment) {

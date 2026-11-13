@@ -779,23 +779,12 @@ void RowGroupCollection::FinalizeAppend(TransactionData transaction, TableAppend
 
 void RowGroupCollection::CommitAppend(transaction_t commit_id, idx_t row_start, idx_t count) {
 	auto row_groups = GetRowGroups();
-	auto row_group = row_groups->GetSegment(row_start);
-	D_ASSERT(row_group);
-	idx_t current_row = row_start;
-	idx_t remaining = count;
-	while (true) {
-		auto &current_row_group = row_group->GetNode();
-		idx_t start_in_row_group = current_row - row_group->GetRowStart();
-		idx_t append_count = MinValue<idx_t>(current_row_group.count - start_in_row_group, remaining);
-
-		current_row_group.CommitAppend(commit_id, start_in_row_group, append_count);
-
-		current_row += append_count;
-		remaining -= append_count;
-		if (remaining == 0) {
-			break;
-		}
-		row_group = row_groups->GetNextSegment(*row_group);
+	idx_t committed = row_groups->ScanRowRange(row_start, count, [&](RowGroup &row_group, idx_t start, idx_t rows) {
+		row_group.CommitAppend(commit_id, start, rows);
+	});
+	if (committed != count) {
+		throw InternalException("Commit of %llu rows appended at row %llu found only %llu of them", count, row_start,
+		                        committed);
 	}
 }
 
@@ -856,19 +845,9 @@ void RowGroupCollection::RevertFailedAppend(TableAppendState &state) {
 void RowGroupCollection::CleanupAppend(VisibilityBound lowest_visibility_bound, idx_t start, idx_t count) {
 	auto row_groups = GetRowGroups();
 	// a vacuuming checkpoint may have replaced row groups of the append: clean up what is left of its row ids
-	idx_t end = start + count;
-	auto row_group = row_groups->GetSegmentEndingAfter(start);
-	while (row_group && row_group->GetRowStart() < end) {
-		auto &current_row_group = row_group->GetNode();
-		idx_t row_group_start = row_group->GetRowStart();
-		idx_t start_in_row_group = MaxValue<idx_t>(start, row_group_start) - row_group_start;
-		idx_t end_in_row_group = MinValue<idx_t>(end - row_group_start, current_row_group.count);
-		if (end_in_row_group > start_in_row_group) {
-			current_row_group.CleanupAppend(lowest_visibility_bound, start_in_row_group,
-			                                end_in_row_group - start_in_row_group);
-		}
-		row_group = row_groups->GetNextSegment(*row_group);
-	}
+	row_groups->ScanRowRange(start, count, [&](RowGroup &row_group, idx_t start_in_row_group, idx_t rows) {
+		row_group.CleanupAppend(lowest_visibility_bound, start_in_row_group, rows);
+	});
 }
 
 bool RowGroupCollection::IsPersistent() const {
