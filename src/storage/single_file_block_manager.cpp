@@ -10,6 +10,7 @@
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/enums/checkpoint_abort.hpp"
 #include "duckdb/common/enums/storage_block_prefetch.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
@@ -894,9 +895,18 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 	MetadataReader reader(GetMetadataManager(), free_pointer, nullptr, BlockReaderType::REGISTER_BLOCKS);
 	auto free_list_count = reader.Read<uint64_t>(context);
 	free_list.clear();
+	idx_t invalid_count = 0;
 	for (idx_t i = 0; i < free_list_count; i++) {
 		auto block = reader.Read<block_id_t>(context);
+		if (block < 0 || block >= max_block) {
+			invalid_count++;
+			continue;
+		}
 		free_list.insert(block);
+	}
+	if (invalid_count > 0) {
+		DUCKDB_LOG_WARNING(db.GetDatabase(), "Dropped %llu invalid block ids from the free list of database \"%s\"",
+		                   invalid_count, db.GetName());
 	}
 	auto multi_use_blocks_count = reader.Read<uint64_t>(context);
 	multi_use_blocks.clear();
@@ -981,8 +991,13 @@ void SingleFileBlockManager::MarkBlockAsUsed(block_id_t block_id) {
 
 void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 	unique_lock<mutex> lock(single_file_block_lock);
-	D_ASSERT(block_id >= 0);
-	D_ASSERT(block_id < max_block);
+	if (block_id < 0 || block_id >= max_block) {
+		// a corrupt block pointer: leak what it pointed to rather than put the bogus id on the free list
+		lock.unlock();
+		DUCKDB_LOG_WARNING(db.GetDatabase(), "Ignoring the release of invalid block id %d in database \"%s\"", block_id,
+		                   db.GetName());
+		return;
+	}
 
 	// check if the block is a multi-use block
 	auto entry = multi_use_blocks.find(block_id);
