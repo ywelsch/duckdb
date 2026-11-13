@@ -68,6 +68,10 @@ public:
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
 	void ResetActiveCheckpoint();
+	//! The start time that the next transaction gets
+	transaction_t NextStartTimestamp();
+	//! The earliest start time of the active transactions, checkpoints aside, or else the next start time
+	transaction_t LowestActiveStart();
 	//! Frees the storage dropped by commits below the bound of a starting checkpoint, which does not write it
 	void FreeDroppedStorage(VisibilityBound visibility_bound);
 
@@ -132,6 +136,8 @@ private:
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
+	//! Lets the block manager reuse the blocks that checkpoints freed and no active transaction can read
+	void ReuseFreedBlocks() noexcept;
 	//! Runs the queued cleanups in order. Caller holds the cleanup lock
 	void CleanupQueuedTransactions();
 

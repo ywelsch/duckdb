@@ -11,6 +11,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/block_manager.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -119,6 +120,38 @@ void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
 
 void DuckTransactionManager::ResetActiveCheckpoint() {
 	active_checkpoint = 0;
+}
+
+transaction_t DuckTransactionManager::NextStartTimestamp() {
+	lock_guard<mutex> t_lock(transaction_lock);
+	return current_start_timestamp;
+}
+
+transaction_t DuckTransactionManager::LowestActiveStart() {
+	lock_guard<mutex> t_lock(transaction_lock);
+	transaction_t lowest_start = current_start_timestamp;
+	for (auto &transaction : active_transactions) {
+		if (transaction->IsCheckpointTransaction()) {
+			// reads nothing that its own header frees
+			continue;
+		}
+		lowest_start = MinValue<transaction_t>(lowest_start, transaction->start_time);
+	}
+	return lowest_start;
+}
+
+void DuckTransactionManager::ReuseFreedBlocks() noexcept {
+	if (!db.HasStorageManager()) {
+		return;
+	}
+	try {
+		auto &block_manager = db.GetStorageManager().GetBlockManager();
+		if (block_manager.HasBlocksAwaitingReaders()) {
+			block_manager.ReuseFreedBlocks(LowestActiveStart());
+		}
+	} catch (std::exception &) {
+		// the blocks stay unused until a later transaction ends
+	}
 }
 
 void DuckTransactionManager::FreeDroppedStorage(VisibilityBound visibility_bound) {
@@ -563,6 +596,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	CleanupTransactions();
+	ReuseFreedBlocks();
 
 	if (checkpoint_decision.can_checkpoint && undo_properties.has_updates &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
@@ -621,6 +655,7 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	}
 
 	CleanupTransactions();
+	ReuseFreedBlocks();
 
 	// Run external-resource teardowns the rollback queued (see RollbackState): they execute SQL, so
 	// they can only run here, after the transaction lock is released.
