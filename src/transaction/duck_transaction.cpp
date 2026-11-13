@@ -378,10 +378,9 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	}
 	if (!vacuum_lock) {
 		bool require_vacuum_lock = false;
+		require_vacuum_lock =
+		    require_vacuum_lock || (type.InsertData() && GetTransactionManager().InsertRequiresVacuumLock());
 		require_vacuum_lock = require_vacuum_lock || type.DeleteData();
-		if (!require_vacuum_lock && type.InsertData()) {
-			require_vacuum_lock = GetTransactionManager().InsertRequiresVacuumLock();
-		}
 
 		if (require_vacuum_lock) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
