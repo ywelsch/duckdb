@@ -123,7 +123,7 @@ public:
 	//! Write the header to disk, this is the final step of the checkpointing process
 	void WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
 	                 transaction_t read_stamp) override;
-	bool HasBlocksAwaitingReaders() override;
+	transaction_t LowestPendingReuseStamp() override;
 	void ReuseFreedBlocks(transaction_t lowest_active_start) override;
 	//! Sync changes to the underlying file
 	void FileSync() override;
@@ -229,12 +229,12 @@ private:
 	unordered_map<block_id_t, uint32_t> multi_use_blocks;
 	//! The list of blocks that are no longer in-use, but cannot be re-used until the next checkpoint
 	unordered_set<block_id_t> modified_blocks;
-	//! The blocks that headers freed, by the start time before which a transaction may still read them
-	map<transaction_t, vector<block_id_t>> blocks_awaiting_readers;
-	//! The blocks in blocks_awaiting_readers: listed as free, not reusable yet
-	unordered_set<block_id_t> awaiting_reader_blocks;
-	//! Whether blocks_awaiting_readers has entries, readable without the lock
-	atomic<bool> has_blocks_awaiting_readers {false};
+	//! The list of blocks that a header freed, but cannot yet be re-used because an older transaction may read them
+	unordered_set<block_id_t> free_blocks_pending_reuse;
+	//! The same blocks per header, by the start time before which a transaction may still read them
+	map<transaction_t, vector<block_id_t>> pending_reuse_batches;
+	//! The lowest stamp in pending_reuse_batches, 0 if it is empty: readable without the lock
+	atomic<transaction_t> lowest_pending_reuse_stamp {0};
 	//! The current meta block id
 	idx_t meta_block;
 	//! The current maximum block id, this id will be given away first after the free_list runs out

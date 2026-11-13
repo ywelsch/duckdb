@@ -134,8 +134,8 @@ private:
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
-	//! Lets the block manager reuse the blocks that checkpoints freed and no active transaction can read
-	void ReuseFreedBlocks() noexcept;
+	//! Lets the block manager reuse the blocks that checkpoints freed, if the ended transaction held any back
+	void ReuseFreedBlocks(transaction_t ended_start_time) noexcept;
 
 	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
 	bool HasUnsyncedCommits();

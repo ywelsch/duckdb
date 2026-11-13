@@ -1012,7 +1012,7 @@ void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 		throw InternalException("MarkBlockAsModified called with already modified block id %d", block_id);
 	}
 	if (free_list.find(block_id) != free_list.end() ||
-	    awaiting_reader_blocks.find(block_id) != awaiting_reader_blocks.end()) {
+	    free_blocks_pending_reuse.find(block_id) != free_blocks_pending_reuse.end()) {
 		throw InternalException("MarkBlockAsModified called with already freed block id %d", block_id);
 	}
 	auto newly_used_entry = newly_used_blocks.find(block_id);
@@ -1056,7 +1056,7 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 			                        max_block);
 		}
 		referenced_blocks.insert(block.first);
-		if (awaiting_reader_blocks.find(block.first) != awaiting_reader_blocks.end()) {
+		if (free_blocks_pending_reuse.find(block.first) != free_blocks_pending_reuse.end()) {
 			throw InternalException("Block %lld was used, but a header lists it as free", block.first);
 		}
 		if (block.second > 1) {
@@ -1088,7 +1088,7 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 	for (auto &free_block : free_blocks_in_use) {
 		referenced_blocks.insert(free_block);
 	}
-	for (auto &free_block : awaiting_reader_blocks) {
+	for (auto &free_block : free_blocks_pending_reuse) {
 		referenced_blocks.insert(free_block);
 	}
 	if (referenced_blocks.size() != NumericCast<idx_t>(max_block)) {
@@ -1300,7 +1300,7 @@ vector<MetadataHandle> SingleFileBlockManager::GetFreeListBlocks() {
 		{
 			lock_guard<mutex> guard(single_file_block_lock);
 			free_list_count = free_list.size() + modified_blocks.size() + free_blocks_in_use.size() +
-			                  newly_used_blocks.size() + awaiting_reader_blocks.size();
+			                  newly_used_blocks.size() + free_blocks_pending_reuse.size();
 			multi_use_blocks_count = multi_use_blocks.size();
 		}
 		auto free_list_size = sizeof(uint64_t) + sizeof(block_id_t) * free_list_count;
@@ -1375,7 +1375,7 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 
 	set<block_id_t> all_free_blocks = free_list;
 	all_free_blocks.insert(free_blocks_in_use.begin(), free_blocks_in_use.end());
-	all_free_blocks.insert(awaiting_reader_blocks.begin(), awaiting_reader_blocks.end());
+	all_free_blocks.insert(free_blocks_pending_reuse.begin(), free_blocks_pending_reuse.end());
 	auto checkpoint_freed_blocks = modified_blocks;
 	for (auto &block : checkpoint_freed_blocks) {
 		all_free_blocks.insert(block);
@@ -1462,38 +1462,38 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	}
 	// a transaction that started before the header can still read the freed blocks
 	lock_guard<mutex> release_lock(single_file_block_lock);
-	auto &freed_blocks = blocks_awaiting_readers[read_stamp];
+	auto &freed_blocks = pending_reuse_batches[read_stamp];
 	for (auto &block : checkpoint_freed_blocks) {
 		modified_blocks.erase(block);
 		freed_blocks.push_back(block);
-		awaiting_reader_blocks.insert(block);
+		free_blocks_pending_reuse.insert(block);
 	}
-	has_blocks_awaiting_readers = true;
+	lowest_pending_reuse_stamp = pending_reuse_batches.begin()->first;
 }
 
-bool SingleFileBlockManager::HasBlocksAwaitingReaders() {
-	return has_blocks_awaiting_readers;
+transaction_t SingleFileBlockManager::LowestPendingReuseStamp() {
+	return lowest_pending_reuse_stamp;
 }
 
 void SingleFileBlockManager::ReuseFreedBlocks(transaction_t lowest_active_start) {
 	set<block_id_t> fully_freed_blocks;
 	{
 		unique_lock<mutex> lock(single_file_block_lock);
-		while (!blocks_awaiting_readers.empty()) {
-			auto entry = blocks_awaiting_readers.begin();
-			if (entry->first > lowest_active_start) {
-				break;
-			}
-			auto blocks = std::move(entry->second);
-			blocks_awaiting_readers.erase(entry);
-			for (auto &block : blocks) {
-				awaiting_reader_blocks.erase(block);
-				if (AddFreeBlock(lock, block)) {
-					fully_freed_blocks.insert(block);
-				}
+		// the batches are ordered by stamp
+		auto end = pending_reuse_batches.upper_bound(lowest_active_start);
+		vector<block_id_t> blocks;
+		for (auto entry = pending_reuse_batches.begin(); entry != end; entry++) {
+			blocks.insert(blocks.end(), entry->second.begin(), entry->second.end());
+		}
+		pending_reuse_batches.erase(pending_reuse_batches.begin(), end);
+		lowest_pending_reuse_stamp = pending_reuse_batches.empty() ? 0 : pending_reuse_batches.begin()->first;
+		// AddFreeBlock can give up the lock: no batch is looked at from here on
+		for (auto &block : blocks) {
+			free_blocks_pending_reuse.erase(block);
+			if (AddFreeBlock(lock, block)) {
+				fully_freed_blocks.insert(block);
 			}
 		}
-		has_blocks_awaiting_readers = !blocks_awaiting_readers.empty();
 	}
 	// Release the free fully freed blocks to the filesystem.
 	TrimFreeBlocks(fully_freed_blocks);

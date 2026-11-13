@@ -140,17 +140,18 @@ transaction_t DuckTransactionManager::LowestActiveStart() {
 	return lowest_start;
 }
 
-void DuckTransactionManager::ReuseFreedBlocks() noexcept {
+void DuckTransactionManager::ReuseFreedBlocks(transaction_t ended_start_time) noexcept {
 	if (!db.HasStorageManager()) {
 		return;
 	}
 	try {
 		auto &block_manager = db.GetStorageManager().GetBlockManager();
-		if (block_manager.HasBlocksAwaitingReaders()) {
+		// a transaction that started later held nothing back
+		if (ended_start_time < block_manager.LowestPendingReuseStamp()) {
 			block_manager.ReuseFreedBlocks(LowestActiveStart());
 		}
 	} catch (std::exception &) {
-		// the blocks stay unused until a later transaction ends
+		// the blocks stay unused until the next checkpoint
 	}
 }
 
@@ -383,6 +384,7 @@ void DuckTransactionManager::CleanupTransactions() {
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	auto start_time = transaction.start_time;
 	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
 	ErrorData error = transaction.PreFlushOptimisticBlocks(db);
 	unique_lock<mutex> t_lock(transaction_lock);
@@ -582,7 +584,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	CleanupTransactions();
-	ReuseFreedBlocks();
+	ReuseFreedBlocks(start_time);
 
 	if (checkpoint_decision.can_checkpoint && (undo_properties.has_updates || undo_properties.has_dropped_entries) &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
@@ -627,6 +629,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	auto start_time = transaction.start_time;
 
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.GetTransactionId());
 
@@ -641,7 +644,7 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	}
 
 	CleanupTransactions();
-	ReuseFreedBlocks();
+	ReuseFreedBlocks(start_time);
 
 	// Run external-resource teardowns the rollback queued (see RollbackState): they execute SQL, so
 	// they can only run here, after the transaction lock is released.

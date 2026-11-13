@@ -19,12 +19,20 @@ CHECKPOINT
 statement ok
 UPDATE t SET s = s || 'x'
 
-# a reader that started before the checkpoint
+# two readers that started before the checkpoint
 statement ok con1
 BEGIN
 
 query I con1
 SELECT COUNT(*) FROM t WHERE s LIKE '%x'
+----
+100000
+
+statement ok con3
+BEGIN
+
+query I con3
+SELECT COUNT(*) FROM t
 ----
 100000
 
@@ -44,6 +52,15 @@ SELECT COUNT(*) FROM t WHERE s LIKE '%x'
 
 statement ok con1
 COMMIT
+
+# the other reader still holds the blocks back
+query I con2
+SELECT free_blocks FROM pragma_database_size()
+----
+0
+
+statement ok con3
+ROLLBACK
 
 query I con2
 SELECT free_blocks > 0 FROM pragma_database_size()
