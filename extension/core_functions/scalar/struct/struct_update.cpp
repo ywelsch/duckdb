@@ -43,25 +43,24 @@ struct StructUpdateBindData : public FunctionData {
 		if (field_indexes.empty()) {
 			// Binding always records a field for every updated argument, so the mapping is only missing from plans
 			// that were serialized before it existed
-			field_indexes = FieldIndexesFromAliases(stype, deserializer.Get<const const_expression_list_t &>());
+			field_indexes = FieldIndexesFromNames(stype, bound_function.GetNamedArguments());
 		}
 		return make_uniq<StructUpdateBindData>(std::move(stype), std::move(field_indexes));
 	}
 
-	//! Plans serialized before v2.0 only name the field every argument updates through the alias of that argument
-	static vector<idx_t> FieldIndexesFromAliases(const LogicalType &stype, const const_expression_list_t &children) {
+	//! Plans serialized before v2.0 only name the field every argument updates, restored as the argument's name
+	static vector<idx_t> FieldIndexesFromNames(const LogicalType &stype, const vector<Identifier> &names) {
 		identifier_tree_t<idx_t> result_fields;
 		auto &result_children = StructType::GetChildTypes(stype);
 		for (idx_t field_idx = 0; field_idx < result_children.size(); field_idx++) {
 			result_fields.emplace(result_children[field_idx].first, field_idx);
 		}
 		vector<idx_t> field_indexes;
-		for (idx_t arg_idx = 1; arg_idx < children.size(); arg_idx++) {
-			auto &alias = children[arg_idx].get().GetAlias();
-			auto entry = result_fields.find(alias);
+		for (auto &name : names) {
+			auto entry = result_fields.find(name);
 			if (entry == result_fields.end()) {
 				throw SerializationException("struct_update argument \"%s\" does not name a field of the result",
-				                             alias.GetIdentifierName());
+				                             name.GetIdentifierName());
 			}
 			field_indexes.push_back(entry->second);
 		}

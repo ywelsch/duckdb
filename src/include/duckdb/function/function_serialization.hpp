@@ -329,6 +329,44 @@ public:
 		}
 	}
 
+	//! The fields the named arguments add to the return type, if it has exactly one per named argument
+	static vector<Identifier> FieldsAddedByNamedArguments(const vector<unique_ptr<Expression>> &children,
+	                                                      idx_t standard_count, const LogicalType &return_type) {
+		vector<Identifier> fields;
+		if (standard_count > 1 || children.size() <= standard_count) {
+			return fields;
+		}
+		const idx_t named_count = children.size() - standard_count;
+		if (return_type.id() == LogicalTypeId::UNION) {
+			if (standard_count == 0 && UnionType::GetMemberCount(return_type) == named_count) {
+				for (idx_t i = 0; i < named_count; i++) {
+					fields.push_back(UnionType::GetMemberName(return_type, i));
+				}
+			}
+			return fields;
+		}
+		if (return_type.id() != LogicalTypeId::STRUCT) {
+			return fields;
+		}
+		auto &input_type = standard_count == 1 ? children[0]->GetReturnType() : return_type;
+		if (input_type.id() != LogicalTypeId::STRUCT) {
+			return fields;
+		}
+		const idx_t kept_count = standard_count == 1 ? StructType::GetChildCount(input_type) : 0;
+		if (StructType::GetChildCount(return_type) != kept_count + named_count) {
+			return fields;
+		}
+		for (idx_t i = 0; i < kept_count; i++) {
+			if (StructType::GetChildName(input_type, i) != StructType::GetChildName(return_type, i)) {
+				return fields;
+			}
+		}
+		for (idx_t i = kept_count; i < kept_count + named_count; i++) {
+			fields.push_back(StructType::GetChildName(return_type, i));
+		}
+		return fields;
+	}
+
 	//! Plans written before the argument names were serialized hold the names of the named arguments in the aliases
 	//! of the trailing arguments. Only the arguments behind the standard parameters can have been named, and only
 	//! where the function cannot take them positionally - a "*args" function folds its "**kwargs" into "*args", so
@@ -350,13 +388,11 @@ public:
 		if (!takes_named || children.size() != positional_count) {
 			return;
 		}
-		// the fields of a v1.x struct_pack are its argument names, also where a rewrite dropped an argument's alias
-		if (standard_count == 0 && return_type.id() == LogicalTypeId::STRUCT &&
-		    StructType::GetChildCount(return_type) == children.size()) {
-			for (idx_t i = 0; i < children.size(); i++) {
-				named_arguments.push_back(StructType::GetChildName(return_type, i));
-			}
-			positional_count = 0;
+		// the fields a v1.x struct or union function adds are its argument names, also where a rewrite dropped an alias
+		auto added_fields = FieldsAddedByNamedArguments(children, standard_count, return_type);
+		if (!added_fields.empty()) {
+			named_arguments = std::move(added_fields);
+			positional_count = standard_count;
 			return;
 		}
 		idx_t named_offset = children.size();
