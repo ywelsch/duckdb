@@ -52,6 +52,7 @@ DuckTransactionManager::DuckTransactionManager(AttachedDatabase &db) : Transacti
 	// the first timestamp a real transaction can draw: one past the bootstrap stamp, which is also
 	// the bound the system transaction reads at
 	current_start_timestamp = SYSTEM_TRANSACTION_TIMESTAMP + 1;
+	lowest_remaining_start = current_start_timestamp;
 	last_commit = SYSTEM_TRANSACTION_TIMESTAMP;
 	// transaction ID starts very high:
 	// it should be much higher than the current start timestamp
@@ -140,18 +141,15 @@ transaction_t DuckTransactionManager::LowestActiveStart() {
 	return lowest_start;
 }
 
-void DuckTransactionManager::ReuseFreedBlocks(transaction_t ended_start_time) noexcept {
+void DuckTransactionManager::ReuseFreedBlocks() noexcept {
 	if (!db.HasStorageManager()) {
 		return;
 	}
 	try {
-		auto &block_manager = db.GetStorageManager().GetBlockManager();
-		// a transaction that started later held nothing back
-		if (ended_start_time < block_manager.LowestPendingReuseStamp()) {
-			block_manager.ReuseFreedBlocks(LowestActiveStart());
-		}
+		// transactions that started since then started later: the true lowest start is not below this
+		db.GetStorageManager().GetBlockManager().ReuseFreedBlocks(lowest_remaining_start);
 	} catch (std::exception &) {
-		// the blocks stay unused until the next checkpoint
+		// the blocks stay unused until a later transaction ends
 	}
 }
 
@@ -384,7 +382,6 @@ void DuckTransactionManager::CleanupTransactions() {
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
-	auto start_time = transaction.start_time;
 	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
 	ErrorData error = transaction.PreFlushOptimisticBlocks(db);
 	unique_lock<mutex> t_lock(transaction_lock);
@@ -584,7 +581,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	CleanupTransactions();
-	ReuseFreedBlocks(start_time);
+	ReuseFreedBlocks();
 
 	if (checkpoint_decision.can_checkpoint && (undo_properties.has_updates || undo_properties.has_dropped_entries) &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
@@ -629,7 +626,6 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
-	auto start_time = transaction.start_time;
 
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Rollback", transaction.GetTransactionId());
 
@@ -644,7 +640,7 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	}
 
 	CleanupTransactions();
-	ReuseFreedBlocks(start_time);
+	ReuseFreedBlocks();
 
 	// Run external-resource teardowns the rollback queued (see RollbackState): they execute SQL, so
 	// they can only run here, after the transaction lock is released.
@@ -718,6 +714,7 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 idx_t DuckTransactionManager::UpdateLowestVisibilityBound(optional_ptr<DuckTransaction> exclude) noexcept {
 	idx_t exclude_index = active_transactions.size();
 	auto computed_lowest_visibility_bound = VisibilityBound::AllCommitted();
+	transaction_t computed_lowest_start = current_start_timestamp;
 	for (idx_t i = 0; i < active_transactions.size(); i++) {
 		if (exclude && active_transactions[i].get() == exclude.get()) {
 			exclude_index = i;
@@ -725,8 +722,12 @@ idx_t DuckTransactionManager::UpdateLowestVisibilityBound(optional_ptr<DuckTrans
 		}
 		computed_lowest_visibility_bound =
 		    VisibilityBound::Min(computed_lowest_visibility_bound, active_transactions[i]->view.visibility_bound);
+		if (!active_transactions[i]->IsCheckpointTransaction()) {
+			computed_lowest_start = MinValue<transaction_t>(computed_lowest_start, active_transactions[i]->start_time);
+		}
 	}
 	lowest_visibility_bound = computed_lowest_visibility_bound;
+	lowest_remaining_start = computed_lowest_start;
 	return exclude_index;
 }
 

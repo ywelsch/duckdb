@@ -88,10 +88,6 @@ public:
 	//! The blocks that the header frees wait for the transactions that started before read_stamp
 	virtual void WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
 	                         transaction_t read_stamp) = 0;
-	//! Transactions that started before this time hold back the reuse of blocks that a header freed (0: none)
-	virtual transaction_t LowestPendingReuseStamp() {
-		return 0;
-	}
 	//! Lets the blocks be reused that headers freed before every active transaction started
 	virtual void ReuseFreedBlocks(transaction_t lowest_active_start) {
 	}

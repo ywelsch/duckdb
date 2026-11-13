@@ -1471,11 +1471,11 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	lowest_pending_reuse_stamp = pending_reuse_batches.begin()->first;
 }
 
-transaction_t SingleFileBlockManager::LowestPendingReuseStamp() {
-	return lowest_pending_reuse_stamp;
-}
-
 void SingleFileBlockManager::ReuseFreedBlocks(transaction_t lowest_active_start) {
+	if (lowest_pending_reuse_stamp > lowest_active_start) {
+		// nothing waits, or a transaction that started before the first batch is still active
+		return;
+	}
 	set<block_id_t> fully_freed_blocks;
 	{
 		unique_lock<mutex> lock(single_file_block_lock);
@@ -1486,7 +1486,8 @@ void SingleFileBlockManager::ReuseFreedBlocks(transaction_t lowest_active_start)
 			blocks.insert(blocks.end(), entry->second.begin(), entry->second.end());
 		}
 		pending_reuse_batches.erase(pending_reuse_batches.begin(), end);
-		lowest_pending_reuse_stamp = pending_reuse_batches.empty() ? 0 : pending_reuse_batches.begin()->first;
+		lowest_pending_reuse_stamp =
+		    pending_reuse_batches.empty() ? MAX_TRANSACTION_ID : pending_reuse_batches.begin()->first;
 		// AddFreeBlock can give up the lock: no batch is looked at from here on
 		for (auto &block : blocks) {
 			free_blocks_pending_reuse.erase(block);

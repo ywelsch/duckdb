@@ -134,8 +134,8 @@ private:
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
-	//! Lets the block manager reuse the blocks that checkpoints freed, if the ended transaction held any back
-	void ReuseFreedBlocks(transaction_t ended_start_time) noexcept;
+	//! Lets the block manager reuse the blocks that checkpoints freed and no active transaction can read
+	void ReuseFreedBlocks() noexcept;
 
 	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
 	bool HasUnsyncedCommits();
@@ -156,6 +156,8 @@ private:
 	//! The lowest bound any active transaction reads at. A version preceding it is visible to
 	//! every active transaction, so whatever it supersedes can be cleaned up or compacted
 	atomic<VisibilityBound> lowest_visibility_bound;
+	//! The lowest start time of the transactions that stayed active when the last one ended, checkpoints aside
+	atomic<transaction_t> lowest_remaining_start;
 	//! The last commit timestamp
 	atomic<transaction_t> last_commit;
 	//! The currently active checkpoint, zero when none is running
