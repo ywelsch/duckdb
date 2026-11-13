@@ -218,22 +218,9 @@ public:
 	//! Gets a pointer to the first segment that ends after the given row, if there is any
 	optional_ptr<SegmentNode<T>> GetSegmentEndingAfter(idx_t row_number) const {
 		auto l = Lock();
-		while (nodes.empty() || (row_number >= nodes.back()->GetRowEnd())) {
-			if (!LoadNextSegment(l)) {
-				break;
-			}
-		}
-		idx_t lower = 0;
-		idx_t upper = nodes.size();
-		while (lower < upper) {
-			idx_t index = lower + (upper - lower) / 2;
-			if (row_number >= nodes[index]->GetRowEnd()) {
-				lower = index + 1;
-			} else {
-				upper = index;
-			}
-		}
-		return lower == nodes.size() ? nullptr : nodes[lower].get();
+		idx_t segment_index;
+		TryGetSegmentIndex(l, row_number, segment_index);
+		return segment_index < nodes.size() ? nodes[segment_index].get() : nullptr;
 	}
 
 	void AppendSegment(shared_ptr<T> segment) {
@@ -287,15 +274,13 @@ public:
 		throw DataCorruptionException(error);
 	}
 
+	//! Finds the segment that holds the row. If there is none, the result is the first segment after the row
 	bool TryGetSegmentIndex(SegmentLock &l, idx_t row_number, idx_t &result) const {
 		// load segments until the row number is within bounds
 		while (nodes.empty() || (row_number >= nodes.back()->GetRowEnd())) {
 			if (!LoadNextSegment(l)) {
 				break;
 			}
-		}
-		if (nodes.empty()) {
-			return false;
 		}
 		idx_t lower = 0;
 		idx_t upper = nodes.size();
@@ -318,6 +303,7 @@ public:
 		D_ASSERT(lower == upper);
 		D_ASSERT(lower == 0 || row_number >= nodes[lower - 1]->GetRowEnd());
 		D_ASSERT(upper == nodes.size() || row_number < nodes[upper]->GetRowStart());
+		result = lower;
 		return false;
 	}
 
