@@ -1011,7 +1011,8 @@ void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 	if (modified_blocks.find(block_id) != modified_blocks.end()) {
 		throw InternalException("MarkBlockAsModified called with already modified block id %d", block_id);
 	}
-	if (free_list.find(block_id) != free_list.end()) {
+	if (free_list.find(block_id) != free_list.end() ||
+	    awaiting_reader_blocks.find(block_id) != awaiting_reader_blocks.end()) {
 		throw InternalException("MarkBlockAsModified called with already freed block id %d", block_id);
 	}
 	auto newly_used_entry = newly_used_blocks.find(block_id);
@@ -1055,6 +1056,9 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 			                        max_block);
 		}
 		referenced_blocks.insert(block.first);
+		if (awaiting_reader_blocks.find(block.first) != awaiting_reader_blocks.end()) {
+			throw InternalException("Block %lld was used, but a header lists it as free", block.first);
+		}
 		if (block.second > 1) {
 			// multi-use block
 			auto entry = multi_use_blocks.find(block.first);
@@ -1082,6 +1086,9 @@ void SingleFileBlockManager::VerifyBlocks(const unordered_map<block_id_t, idx_t>
 		referenced_blocks.insert(free_block);
 	}
 	for (auto &free_block : free_blocks_in_use) {
+		referenced_blocks.insert(free_block);
+	}
+	for (auto &free_block : awaiting_reader_blocks) {
 		referenced_blocks.insert(free_block);
 	}
 	if (referenced_blocks.size() != NumericCast<idx_t>(max_block)) {
@@ -1292,8 +1299,8 @@ vector<MetadataHandle> SingleFileBlockManager::GetFreeListBlocks() {
 		idx_t multi_use_blocks_count;
 		{
 			lock_guard<mutex> guard(single_file_block_lock);
-			free_list_count =
-			    free_list.size() + modified_blocks.size() + free_blocks_in_use.size() + newly_used_blocks.size();
+			free_list_count = free_list.size() + modified_blocks.size() + free_blocks_in_use.size() +
+			                  newly_used_blocks.size() + awaiting_reader_blocks.size();
 			multi_use_blocks_count = multi_use_blocks.size();
 		}
 		auto free_list_size = sizeof(uint64_t) + sizeof(block_id_t) * free_list_count;
@@ -1353,7 +1360,8 @@ bool SingleFileBlockManager::AddFreeBlock(unique_lock<mutex> &lock, block_id_t b
 	lock.lock();
 	return false;
 }
-void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound) {
+void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
+                                         transaction_t read_stamp) {
 	auto free_list_blocks = GetFreeListBlocks();
 
 	// now handle the free list
@@ -1367,6 +1375,7 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 
 	set<block_id_t> all_free_blocks = free_list;
 	all_free_blocks.insert(free_blocks_in_use.begin(), free_blocks_in_use.end());
+	all_free_blocks.insert(awaiting_reader_blocks.begin(), awaiting_reader_blocks.end());
 	auto checkpoint_freed_blocks = modified_blocks;
 	for (auto &block : checkpoint_freed_blocks) {
 		all_free_blocks.insert(block);
@@ -1448,15 +1457,43 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	active_header = 1 - active_header;
 	//! Ensure the header write ends up on disk
 	handle->Sync();
+	if (checkpoint_freed_blocks.empty()) {
+		return;
+	}
+	// a transaction that started before the header can still read the freed blocks
+	lock_guard<mutex> release_lock(single_file_block_lock);
+	auto &freed_blocks = blocks_awaiting_readers[read_stamp];
+	for (auto &block : checkpoint_freed_blocks) {
+		modified_blocks.erase(block);
+		freed_blocks.push_back(block);
+		awaiting_reader_blocks.insert(block);
+	}
+	has_blocks_awaiting_readers = true;
+}
+
+bool SingleFileBlockManager::HasBlocksAwaitingReaders() {
+	return has_blocks_awaiting_readers;
+}
+
+void SingleFileBlockManager::ReuseFreedBlocks(transaction_t lowest_active_start) {
 	set<block_id_t> fully_freed_blocks;
 	{
-		unique_lock<mutex> release_lock(single_file_block_lock);
-		for (auto &block : checkpoint_freed_blocks) {
-			modified_blocks.erase(block);
-			if (AddFreeBlock(release_lock, block)) {
-				fully_freed_blocks.insert(block);
+		unique_lock<mutex> lock(single_file_block_lock);
+		while (!blocks_awaiting_readers.empty()) {
+			auto entry = blocks_awaiting_readers.begin();
+			if (entry->first > lowest_active_start) {
+				break;
+			}
+			auto blocks = std::move(entry->second);
+			blocks_awaiting_readers.erase(entry);
+			for (auto &block : blocks) {
+				awaiting_reader_blocks.erase(block);
+				if (AddFreeBlock(lock, block)) {
+					fully_freed_blocks.insert(block);
+				}
 			}
 		}
+		has_blocks_awaiting_readers = !blocks_awaiting_readers.empty();
 	}
 	// Release the free fully freed blocks to the filesystem.
 	TrimFreeBlocks(fully_freed_blocks);

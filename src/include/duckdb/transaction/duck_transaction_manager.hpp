@@ -68,6 +68,10 @@ public:
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
 	void ResetActiveCheckpoint();
+	//! The start time that the next transaction gets
+	transaction_t NextStartTimestamp();
+	//! The earliest start time of the active transactions, checkpoints aside, or else the next start time
+	transaction_t LowestActiveStart();
 
 	bool IsDuckTransactionManager() override {
 		return true;
@@ -130,6 +134,8 @@ private:
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
+	//! Lets the block manager reuse the blocks that checkpoints freed and no active transaction can read
+	void ReuseFreedBlocks() noexcept;
 
 	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
 	bool HasUnsyncedCommits();
