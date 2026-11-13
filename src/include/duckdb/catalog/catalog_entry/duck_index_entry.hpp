@@ -46,8 +46,8 @@ public:
 
 	DataTableInfo &GetDataTableInfo() const;
 
-	//! Saves index removal into drop_state to be removed after FlushCommit().
-	void CommitDrop(CommitDropState &drop_state);
+	//! Registers the index in drop_state, which detaches it from its table once the commit has succeeded.
+	void CommitDetach(CommitDropState &drop_state);
 };
 
 } // namespace duckdb

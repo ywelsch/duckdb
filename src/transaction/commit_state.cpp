@@ -39,8 +39,8 @@ void CommitDropState::DropBlock(block_id_t block_id) {
 	dropped_block_ids.push_back(block_id);
 }
 
-void CommitDropState::RemoveIndex(TableIndexList &indexes, idx_t index_oid) {
-	pending_index_removals.push_back(PendingIndexRemoval {indexes, index_oid});
+void CommitDropState::DetachIndex(TableIndexList &indexes, idx_t index_oid) {
+	pending_index_detaches.push_back(PendingIndexDetach {indexes, index_oid});
 }
 
 void CommitDropState::FinalizeCommit() {
@@ -52,15 +52,15 @@ void CommitDropState::FinalizeCommit() {
 	// assert that !block_manager -> dropped_block_ids.empty()
 	D_ASSERT(block_manager || dropped_block_ids.empty());
 
-	for (auto &removal : pending_index_removals) {
-		removal.indexes.get().DetachIndex(removal.index_oid);
+	for (auto &detach : pending_index_detaches) {
+		detach.indexes.get().DetachIndex(detach.index_oid);
 	}
 	dropped_block_ids.clear();
-	pending_index_removals.clear();
+	pending_index_detaches.clear();
 }
 
 void CommitDropState::FinalizeBlocksInUse(vector<shared_ptr<BlockHandle>> &block_handles) {
-	D_ASSERT(pending_index_removals.empty());
+	D_ASSERT(pending_index_detaches.empty());
 	D_ASSERT(block_manager || dropped_block_ids.empty());
 	for (auto block_id : dropped_block_ids) {
 		// a registered block is not reused, also once a checkpoint lists it as free
@@ -76,7 +76,7 @@ void CommitDropState::FinalizeBlocksInUse(vector<shared_ptr<BlockHandle>> &block
 }
 
 bool CommitDropState::Empty() const {
-	return dropped_block_ids.empty() && pending_index_removals.empty();
+	return dropped_block_ids.empty() && pending_index_detaches.empty();
 }
 
 //===--------------------------------------------------------------------===//
@@ -254,7 +254,7 @@ void CommitState::CommitEntryDrop(CatalogEntry &entry, data_ptr_t dataptr, Commi
 			break;
 		case CatalogType::INDEX_ENTRY: {
 			auto &index_entry = entry.Cast<DuckIndexEntry>();
-			index_entry.CommitDrop(drop_state);
+			index_entry.CommitDetach(drop_state);
 			info.has_dropped_storage = true;
 			break;
 		}

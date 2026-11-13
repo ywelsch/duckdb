@@ -74,7 +74,7 @@ void CleanupState::CleanupEntryDrop(CatalogEntry &entry) {
 			break;
 		}
 		CommitDropState drop_state(table.GetAttached().GetStorageManager().GetBlockManager());
-		table_entry.CommitDrop(drop_state);
+		table_entry.CleanupDrop(drop_state);
 		drop_state.FinalizeCommit();
 		break;
 	}

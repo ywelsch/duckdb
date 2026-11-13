@@ -50,7 +50,8 @@ public:
 	void SetAsRoot() override;
 
 	void CommitAlter(string &column_name, CommitDropState &drop_state);
-	void CommitDrop(CommitDropState &drop_state);
+	//! Frees the storage of the dropped table, called by the cleanup of the drop.
+	void CleanupDrop(CommitDropState &drop_state);
 
 	//! Returns the backing index OIDs of UNIQUE constraints that are not in prev_table.
 	vector<idx_t> GetAddedUniqueIndexOids(const DuckTableEntry &prev_table) const;

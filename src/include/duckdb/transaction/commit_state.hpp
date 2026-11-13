@@ -34,12 +34,12 @@ struct UpdateInfo;
 enum class CommitMode { COMMIT, REVERT_COMMIT };
 
 //! An index that has been marked for detaching from a table's index list once the commit chain succeeds.
-struct PendingIndexRemoval {
+struct PendingIndexDetach {
 	reference<TableIndexList> indexes;
 	idx_t index_oid;
 };
 
-//! Accumulates block marks and index removals during commit so they can be applied together once the
+//! Accumulates block marks and index detaches during commit so they can be applied together once the
 //! commit chain has succeeded and FlushCommit() has been called, since these are side effects that can't be reverted
 //! if we need to rollback a transaction.
 class CommitDropState {
@@ -52,8 +52,8 @@ public:
 	//! Register an index to be detached from a table's index list during FinalizeCommit. The cleanup of the drop
 	//! removes the detached index, which drops its in-memory data and marks its blocks on disk as free. Block marking
 	//! for indexes is handled implicitly along destruction paths for index memory.
-	void RemoveIndex(TableIndexList &indexes, idx_t index_oid);
-	//! Finalize accumulated block marks and index removals.
+	void DetachIndex(TableIndexList &indexes, idx_t index_oid);
+	//! Finalize accumulated block marks and index detaches.
 	void FinalizeCommit();
 	//! Mark the accumulated blocks, holding a handle on each so that snapshots can keep reading them.
 	void FinalizeBlocksInUse(vector<shared_ptr<BlockHandle>> &block_handles);
@@ -63,7 +63,7 @@ public:
 private:
 	optional_ptr<BlockManager> block_manager;
 	vector<block_id_t> dropped_block_ids;
-	vector<PendingIndexRemoval> pending_index_removals;
+	vector<PendingIndexDetach> pending_index_detaches;
 };
 
 struct IndexDataRemover {
