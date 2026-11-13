@@ -72,6 +72,62 @@ SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'n'
 ----
 0
 
+# the transaction that runs the checkpoint reads the dropped table itself, from blocks that it has not loaded yet
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+CREATE TABLE c AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(20000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok con1
+BEGIN TRANSACTION
+
+query I con1
+SELECT COUNT(*) FROM tick
+----
+1
+
+statement ok
+DROP TABLE c
+
+statement ok con1
+CHECKPOINT
+
+# would reuse the blocks of c
+statement ok
+INSERT INTO f SELECT i, repeat(md5((i + 7)::VARCHAR), 160) AS s FROM range(20000) t(i)
+
+statement ok
+CHECKPOINT
+
+query III con1
+SELECT COUNT(*), SUM(length(s)), bool_and(s = repeat(md5(i::VARCHAR), 160)) FROM c
+----
+20000	102400000	true
+
+statement ok con1
+COMMIT
+
+statement ok
+SET force_compression='auto'
+
 # the cleanup frees dropped storage in memory while the checkpoint that freed it on disk has not written its header
 statement ok
 CREATE TABLE p AS SELECT i, i::VARCHAR || 'p' AS s FROM range(1000000) t(i)

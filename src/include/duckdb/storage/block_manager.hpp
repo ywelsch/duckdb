@@ -113,8 +113,6 @@ public:
 
 	//! Register a block with the given block id in the base file, an already registered block must have the same tag
 	shared_ptr<BlockHandle> RegisterBlock(block_id_t block_id, MemoryTag tag = MemoryTag::BASE_TABLE);
-	//! Returns the registered block with the given block id, if any
-	shared_ptr<BlockHandle> TryGetBlock(block_id_t block_id);
 	//! Convert an existing in-memory buffer into a persistent disk-backed block
 	//! If mode is set to destructive (default) - the old_block will be destroyed as part of this method
 	//! This can only be safely used when there is no other (lingering) usage of old_block
@@ -188,6 +186,7 @@ public:
 
 protected:
 	bool BlockIsRegistered(block_id_t block_id);
+	shared_ptr<BlockHandle> TryGetBlock(block_id_t block_id);
 
 public:
 	template <class TARGET>

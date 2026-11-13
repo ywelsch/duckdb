@@ -14,7 +14,6 @@
 #include "duckdb/common/enums/active_transaction_state.hpp"
 
 namespace duckdb {
-class BlockHandle;
 class BufferManager;
 class ClientContext;
 class CommitDropState;
@@ -87,8 +86,6 @@ private:
 	idx_t cleaned_up_entries = 0;
 	//! Set by the commit, read by the cleanup and by a checkpoint that starts before it
 	DroppedStorageState dropped_storage = DroppedStorageState::NONE;
-	//! Keeps the blocks that a checkpoint freed ahead of the cleanup from being reused
-	vector<shared_ptr<BlockHandle>> dropped_block_handles;
 
 private:
 	template <class T>

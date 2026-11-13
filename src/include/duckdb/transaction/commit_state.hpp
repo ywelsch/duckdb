@@ -17,7 +17,6 @@
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
-class BlockHandle;
 class BlockManager;
 class CatalogEntry;
 class TableIndexList;
@@ -55,8 +54,6 @@ public:
 	void DetachIndex(TableIndexList &indexes, idx_t index_oid);
 	//! Finalize accumulated block marks and index detaches.
 	void FinalizeCommit();
-	//! Mark the accumulated blocks, holding a handle on each so that snapshots can keep reading them.
-	void FinalizeBlocksInUse(vector<shared_ptr<BlockHandle>> &block_handles);
 	//! True if no work has been queued.
 	bool Empty() const;
 

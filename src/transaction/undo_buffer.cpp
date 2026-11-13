@@ -9,7 +9,6 @@
 #include "duckdb/execution/index/bound_index.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/storage/buffer/block_handle.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_manager.hpp"
@@ -219,7 +218,8 @@ void UndoBuffer::FreeDroppedStorage() {
 	});
 	// set first: if marking fails half-way, the cleanup must not mark the blocks again
 	dropped_storage = DroppedStorageState::FREED_BY_CHECKPOINT;
-	drop_state.FinalizeBlocksInUse(dropped_block_handles);
+	// the block manager keeps the blocks until the transactions that started before the checkpoint have ended
+	drop_state.FinalizeCommit();
 }
 
 void UndoBuffer::WriteToWAL(WriteAheadLog &wal, optional_ptr<StorageCommitState> commit_state) {

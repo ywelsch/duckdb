@@ -12,7 +12,6 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/storage/block_manager.hpp"
-#include "duckdb/storage/buffer/block_handle.hpp"
 #include "duckdb/storage/table/chunk_info.hpp"
 #include "duckdb/storage/table/column_data.hpp"
 #include "duckdb/storage/table/row_version_manager.hpp"
@@ -57,22 +56,6 @@ void CommitDropState::FinalizeCommit() {
 	}
 	dropped_block_ids.clear();
 	pending_index_detaches.clear();
-}
-
-void CommitDropState::FinalizeBlocksInUse(vector<shared_ptr<BlockHandle>> &block_handles) {
-	D_ASSERT(pending_index_detaches.empty());
-	D_ASSERT(block_manager || dropped_block_ids.empty());
-	for (auto block_id : dropped_block_ids) {
-		// a registered block is not reused, also once a checkpoint lists it as free
-		auto handle = block_manager->TryGetBlock(block_id);
-		if (!handle) {
-			// only overflow string blocks are registered lazily
-			handle = block_manager->RegisterBlock(block_id, MemoryTag::OVERFLOW_STRINGS);
-		}
-		block_handles.push_back(std::move(handle));
-		block_manager->MarkBlockAsModified(block_id);
-	}
-	dropped_block_ids.clear();
 }
 
 bool CommitDropState::Empty() const {
