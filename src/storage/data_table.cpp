@@ -1701,10 +1701,6 @@ void DataTable::CommitDropTable(CommitDropState &drop_state) {
 }
 
 void DataTable::CommitDropTableInUse(CommitDropState &drop_state) {
-	// snapshots load the metadata lazily, from blocks that the checkpoint frees
-	for (auto &row_group : row_groups->GetRowGroups()->Segments()) {
-		row_group.LoadMetadata();
-	}
 	row_groups->CommitDropTable(drop_state);
 	// the indexes stay usable: the cleanup of the drop disowns their blocks
 	DroppedBlockCollector collector(drop_state);

@@ -1205,13 +1205,6 @@ shared_ptr<RowVersionManager> RowGroup::GetOrCreateVersionInfoPtr() {
 	return version_info->GetOrCreate(GetBlockManager());
 }
 
-void RowGroup::LoadMetadata() {
-	for (idx_t c = 0; c < GetColumnCount(); c++) {
-		LoadColumn(c);
-	}
-	GetVersionInfo();
-}
-
 RowVersionManager &RowGroup::GetOrCreateVersionInfo() {
 	return *GetOrCreateVersionInfoPtr();
 }
