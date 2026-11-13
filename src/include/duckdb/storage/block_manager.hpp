@@ -85,9 +85,9 @@ public:
 		Write(block, block.id);
 	}
 	//! Write the header of a checkpoint with the given bound; should be the final step of a checkpoint
-	//! The blocks that the header frees wait for the transactions that started before read_stamp
+	//! What the header frees waits for the transactions that started before read_stamp, if any are active
 	virtual void WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
-	                         transaction_t read_stamp) = 0;
+	                         transaction_t read_stamp, transaction_t lowest_active_start) = 0;
 	//! Lets the blocks be reused that headers freed before every active transaction started
 	virtual void ReuseFreedBlocks(transaction_t lowest_active_start) {
 	}

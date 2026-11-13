@@ -906,7 +906,7 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 		multi_use_blocks[block_id] = usage_count;
 	}
 	GetMetadataManager().Read(reader);
-	GetMetadataManager().MarkBlocksAsModified();
+	GetMetadataManager().MarkBlocksAsModified(false);
 }
 
 bool SingleFileBlockManager::IsRootBlock(MetaBlockPointer root) {
@@ -1361,13 +1361,14 @@ bool SingleFileBlockManager::AddFreeBlock(unique_lock<mutex> &lock, block_id_t b
 	return false;
 }
 void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
-                                         transaction_t read_stamp) {
+                                         transaction_t read_stamp, transaction_t lowest_active_start) {
 	auto free_list_blocks = GetFreeListBlocks();
 
 	// now handle the free list
 	auto &metadata_manager = GetMetadataManager();
-	// the metadata blocks that the checkpoint no longer uses are free: older transactions can still load them
-	auto freed_metadata_blocks = metadata_manager.MarkBlocksAsModified();
+	// a transaction that started before the header can still read what the header frees
+	bool has_readers = lowest_active_start < read_stamp;
+	auto freed_metadata_blocks = metadata_manager.MarkBlocksAsModified(has_readers);
 
 	unique_lock<mutex> lock(single_file_block_lock);
 	// set the iteration count
@@ -1457,21 +1458,21 @@ void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader he
 	active_header = 1 - active_header;
 	//! Ensure the header write ends up on disk
 	handle->Sync();
-	if (checkpoint_freed_blocks.empty() && freed_metadata_blocks.empty()) {
-		return;
+	if (!checkpoint_freed_blocks.empty() || !freed_metadata_blocks.empty()) {
+		lock_guard<mutex> release_lock(single_file_block_lock);
+		auto &freed = pending_reuse_batches[read_stamp];
+		for (auto &block : checkpoint_freed_blocks) {
+			modified_blocks.erase(block);
+			freed.blocks.push_back(block);
+			free_blocks_pending_reuse.insert(block);
+		}
+		for (auto &metadata_block : freed_metadata_blocks) {
+			freed.metadata_blocks[metadata_block.first] |= metadata_block.second;
+		}
+		lowest_pending_reuse_stamp = pending_reuse_batches.begin()->first;
 	}
-	// a transaction that started before the header can still read the freed blocks
-	lock_guard<mutex> release_lock(single_file_block_lock);
-	auto &freed = pending_reuse_batches[read_stamp];
-	for (auto &block : checkpoint_freed_blocks) {
-		modified_blocks.erase(block);
-		freed.blocks.push_back(block);
-		free_blocks_pending_reuse.insert(block);
-	}
-	for (auto &metadata_block : freed_metadata_blocks) {
-		freed.metadata_blocks[metadata_block.first] |= metadata_block.second;
-	}
-	lowest_pending_reuse_stamp = pending_reuse_batches.begin()->first;
+	// reused right away unless a transaction that started before the header is active
+	ReuseFreedBlocks(lowest_active_start);
 }
 
 void SingleFileBlockManager::ReuseFreedBlocks(transaction_t lowest_active_start) {

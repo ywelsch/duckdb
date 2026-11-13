@@ -121,8 +121,8 @@ public:
 	//! Write the block to disk.
 	void Write(QueryContext context, FileBuffer &buffer, block_id_t block_id) override;
 	//! Write the header to disk, this is the final step of the checkpointing process
-	void WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
-	                 transaction_t read_stamp) override;
+	void WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound, transaction_t read_stamp,
+	                 transaction_t lowest_active_start) override;
 	void ReuseFreedBlocks(transaction_t lowest_active_start) override;
 	//! Sync changes to the underlying file
 	void FileSync() override;

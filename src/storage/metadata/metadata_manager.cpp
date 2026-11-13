@@ -399,28 +399,35 @@ void MetadataBlock::FreeBlocksFromInteger(idx_t free_list) {
 	free_blocks = BlocksFromInteger(free_list);
 }
 
-unordered_map<block_id_t, idx_t> MetadataManager::MarkBlocksAsModified() {
+unordered_map<block_id_t, idx_t> MetadataManager::MarkBlocksAsModified(bool has_readers) {
 	unique_lock<mutex> guard(block_lock);
 	unordered_map<block_id_t, idx_t> freed_blocks;
-	// for any blocks that were modified in the last checkpoint - they are free now
+	// for any blocks that were modified in the last checkpoint - set them to free blocks currently
 	for (auto &kv : modified_blocks) {
 		auto block_id = kv.first;
 		idx_t modified_list = kv.second;
 		auto entry = blocks.find(block_id);
 		D_ASSERT(entry != blocks.end());
-		if (modified_list != 0) {
-			// a transaction that started before the header can still load these blocks
-			entry->second.pending_reuse |= modified_list;
+		auto &block = entry->second;
+		if (has_readers && modified_list != 0) {
+			// free on disk only: reused once those transactions have ended
+			block.pending_reuse |= modified_list;
 			freed_blocks[block_id] = modified_list;
 			continue;
 		}
-		if (entry->second.FreeBlocksToInteger() == NumericLimits<idx_t>::Maximum()) {
-			// all blocks are free and none waits - mark entire block as modified
+		idx_t current_free_blocks = block.FreeBlocksToInteger();
+		// merge the current set of free blocks with the modified blocks
+		idx_t new_free_blocks = current_free_blocks | modified_list;
+		if (new_free_blocks == NumericLimits<idx_t>::Maximum()) {
+			// if new free_blocks is all blocks - mark entire block as modified
 			blocks.erase(entry);
 
 			guard.unlock();
 			block_manager.MarkBlockAsModified(block_id);
 			guard.lock();
+		} else {
+			// set the new set of free blocks
+			block.FreeBlocksFromInteger(new_free_blocks);
 		}
 	}
 

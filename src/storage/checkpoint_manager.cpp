@@ -335,8 +335,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	header.block_alloc_size = block_manager.GetBlockAllocSize();
 	header.vector_size = STANDARD_VECTOR_SIZE;
 	block_manager.WriteHeader(QueryContext(GetContext()), header, options.visibility_bound,
-	                          transaction_manager.NextStartTimestamp());
-	block_manager.ReuseFreedBlocks(transaction_manager.LowestActiveStart());
+	                          transaction_manager.NextStartTimestamp(), transaction_manager.LowestActiveStart());
 
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(db.GetDatabase());
 	if (debug_verify_blocks) {
