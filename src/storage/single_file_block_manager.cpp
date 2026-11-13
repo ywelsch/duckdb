@@ -895,18 +895,9 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 	MetadataReader reader(GetMetadataManager(), free_pointer, nullptr, BlockReaderType::REGISTER_BLOCKS);
 	auto free_list_count = reader.Read<uint64_t>(context);
 	free_list.clear();
-	idx_t invalid_count = 0;
 	for (idx_t i = 0; i < free_list_count; i++) {
 		auto block = reader.Read<block_id_t>(context);
-		if (block < 0 || block >= max_block) {
-			invalid_count++;
-			continue;
-		}
 		free_list.insert(block);
-	}
-	if (invalid_count > 0) {
-		DUCKDB_LOG_WARNING(db.GetDatabase(), "Dropped %llu invalid block ids from the free list of database \"%s\"",
-		                   invalid_count, db.GetName());
 	}
 	auto multi_use_blocks_count = reader.Read<uint64_t>(context);
 	multi_use_blocks.clear();
