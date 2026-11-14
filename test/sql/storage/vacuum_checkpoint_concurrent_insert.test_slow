@@ -31,10 +31,10 @@ ATTACH ':memory:' AS mem
 statement ok
 CREATE TABLE mem.timing (who VARCHAR, t TIMESTAMP);
 
-# the checkpoint sleeps for four seconds after it became active, before it writes any table, and again for six
+# the checkpoint sleeps for eight seconds after it became active, before it writes any table, and again for six
 # seconds after it vacuumed the row groups, before it replaces them
 statement ok
-SET debug_checkpoint_sleep_ms=4000
+SET debug_checkpoint_sleep_ms=8000
 
 statement ok
 SET debug_checkpoint_scan_sleep_ms=6000
@@ -81,7 +81,7 @@ onlyif threadid=1
 statement ok
 INSERT INTO mem.timing VALUES ('first', now())
 
-sleep 4000 millisecond
+sleep 8000 millisecond
 
 # during the pause: after the row groups were vacuumed, before they are replaced
 onlyif threadid=2
@@ -112,12 +112,12 @@ endloop
 
 # the inserts committed while the checkpoint was running
 query I
-SELECT COUNT(*) FROM mem.timing f, mem.timing s WHERE f.who = 'first' AND s.who = 'checkpoint start' AND f.t > s.t AND f.t < s.t + INTERVAL 4 SECOND
+SELECT COUNT(*) FROM mem.timing f, mem.timing s WHERE f.who = 'first' AND s.who = 'checkpoint start' AND f.t > s.t AND f.t < s.t + INTERVAL 8 SECOND
 ----
 1
 
 query I
-SELECT COUNT(*) FROM mem.timing w, mem.timing s, mem.timing e WHERE w.who IN ('second', 'loser') AND s.who = 'checkpoint start' AND e.who = 'checkpoint end' AND w.t > s.t + INTERVAL 4 SECOND AND w.t < e.t - INTERVAL 2 SECOND
+SELECT COUNT(*) FROM mem.timing w, mem.timing s, mem.timing e WHERE w.who IN ('second', 'loser') AND s.who = 'checkpoint start' AND e.who = 'checkpoint end' AND w.t > s.t + INTERVAL 8 SECOND AND w.t < e.t - INTERVAL 2 SECOND
 ----
 2
 
