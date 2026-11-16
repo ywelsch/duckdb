@@ -39,8 +39,8 @@ void CommitDropState::DropBlock(block_id_t block_id) {
 	dropped_block_ids.push_back(block_id);
 }
 
-void CommitDropState::DropTable(DataTable &table) {
-	dropped_tables.push_back(table.shared_from_this());
+void CommitDropState::DropTable(shared_ptr<DataTable> table) {
+	dropped_tables.push_back(std::move(table));
 }
 
 void CommitDropState::RemoveIndex(shared_ptr<DataTableInfo> table_info, idx_t index_oid) {
@@ -73,7 +73,7 @@ void CommitDropState::FinalizeCommit(DuckTransactionManager &transaction_manager
 	for (auto &table : dropped_tables) {
 		DroppedStorage storage {table, nullptr, 0};
 		if (!transaction_manager.DeferDroppedStorage(storage)) {
-			table->CommitDropTable(*this);
+			storage.Free();
 		}
 	}
 	dropped_tables.clear();
