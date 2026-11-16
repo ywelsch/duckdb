@@ -180,21 +180,51 @@ void TableIndexList::RemoveFromIndexes(DataChunk &chunk, Vector &row_ids, const 
 	}
 }
 
+shared_ptr<IndexEntry> TableIndexList::ExtractIndex(idx_t index_oid) {
+	for (idx_t i = 0; i < index_entries.size(); i++) {
+		auto &entry = index_entries[i];
+		if (entry->GetIndexOid() != index_oid) {
+			continue;
+		}
+		if (entry->GetBindState() != IndexBindState::BOUND) {
+			unbound_count--;
+		}
+		auto removed_entry = std::move(entry);
+		index_entries.erase_at(i);
+		return removed_entry;
+	}
+	return nullptr;
+}
+
 void TableIndexList::RemoveIndex(idx_t index_oid) {
 	shared_ptr<IndexEntry> removed_entry;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		for (idx_t i = 0; i < index_entries.size(); i++) {
-			auto &entry = index_entries[i];
-			if (entry->GetIndexOid() != index_oid) {
-				continue;
+		removed_entry = ExtractIndex(index_oid);
+	}
+	if (removed_entry) {
+		removed_entry->Retire();
+	}
+}
+
+void TableIndexList::DetachIndex(idx_t index_oid) {
+	annotated_lock_guard lock(index_entries_lock);
+	auto entry = ExtractIndex(index_oid);
+	if (entry) {
+		detached_index_entries.push_back(std::move(entry));
+	}
+}
+
+void TableIndexList::RemoveDetachedIndex(idx_t index_oid) {
+	shared_ptr<IndexEntry> removed_entry;
+	{
+		annotated_lock_guard lock(index_entries_lock);
+		for (idx_t i = 0; i < detached_index_entries.size(); i++) {
+			if (detached_index_entries[i]->GetIndexOid() == index_oid) {
+				removed_entry = std::move(detached_index_entries[i]);
+				detached_index_entries.erase_at(i);
+				break;
 			}
-			if (entry->GetBindState() != IndexBindState::BOUND) {
-				unbound_count--;
-			}
-			removed_entry = std::move(entry);
-			index_entries.erase_at(i);
-			break;
 		}
 	}
 	if (removed_entry) {
@@ -452,6 +482,11 @@ void TableIndexList::Bind(ClientContext &context, DataTableInfo &table_info, con
 		// Commit the bound index to the index entry.
 		auto current_entry = std::find(index_entries.begin(), index_entries.end(), index_entry);
 		if (current_entry == index_entries.end()) {
+			// a drop detached it meanwhile: the bound index now owns the storage that checkpoints still write
+			if (std::find(detached_index_entries.begin(), detached_index_entries.end(), index_entry) !=
+			    detached_index_entries.end()) {
+				index_entry->CommitBind(std::move(bound_idx));
+			}
 			continue;
 		}
 		index_entry->CommitBind(std::move(bound_idx));
@@ -504,6 +539,13 @@ unordered_set<column_t> TableIndexList::GetIndexedColumns() const {
 	return column_ids;
 }
 
+vector<shared_ptr<IndexEntry>> TableIndexList::CheckpointEntries() const {
+	auto result = index_entries;
+	// detached by a drop after the bound of the checkpoint: still in its catalog
+	result.insert(result.end(), detached_index_entries.begin(), detached_index_entries.end());
+	return result;
+}
+
 namespace {
 
 class PendingIndexPublication final : public PendingPublication {
@@ -536,14 +578,15 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 	vector<shared_ptr<IndexEntry>> entries;
 	{
 		annotated_lock_guard lock(index_entries_lock);
-		// the indexes of the checkpoint's catalog: adding or removing one holds the checkpoint lock
-		entries = index_entries;
+		entries = CheckpointEntries();
 	}
 
 	// written without the list lock, which every commit that changes the table takes
 	vector<shared_ptr<const IndexStorageInfo>> infos;
 	infos.reserve(entries.size());
 	for (const auto &entry : entries) {
+		// retired only once it leaves the lists
+		D_ASSERT(entry->GetBindState() != IndexBindState::RETIRED);
 		auto checkpoint = entry->Checkpoint(writer);
 		if (checkpoint.shadow_index) {
 			writer.AddPendingPublication(make_uniq<PendingIndexPublication>(entry, std::move(checkpoint.shadow_index)));
@@ -552,11 +595,20 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 	}
 
 #ifdef D_ASSERT_IS_ENABLED
+	// the list lock was not needed: no index was added or removed meanwhile, a drop only detaches
+	vector<shared_ptr<IndexEntry>> current;
 	{
-		// the list lock was not needed: no index was added or removed meanwhile
 		annotated_lock_guard lock(index_entries_lock);
-		D_ASSERT(index_entries == entries);
+		current = CheckpointEntries();
 	}
+	auto entry_set = [](const vector<shared_ptr<IndexEntry>> &list) {
+		unordered_set<const IndexEntry *> result;
+		for (const auto &entry : list) {
+			result.insert(entry.get());
+		}
+		return result;
+	};
+	D_ASSERT(entry_set(current) == entry_set(entries));
 #endif
 	return infos;
 }

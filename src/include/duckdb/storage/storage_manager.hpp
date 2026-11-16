@@ -263,5 +263,8 @@ protected:
 private:
 	//! Returns false if the checkpoint must be skipped to keep buffered index replays.
 	bool BindIndexesForCheckpoint(optional_ptr<ClientContext> checkpoint_context, bool explicit_checkpoint);
+	//! Returns false if the checkpoint must be skipped: an older transaction still reads a dropped table or index.
+	bool CheckDroppedStorageForCheckpoint(CheckpointOptions &options, unique_lock<mutex> &start_lock,
+	                                      bool explicit_checkpoint);
 };
 } // namespace duckdb

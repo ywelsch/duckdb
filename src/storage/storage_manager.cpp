@@ -455,7 +455,10 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
                                         ActiveCheckpointWrapper &active_checkpoint) {
 	unique_lock<mutex> guard;
 	// Lock ordering: commit lock -> transaction lock (in ActiveCheckpointWrapper::Begin)
-	if (!options.commit_lock) {
+	if (options.start_lock) {
+		// taken for the checks before the checkpoint
+		guard = std::move(*options.start_lock);
+	} else if (!options.commit_lock) {
 		// not holding the commit lock yet - grab it
 		guard = GetCommitLock();
 	}
@@ -1094,6 +1097,40 @@ bool SingleFileStorageManager::BindIndexesForCheckpoint(optional_ptr<ClientConte
 	return true;
 }
 
+bool SingleFileStorageManager::CheckDroppedStorageForCheckpoint(CheckpointOptions &options,
+                                                                unique_lock<mutex> &start_lock,
+                                                                bool explicit_checkpoint) {
+	if (InMemory()) {
+		return true;
+	}
+	// held until the checkpoint has its bound: no drop commits in between
+	if (!options.commit_lock) {
+		start_lock = GetCommitLock();
+	}
+	auto &transaction_manager = DuckTransactionManager::Get(db);
+	transaction_manager.WaitForDurability();
+	if (!transaction_manager.DroppedStorageInUse()) {
+		if (start_lock.owns_lock()) {
+			options.start_lock = &start_lock;
+		}
+		return true;
+	}
+	if (options.commit_lock) {
+		throw InternalException("A commit skipped its WAL write for a checkpoint that cannot run");
+	}
+	start_lock.unlock();
+	// the checkpoint would free blocks that the transaction reads
+	string message = "a dropped table or index is still visible to an active transaction";
+	if (explicit_checkpoint) {
+		throw TransactionException("Cannot CHECKPOINT: %s. Try using FORCE CHECKPOINT to wait until all active "
+		                           "transactions are finished",
+		                           message);
+	}
+	DUCKDB_LOG_WARNING(db.GetDatabase(), "Skipped the checkpoint of database %s and kept its write-ahead log: %s",
+	                   db.GetName(), message);
+	return false;
+}
+
 void SingleFileStorageManager::CreateCheckpoint(QueryContext context, CheckpointOptions options,
                                                 optional_ptr<ClientContext> client_context) {
 	if (read_only || !load_complete) {
@@ -1131,6 +1168,10 @@ void SingleFileStorageManager::CreateCheckpoint(QueryContext context, Checkpoint
 	}
 	// Bind before the checkpoint starts: a failure after that invalidates the database.
 	if (should_checkpoint && !BindIndexesForCheckpoint(checkpoint_context, client_context != nullptr)) {
+		should_checkpoint = false;
+	}
+	unique_lock<mutex> start_lock;
+	if (should_checkpoint && !CheckDroppedStorageForCheckpoint(options, start_lock, client_context != nullptr)) {
 		should_checkpoint = false;
 	}
 

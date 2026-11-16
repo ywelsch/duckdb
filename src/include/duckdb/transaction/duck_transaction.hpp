@@ -51,6 +51,8 @@ public:
 	idx_t wal_sync_offset = 0;
 	//! The committed catalog version just before this commit published
 	idx_t catalog_version_before_commit = 0;
+	//! Whether the commit dropped a table or index: no checkpoint starts while an older transaction can read it
+	bool has_dropped_storage = false;
 
 	atomic<idx_t> catalog_version;
 

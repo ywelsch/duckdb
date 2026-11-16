@@ -1,0 +1,250 @@
+# name: test/sql/storage/concurrent_checkpoint_drop_refused.test_slow
+# description: No checkpoint runs while an older snapshot can still read a dropped table
+# group: [storage]
+
+load {TEST_DIR}/concurrent_checkpoint_drop_refused.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CREATE TABLE f (i BIGINT, s VARCHAR)
+
+statement ok
+CHECKPOINT
+
+# a table dropped before any checkpoint wrote it: only the WAL references its blocks
+statement ok
+CREATE TABLE n AS SELECT i, i::VARCHAR || 'n' AS s FROM range(1000000) t(i)
+
+statement ok con1
+BEGIN TRANSACTION
+
+query I con1
+SELECT COUNT(*) FROM n
+----
+1000000
+
+statement ok
+DROP TABLE n
+
+# con1 can still read n, which a checkpoint would not write
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT: a dropped table or index is still visible to an active transaction
+
+statement ok
+INSERT INTO f SELECT i, i::VARCHAR || 'f' AS s FROM range(100000) t(i)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT: a dropped table or index is still visible to an active transaction
+
+query III con1
+SELECT COUNT(*), SUM(i), SUM(length(s)) FROM n
+----
+1000000	499999500000	6888890
+
+# a crash while con1 still reads n: the WAL has the drop
+restart
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+INSERT INTO tick VALUES (1)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'n'
+----
+0
+
+query II
+SELECT COUNT(*), SUM(i) FROM f
+----
+100000	4999950000
+
+# the checkpoint runs once the reader is done, and frees the dropped table
+statement ok
+CREATE TABLE p (i INTEGER PRIMARY KEY, s VARCHAR)
+
+statement ok
+INSERT INTO p SELECT i, i::VARCHAR || 'p' AS s FROM range(1000000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+BEGIN TRANSACTION
+
+query I con1
+SELECT COUNT(*) FROM p
+----
+1000000
+
+statement ok
+DROP TABLE p
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT: a dropped table or index is still visible to an active transaction
+
+query II con1
+SELECT i, s FROM p WHERE i = 4242
+----
+4242	4242p
+
+statement ok con1
+COMMIT
+
+statement ok
+CHECKPOINT
+
+# FORCE CHECKPOINT waits for the reader
+statement ok
+CREATE TABLE q AS SELECT i, i::VARCHAR || 'q' AS s FROM range(1000000) t(i)
+
+statement ok
+CHECKPOINT
+
+concurrentloop threadid 0 2
+
+# thread 1: an older reader
+onlyif threadid=1
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=1
+query I
+SELECT COUNT(*) FROM q
+----
+1000000
+
+onlyif threadid=1
+statement ok
+SELECT sleep_ms(1500)
+
+onlyif threadid=1
+query II
+SELECT COUNT(*), SUM(i) FROM q
+----
+1000000	499999500000
+
+onlyif threadid=1
+statement ok
+COMMIT
+
+# thread 0: drops q after the reader started
+onlyif threadid=0
+statement ok
+SELECT sleep_ms(500)
+
+onlyif threadid=0
+statement ok
+DROP TABLE q
+
+onlyif threadid=0
+statement ok
+FORCE CHECKPOINT
+
+endloop
+
+query I
+SELECT wal_size FROM pragma_database_size()
+----
+0 bytes
+
+# an automatic checkpoint is skipped while the reader is open: the commit writes the WAL
+statement ok
+CREATE TABLE r AS SELECT i, i::VARCHAR || 'r' AS s FROM range(100000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+BEGIN TRANSACTION
+
+query I con1
+SELECT COUNT(*) FROM r
+----
+100000
+
+statement ok
+DROP TABLE r
+
+statement ok
+SET checkpoint_threshold='1KB'
+
+foreach skip_wal_threshold 0 9999999999
+
+statement ok
+SET auto_checkpoint_skip_wal_threshold={skip_wal_threshold}
+
+statement ok
+INSERT INTO f SELECT i, i::VARCHAR || 'g' AS s FROM range(100000) t(i)
+
+query I
+SELECT wal_size != '0 bytes' FROM pragma_database_size()
+----
+true
+
+endloop
+
+query II con1
+SELECT COUNT(*), SUM(i) FROM r
+----
+100000	4999950000
+
+statement ok con1
+COMMIT
+
+# the next commit checkpoints
+statement ok
+INSERT INTO tick VALUES (2)
+
+query I
+SELECT wal_size FROM pragma_database_size()
+----
+0 bytes
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+INSERT INTO tick VALUES (3)
+
+statement ok
+CHECKPOINT
+
+query II
+SELECT COUNT(*), SUM(i) FROM f
+----
+300000	14999850000
+
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE table_name IN ('n', 'p', 'q', 'r')
+----
+0

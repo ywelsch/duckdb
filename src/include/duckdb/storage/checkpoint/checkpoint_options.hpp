@@ -30,6 +30,8 @@ struct CheckpointOptions {
 	VisibilityBound visibility_bound;
 	//! The commit lock, when the committing transaction holds it for the whole checkpoint (checkpoint instead of WAL)
 	optional_ptr<unique_lock<mutex>> commit_lock;
+	//! The commit lock, when the storage manager took it before the checkpoint: released once the bound is set
+	optional_ptr<unique_lock<mutex>> start_lock;
 };
 
 } // namespace duckdb

@@ -11,6 +11,11 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/block_manager.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/table/table_index_list.hpp"
+#include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -121,6 +126,69 @@ void DuckTransactionManager::ResetActiveCheckpoint() {
 	active_checkpoint = 0;
 }
 
+void DroppedStorage::Free() {
+	if (table) {
+		CommitDropState drop_state(table->GetAttached().GetStorageManager().GetBlockManager());
+		table->CommitDropTable(drop_state);
+		drop_state.FinalizeCommit();
+	}
+	if (index_table_info) {
+		index_table_info->GetIndexes().RemoveDetachedIndex(index_oid);
+	}
+}
+
+bool DuckTransactionManager::DeferDroppedStorage(const DroppedStorage &storage) {
+	lock_guard<mutex> guard(deferred_storage_lock);
+	if (!defer_dropped_storage) {
+		return false;
+	}
+	deferred_storage.push_back(storage);
+	return true;
+}
+
+void DuckTransactionManager::BeginDeferringDroppedStorage() {
+	lock_guard<mutex> guard(deferred_storage_lock);
+	defer_dropped_storage = true;
+}
+
+void DuckTransactionManager::EndDeferringDroppedStorage(bool checkpoint_succeeded) {
+	vector<DroppedStorage> dropped;
+	{
+		lock_guard<mutex> guard(deferred_storage_lock);
+		defer_dropped_storage = false;
+		dropped = std::move(deferred_storage);
+		deferred_storage.clear();
+	}
+	if (!checkpoint_succeeded) {
+		// a failed checkpoint invalidates the database: the WAL replays the drops when it is opened again
+		return;
+	}
+	for (auto &storage : dropped) {
+		// the checkpoint no longer writes it: the next checkpoint frees the blocks
+		storage.Free();
+	}
+}
+
+bool DuckTransactionManager::DroppedStorageInUse() {
+	lock_guard<mutex> t_lock(transaction_lock);
+	return DroppedStorageInUseInternal();
+}
+
+bool DuckTransactionManager::DroppedStorageInUseInternal() {
+	for (auto &transaction : recently_committed_transactions) {
+		if (transaction->has_dropped_storage) {
+			return true;
+		}
+	}
+	// a commit that still syncs its WAL: an older transaction may hold its cleanup back afterwards
+	for (auto &transaction : active_transactions) {
+		if (transaction->has_dropped_storage) {
+			return true;
+		}
+	}
+	return false;
+}
+
 DuckTransactionManager::CheckpointDecision::CheckpointDecision(string reason_p)
     : can_checkpoint(false), reason(std::move(reason_p)) {
 }
@@ -203,6 +271,10 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 				    other_transactions);
 			}
 		}
+		if (DroppedStorageInUseInternal()) {
+			// the checkpoint would be refused: the commit has to write the WAL
+			return CheckpointDecision("A dropped table or index is still visible to an active transaction");
+		}
 		// otherwise - we need to do a concurrent checkpoint
 		checkpoint_type = CheckpointType::CONCURRENT_CHECKPOINT;
 	}
@@ -252,6 +324,10 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		while (!lock) {
 			context.InterruptCheck();
 			lock = checkpoint_lock.TryGetExclusiveLock();
+			if (lock && DroppedStorageInUse()) {
+				// an older transaction still reads a dropped table or index
+				lock.reset();
+			}
 		}
 	}
 	CheckpointOptions options;

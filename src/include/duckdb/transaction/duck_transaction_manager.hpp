@@ -16,9 +16,23 @@
 #include <condition_variable>
 
 namespace duckdb {
+class DataTable;
+struct DataTableInfo;
 class DuckTransactionManager;
 class DuckTransaction;
 struct UndoBufferProperties;
+
+//! The storage of a table or of an index that a commit dropped
+struct DroppedStorage {
+	//! The dropped table, if any
+	shared_ptr<DataTable> table;
+	//! The table of the dropped index, if any: the index is detached from its index list
+	shared_ptr<DataTableInfo> index_table_info;
+	idx_t index_oid;
+
+	//! Frees the storage: its blocks are marked as modified
+	void Free();
+};
 
 //! CleanupInfo collects transactions awaiting cleanup.
 //! This ensures we can clean up after releasing the transaction lock.
@@ -68,6 +82,16 @@ public:
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
 	void ResetActiveCheckpoint();
+	//! Hands dropped storage over to a running checkpoint, which frees it. False if none runs: the commit frees it
+	bool DeferDroppedStorage(const DroppedStorage &storage);
+	//! Starts handing dropped storage over to the checkpoint. Called as the checkpoint starts, under the commit lock
+	void BeginDeferringDroppedStorage();
+	//! Stops deferring. Frees the storage that was handed over, unless the checkpoint failed
+	void EndDeferringDroppedStorage(bool checkpoint_succeeded);
+	//! Whether a committed drop still awaits its cleanup: an older transaction can read the dropped storage
+	bool DroppedStorageInUse();
+	//! Runs the cleanups that are queued
+	void CleanupTransactions();
 
 	bool IsDuckTransactionManager() override {
 		return true;
@@ -129,7 +153,8 @@ private:
 	CheckpointDecision GetCheckpointType(DuckTransaction &transaction, const UndoBufferProperties &undo_properties);
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
-	void CleanupTransactions();
+	//! As DroppedStorageInUse. Caller holds the transaction lock
+	bool DroppedStorageInUseInternal();
 
 	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
 	bool HasUnsyncedCommits();
@@ -147,6 +172,12 @@ private:
 	transaction_t current_start_timestamp;
 	//! The current transaction ID used by transactions
 	transaction_t current_transaction_id;
+	//! Guards the dropped storage that is handed over to a checkpoint
+	mutex deferred_storage_lock;
+	//! Whether a checkpoint is running that frees the storage of the drops that commit meanwhile
+	bool defer_dropped_storage = false;
+	//! The storage that the running checkpoint frees once it has written its header
+	vector<DroppedStorage> deferred_storage;
 	//! The lowest bound any active transaction reads at. A version preceding it is visible to
 	//! every active transaction, so whatever it supersedes can be cleaned up or compacted
 	atomic<VisibilityBound> lowest_visibility_bound;
