@@ -44,8 +44,7 @@ public:
 
 public:
 	void Finalize(shared_ptr<BlockHandle> block_handle_p, uint32_t offset) override;
-	//! Gives up the on-disk block without marking it as modified, i.e., without freeing it: its owner frees it.
-	//! The buffer can still be read from the block.
+	//! Gives up the on-disk block without freeing it: its owner frees it, and the buffer can still be read from it.
 	void DisownBlock();
 
 public:

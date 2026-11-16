@@ -85,8 +85,7 @@ public:
 	bool BlockIsModified(const MetaBlockPointer &ptr);
 	bool BlockHasBeenCleared(const MetaBlockPointer &ptr);
 
-	//! Frees the blocks that the checkpoint no longer uses. If older transactions can still load them, they are
-	//! free on disk only: they are returned, as a mask per storage block, and stay unused until ReuseFreedBlocks
+	//! Frees the blocks the checkpoint no longer uses. With readers, returns them instead, for ReuseFreedBlocks
 	unordered_map<block_id_t, idx_t> MarkBlocksAsModified(bool has_readers);
 	//! Lets blocks that MarkBlocksAsModified returned be reused
 	void ReuseFreedBlocks(const unordered_map<block_id_t, idx_t> &freed_blocks);
