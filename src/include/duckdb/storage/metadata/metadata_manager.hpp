@@ -34,6 +34,7 @@ struct MetadataBlock {
 	idx_t pending_reuse;
 	atomic<bool> dirty;
 
+	void Write(WriteStream &sink);
 	static MetadataBlock Read(ReadStream &source);
 
 	idx_t FreeBlocksToInteger();

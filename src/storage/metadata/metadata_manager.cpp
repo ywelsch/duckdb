@@ -333,10 +333,7 @@ void MetadataManager::Write(WriteStream &sink) {
 	lock_guard<mutex> guard(block_lock);
 	sink.Write<uint64_t>(blocks.size());
 	for (auto &kv : blocks) {
-		auto &block = kv.second;
-		// the blocks that wait for older transactions are free on disk
-		sink.Write<block_id_t>(block.block_id);
-		sink.Write<idx_t>(block.FreeBlocksToInteger() | block.pending_reuse);
+		kv.second.Write(sink);
 	}
 }
 
@@ -355,6 +352,12 @@ void MetadataManager::Read(ReadStream &source) {
 			entry->second.free_blocks = std::move(block.free_blocks);
 		}
 	}
+}
+
+void MetadataBlock::Write(WriteStream &sink) {
+	sink.Write<block_id_t>(block_id);
+	// the blocks that wait for older transactions are free on disk
+	sink.Write<idx_t>(FreeBlocksToInteger() | pending_reuse);
 }
 
 idx_t MetadataManager::GetMetadataBlockSize() const {
