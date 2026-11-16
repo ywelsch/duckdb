@@ -19,7 +19,6 @@
 
 namespace duckdb {
 
-struct BlockIdVisitor;
 class ConflictManager;
 class ConflictInfo;
 class IndexEntry;
@@ -44,8 +43,6 @@ public:
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
 	//! Adds an index entry to the list of index entries, and returns it.
 	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, idx_t index_oid, ConstraintCheckMode check_mode);
-	//! Disowns the on-disk blocks of every index, which stays readable, and visits them once per use.
-	void DisownBlocks(BlockIdVisitor &visitor);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.
@@ -64,6 +61,8 @@ public:
 	                       optional_idx active_checkpoint = optional_idx());
 	//! Removes an index entry from the list of index entries and release any storage the index owns.
 	void RemoveIndex(idx_t index_oid);
+	//! Removes all index entries from the list of index entries and releases any storage the indexes own.
+	void RemoveIndexes();
 	//! Removes an index entry without releasing it: a running checkpoint still writes it until RemoveIndex
 	void DetachIndex(idx_t index_oid);
 	//! Returns the entry matching the index OID.

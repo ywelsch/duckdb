@@ -1,5 +1,5 @@
 # name: test/sql/storage/concurrent_checkpoint_drop_index_blocks.test_slow
-# description: The index blocks of a table dropped while an older snapshot still uses its index
+# description: The index blocks of a table dropped while an older snapshot still reads it
 # group: [storage]
 
 load {TEST_DIR}/concurrent_checkpoint_drop_index_blocks.db
@@ -43,11 +43,11 @@ INSERT INTO tick VALUES (1)
 statement ok
 CHECKPOINT
 
-# the older reader still uses the index
+# the index went with the table: the older reader scans the table instead
 query II con1
 EXPLAIN ANALYZE SELECT s FROM p WHERE i = 42
 ----
-analyzed_plan	<REGEX>:.*Index Scan.*
+analyzed_plan	<REGEX>:.*Sequential Scan.*
 
 query I con1
 SELECT s FROM p WHERE i = 1234
@@ -60,7 +60,7 @@ INSERT INTO tick VALUES (2)
 statement ok
 CHECKPOINT
 
-# a crash while the older reader still uses the index: its blocks are free on disk
+# a crash while the older reader still reads the table: the blocks of its index are free on disk
 restart
 
 statement ok
@@ -80,7 +80,7 @@ SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'p'
 ----
 0
 
-# the same without a crash: the reader ends, and the index frees its blocks when it is destroyed
+# the same without a crash, and the reader ends
 statement ok
 CREATE TABLE q (i INTEGER PRIMARY KEY, s VARCHAR)
 

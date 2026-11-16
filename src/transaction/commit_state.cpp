@@ -52,6 +52,8 @@ void DroppedStorage::Free() {
 		CommitDropState drop_state(table->GetAttached().GetStorageManager().GetBlockManager());
 		table->CommitDropTable(drop_state);
 		drop_state.FinalizeCommit();
+		// transactions that still read the table scan it without its indexes
+		table->GetDataTableInfo()->GetIndexes().RemoveIndexes();
 	}
 	if (index_table_info) {
 		index_table_info->GetIndexes().RemoveIndex(index_oid);
@@ -79,7 +81,6 @@ void CommitDropState::FinalizeCommit() {
 }
 
 void CommitDropState::FinalizeCommit(DuckTransactionManager &transaction_manager) {
-	// in the order of the drops: the indexes of a table before the table, which frees the blocks of those it keeps
 	for (auto &storage : dropped_storage) {
 		if (!transaction_manager.DeferDroppedStorage(storage)) {
 			storage.Free();

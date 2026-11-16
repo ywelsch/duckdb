@@ -103,13 +103,6 @@ shared_ptr<IndexEntry> TableIndexList::AddIndex(unique_ptr<Index> index, idx_t i
 	return index_entry;
 }
 
-void TableIndexList::DisownBlocks(BlockIdVisitor &visitor) {
-	annotated_lock_guard lock(index_entries_lock);
-	for (auto &entry : index_entries) {
-		entry->DisownBlocks(visitor);
-	}
-}
-
 void TableIndexList::InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const {
 	D_ASSERT(this != &delete_indexes);
 	D_ASSERT(this != &append_indexes);
@@ -217,6 +210,19 @@ void TableIndexList::RemoveIndex(idx_t index_oid) {
 	}
 	if (removed_entry) {
 		removed_entry->Retire();
+	}
+}
+
+void TableIndexList::RemoveIndexes() {
+	vector<shared_ptr<IndexEntry>> removed_entries;
+	{
+		annotated_lock_guard lock(index_entries_lock);
+		removed_entries = std::move(index_entries);
+		index_entries.clear();
+		unbound_count = 0;
+	}
+	for (auto &entry : removed_entries) {
+		entry->Retire();
 	}
 }
 
