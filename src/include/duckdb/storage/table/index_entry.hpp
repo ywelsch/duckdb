@@ -146,8 +146,9 @@ public:
 	void VisitBlockIds(BlockIdVisitor &visitor);
 	//! Disowns the on-disk blocks of the physical index: destroying it no longer frees them
 	void DisownStorage();
-	//! Binds the unbound physical index without replacing it.
-	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types);
+	//! Binds the unbound physical index without replacing it (nullptr for skipped mismatched keys).
+	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types,
+	                            bool skip_mismatched_keys = false);
 	//! Replaces the unbound physical index with its bound representation.
 	void CommitBind(unique_ptr<BoundIndex> bound_index);
 	//! Verifies that rows can be appended to the bound physical index.
