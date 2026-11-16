@@ -71,16 +71,7 @@ FixedSizeBuffer::~FixedSizeBuffer() {
 
 void FixedSizeBuffer::DisownBlock() {
 	lock_guard<mutex> l(lock);
-	block_pointer = BlockPointer();
-}
-
-bool FixedSizeBuffer::ReleaseBlock() {
-	lock_guard<mutex> l(lock);
-	if (!OnDisk() || !owns_block) {
-		return false;
-	}
 	owns_block = false;
-	return true;
 }
 
 void FixedSizeBuffer::Finalize(shared_ptr<BlockHandle> block_handle_p, uint32_t offset) {

@@ -360,7 +360,7 @@ void IndexEntry::Retire() {
 	bind_state = IndexBindState::RETIRED;
 }
 
-void IndexEntry::ReleaseBlocks(BlockIdVisitor &visitor) {
+void IndexEntry::DisownBlocks(BlockIdVisitor &visitor) {
 	auto entry_lock = lock.GetSharedLock();
 	if (!owned_index) {
 		return;
@@ -369,7 +369,7 @@ void IndexEntry::ReleaseBlocks(BlockIdVisitor &visitor) {
 	if (!owned_index->IsBound() || GetIndexType() != ART::TYPE_NAME) {
 		throw InternalException("Index %llu of a dropped table is not a bound ART index", index_oid);
 	}
-	owned_index->Cast<ART>().ReleaseBlocks(visitor);
+	owned_index->Cast<ART>().DisownBlocks(visitor);
 }
 
 unique_ptr<BoundIndex> IndexEntry::Bind(IndexBinder &binder, const vector<LogicalType> &table_types,

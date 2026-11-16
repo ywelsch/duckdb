@@ -144,10 +144,11 @@ void FixedSizeAllocator::Reset() {
 	total_segment_count = 0;
 }
 
-void FixedSizeAllocator::ReleaseBlocks(BlockIdVisitor &visitor) {
+void FixedSizeAllocator::DisownBlocks(BlockIdVisitor &visitor) {
 	for (auto &buffer : buffers) {
-		if (buffer.second->ReleaseBlock()) {
+		if (buffer.second->OnDisk() && buffer.second->owns_block) {
 			visitor.Visit(buffer.second->block_pointer.block_id);
+			buffer.second->DisownBlock();
 		}
 	}
 }
