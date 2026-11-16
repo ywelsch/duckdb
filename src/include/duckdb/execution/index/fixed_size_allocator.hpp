@@ -103,6 +103,8 @@ public:
 
 	//! Resets the allocator, e.g., during 'DELETE FROM table'
 	void Reset();
+	//! Visits the on-disk blocks of the buffers, once per buffer
+	void VisitBlockIds(BlockIdVisitor &visitor) const;
 	//! Resets the allocator without freeing the on-disk blocks of its buffers.
 	//! The blocks stay owned by the storage information the allocator was initialized from.
 	void DisownBuffers();

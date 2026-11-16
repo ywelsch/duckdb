@@ -32,13 +32,13 @@ struct UpdateInfo;
 
 enum class CommitMode { COMMIT, REVERT_COMMIT };
 
-//! An index that has been marked for removal from a table's index list once the commit chain succeeds.
-struct PendingIndexRemoval {
+//! An index that has been marked for detaching from a table's index list once the commit chain succeeds.
+struct PendingIndexDetach {
 	reference<TableIndexList> indexes;
 	idx_t index_oid;
 };
 
-//! Accumulates block marks and index removals during commit so they can be applied together once the
+//! Accumulates block marks and index detaches during commit so they can be applied together once the
 //! commit chain has succeeded and FlushCommit() has been called, since these are side effects that can't be reverted
 //! if we need to rollback a transaction.
 class CommitDropState {
@@ -48,11 +48,11 @@ public:
 public:
 	//! Register an on-disk block to mark as modified during FinalizeCommit.
 	void DropBlock(block_id_t block_id);
-	//! Register an index to be removed from a table's index list during FinalizeCommit. Index removal will drop in
-	//! memory index data and also marks all blocks on disk as free blocks allowing for reclamation. Block marking for
-	//! indexes is handled implicitly along destruction paths for index memory.
-	void RemoveIndex(TableIndexList &indexes, idx_t index_oid);
-	//! Finalize accumulated block marks and index removals.
+	//! Register an index to be detached from a table's index list during FinalizeCommit. The cleanup of the drop
+	//! removes the detached index, which drops its in-memory data and marks its blocks on disk as free. Block marking
+	//! for indexes is handled implicitly along destruction paths for index memory.
+	void DetachIndex(TableIndexList &indexes, idx_t index_oid);
+	//! Finalize accumulated block marks and index detaches.
 	void FinalizeCommit();
 	//! True if no work has been queued.
 	bool Empty() const;
@@ -60,7 +60,7 @@ public:
 private:
 	optional_ptr<BlockManager> block_manager;
 	vector<block_id_t> dropped_block_ids;
-	vector<PendingIndexRemoval> pending_index_removals;
+	vector<PendingIndexDetach> pending_index_detaches;
 };
 
 struct IndexDataRemover {

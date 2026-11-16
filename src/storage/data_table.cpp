@@ -34,6 +34,7 @@
 #include "duckdb/storage/table/delete_state.hpp"
 #include "duckdb/storage/table/persistent_table_data.hpp"
 #include "duckdb/storage/table/row_group.hpp"
+#include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table/update_state.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
@@ -1684,8 +1685,26 @@ idx_t DataTable::GetNextRowId() const {
 	return row_groups->GetNextRowId();
 }
 
+struct DroppedBlockCollector : public BlockIdVisitor {
+	explicit DroppedBlockCollector(CommitDropState &drop_state) : drop_state(drop_state) {
+	}
+
+	void Visit(block_id_t block_id) override {
+		drop_state.DropBlock(block_id);
+	}
+
+	CommitDropState &drop_state;
+};
+
 void DataTable::CommitDropTable(CommitDropState &drop_state) {
 	row_groups->CommitDropTable(drop_state);
+}
+
+void DataTable::CommitDropTableInUse(CommitDropState &drop_state) {
+	row_groups->CommitDropTable(drop_state);
+	// the indexes stay usable: the cleanup of the drop disowns their blocks
+	DroppedBlockCollector collector(drop_state);
+	info->GetIndexes().VisitBlockIds(collector);
 }
 
 idx_t DataTable::GetRowGroupCount() const {

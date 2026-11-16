@@ -123,6 +123,27 @@ void DuckTransactionManager::ResetActiveCheckpoint() {
 	active_checkpoint = 0;
 }
 
+void DuckTransactionManager::FreeDroppedStorage(VisibilityBound visibility_bound) {
+	// no cleanup runs meanwhile: the transactions below stay alive
+	lock_guard<mutex> c_lock(cleanup_lock);
+	vector<reference<DuckTransaction>> transactions;
+	{
+		lock_guard<mutex> t_lock(transaction_lock);
+		for (auto &transaction : recently_committed_transactions) {
+			if (transaction->commit_id >= visibility_bound) {
+				break;
+			}
+			transactions.push_back(*transaction);
+		}
+	}
+	for (auto &transaction : transactions) {
+		// older snapshots can still read the storage
+		transaction.get().FreeDroppedStorage();
+	}
+	// drops that no snapshot reads are queued: their cleanup frees the storage
+	CleanupQueuedTransactions();
+}
+
 transaction_t DuckTransactionManager::NextStartTimestamp() {
 	lock_guard<mutex> t_lock(transaction_lock);
 	return current_start_timestamp;
@@ -206,9 +227,8 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	auto checkpoint_type = CheckpointType::FULL_CHECKPOINT;
 	bool has_other_transactions = HasOtherTransactions(transaction);
 	if (has_other_transactions) {
-		if (undo_properties.has_updates || undo_properties.has_dropped_entries) {
-			// if we have made updates/catalog changes in this transaction we cannot checkpoint
-			// in the presence of other transactions
+		if (undo_properties.has_updates) {
+			// if we have made updates in this transaction we cannot checkpoint in the presence of other transactions
 			string other_transactions;
 			for (auto &active_transaction : active_transactions) {
 				if (!RefersToSameObject(*active_transaction, transaction)) {
@@ -221,14 +241,6 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 			if (!other_transactions.empty()) {
 				// there are other transactions!
 				// these active transactions might need data from BEFORE this transaction
-				// we might need to change our strategy here based on what changes THIS transaction has made
-				if (undo_properties.has_dropped_entries) {
-					// this transaction has changed the catalog - we cannot checkpoint
-					return CheckpointDecision(
-					    "Transaction has dropped catalog entries and there are other transactions "
-					    "active\nActive transactions: " +
-					    other_transactions);
-				}
 				// this transaction has performed updates - we cannot checkpoint
 				return CheckpointDecision(
 				    "Transaction has performed updates and there are other transactions active\nActive transactions: " +
@@ -356,6 +368,16 @@ void DuckTransactionManager::WaitForDurability() {
 
 void DuckTransactionManager::CleanupTransactions() {
 	lock_guard<mutex> c_lock(cleanup_lock);
+	try {
+		CleanupQueuedTransactions();
+	} catch (FatalException &) {
+		throw;
+	} catch (std::exception &) {
+		return;
+	}
+}
+
+void DuckTransactionManager::CleanupQueuedTransactions() {
 	while (true) {
 		DuckCleanupInfo *top_cleanup_info = nullptr;
 		{
@@ -366,13 +388,7 @@ void DuckTransactionManager::CleanupTransactions() {
 			}
 			top_cleanup_info = cleanup_queue.front().get();
 		}
-		try {
-			top_cleanup_info->Cleanup();
-		} catch (FatalException &) {
-			throw;
-		} catch (std::exception &) {
-			return;
-		}
+		top_cleanup_info->Cleanup();
 		{
 			lock_guard<mutex> q_lock(cleanup_queue_lock);
 			cleanup_queue.pop();
@@ -583,7 +599,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	CleanupTransactions();
 	ReuseFreedBlocks();
 
-	if (checkpoint_decision.can_checkpoint && (undo_properties.has_updates || undo_properties.has_dropped_entries) &&
+	if (checkpoint_decision.can_checkpoint && undo_properties.has_updates &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
 		// GetCheckpointType does not checkpoint while another transaction might still need the state
 		// from before this commit. That check ran before the sync; transactions that started during

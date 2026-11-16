@@ -259,6 +259,8 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	// If there is a checkpoint context (non shutdown path), WALStartCheckpoint creates the checkpoint transaction.
 	ActiveCheckpointWrapper active_checkpoint(checkpoint_context, db, transaction_manager);
 	auto has_wal = storage_manager.WALStartCheckpoint(meta_block, options, active_checkpoint);
+	// storage dropped before the bound is not part of this checkpoint
+	transaction_manager.FreeDroppedStorage(options.visibility_bound);
 
 	catalog_entry_vector_t catalog_entries;
 

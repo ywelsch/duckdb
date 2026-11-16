@@ -351,6 +351,10 @@ void DuckTransaction::Cleanup(VisibilityBound lowest_visibility_bound) {
 	undo_buffer.Cleanup(lowest_visibility_bound);
 }
 
+void DuckTransaction::FreeDroppedStorage() {
+	undo_buffer.FreeDroppedStorage();
+}
+
 unique_ptr<StorageLockKey> DuckTransaction::GetCheckpointLockForStatement() {
 	if (checkpoint_lock) {
 		return nullptr;
@@ -364,9 +368,9 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		require_write_lock = require_write_lock || type.UpdateData();
 		require_write_lock = require_write_lock || type.AlterTable();
 		require_write_lock = require_write_lock || type.CreateCatalogEntry();
-		require_write_lock = require_write_lock || type.DropCatalogEntry();
 		require_write_lock = require_write_lock || type.CreateIndex();
 		// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
+		// not DROP_CATALOG_ENTRY: dropped storage is freed once no snapshot or checkpoint reads it
 
 		if (require_write_lock) {
 			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
