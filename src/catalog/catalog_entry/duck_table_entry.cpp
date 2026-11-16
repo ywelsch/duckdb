@@ -1486,7 +1486,7 @@ void DuckTableEntry::CommitAlter(string &column_name, CommitDropState &drop_stat
 }
 
 void DuckTableEntry::CommitDrop(CommitDropState &drop_state) {
-	drop_state.DropTable(*storage);
+	drop_state.DropTable(storage);
 }
 
 DataTable &DuckTableEntry::GetStorage() {

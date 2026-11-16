@@ -50,7 +50,7 @@ public:
 	//! Register an on-disk block to mark as modified during FinalizeCommit.
 	void DropBlock(block_id_t block_id);
 	//! Register a table whose on-disk blocks are freed when the commit is finalized.
-	void DropTable(DataTable &table);
+	void DropTable(shared_ptr<DataTable> table);
 	//! Register an index to be removed from a table's index list during FinalizeCommit. Index removal will drop in
 	//! memory index data and also marks all blocks on disk as free blocks allowing for reclamation. Block marking for
 	//! indexes is handled implicitly along destruction paths for index memory.
