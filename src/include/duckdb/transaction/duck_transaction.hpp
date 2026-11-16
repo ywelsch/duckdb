@@ -32,8 +32,6 @@ struct CommitInfo {
 	optional_ptr<CommitDropState> drop_state;
 	//! WAL offset covering the commit's flush marker (0 if no WAL was written)
 	idx_t wal_sync_offset = 0;
-	//! Whether the commit dropped storage that the cleanup of the transaction frees
-	bool has_dropped_storage = false;
 };
 
 class DuckTransaction : public Transaction {
@@ -92,8 +90,6 @@ public:
 	ErrorData Rollback();
 	//! Cleanup the undo buffer
 	void Cleanup(VisibilityBound lowest_visibility_bound);
-	//! Frees the storage dropped by this committed transaction for a starting checkpoint, ahead of its cleanup
-	void FreeDroppedStorage();
 
 	bool ChangesMade();
 	UndoBufferProperties GetUndoProperties();

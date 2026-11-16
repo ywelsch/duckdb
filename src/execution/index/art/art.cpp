@@ -722,10 +722,10 @@ void ART::ResetStorage(IndexLock &index_lock) {
 	root_ptr.Clear();
 }
 
-void ART::VisitBlockIds(BlockIdVisitor &visitor) {
+void ART::ReleaseBlocks(BlockIdVisitor &visitor) {
 	IndexLock index_lock(*this);
 	for (auto &allocator : *allocators) {
-		allocator->VisitBlockIds(visitor);
+		allocator->ReleaseBlocks(visitor);
 	}
 }
 

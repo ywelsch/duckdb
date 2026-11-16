@@ -47,6 +47,8 @@ public:
 	//! Drops the reference to the on-disk block without marking it as modified, i.e., without freeing it.
 	//! The block stays owned by the storage information this buffer was created from.
 	void DisownBlock();
+	//! Gives up the on-disk block, which the caller frees, and returns whether it had one: the buffer stays readable.
+	bool ReleaseBlock();
 
 public:
 	bool IsEmpty() const {
@@ -118,6 +120,8 @@ private:
 
 	//! Partial block id and offset
 	BlockPointer block_pointer;
+	//! False: destroying the buffer does not free its on-disk block.
+	bool owns_block = true;
 	//! The buffer handle of the in-memory buffer
 	BufferHandle buffer_handle;
 	//! The block handle of the on-disk buffer

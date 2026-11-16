@@ -144,9 +144,9 @@ void FixedSizeAllocator::Reset() {
 	total_segment_count = 0;
 }
 
-void FixedSizeAllocator::VisitBlockIds(BlockIdVisitor &visitor) const {
+void FixedSizeAllocator::ReleaseBlocks(BlockIdVisitor &visitor) {
 	for (auto &buffer : buffers) {
-		if (buffer.second->OnDisk()) {
+		if (buffer.second->ReleaseBlock()) {
 			visitor.Visit(buffer.second->block_pointer.block_id);
 		}
 	}

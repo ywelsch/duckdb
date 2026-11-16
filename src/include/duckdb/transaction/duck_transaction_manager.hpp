@@ -16,8 +16,22 @@
 #include <condition_variable>
 
 namespace duckdb {
+class DataTable;
+struct DataTableInfo;
 class DuckTransactionManager;
 class DuckTransaction;
+
+//! The storage of a table or of an index that a commit dropped
+struct DroppedStorage {
+	//! The dropped table, if any
+	shared_ptr<DataTable> table;
+	//! The table of the dropped index, if any: the index is detached from its index list
+	shared_ptr<DataTableInfo> index_table_info;
+	idx_t index_oid;
+
+	//! Frees the storage: its blocks are marked as modified
+	void Free();
+};
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -68,8 +82,12 @@ public:
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
 	void ResetActiveCheckpoint();
-	//! Frees the storage dropped by commits below the bound of a starting checkpoint, which does not write it
-	void FreeDroppedStorage(VisibilityBound visibility_bound);
+	//! Hands dropped storage over to a running checkpoint, which frees it. False if none runs: the commit frees it
+	bool DeferDroppedStorage(const DroppedStorage &storage);
+	//! Starts handing dropped storage over to the checkpoint. Called as the checkpoint starts, under the commit lock
+	void BeginDeferringDroppedStorage();
+	//! Frees the storage that was handed over and stops deferring. Called once the checkpoint wrote its header
+	void EndDeferringDroppedStorage() noexcept;
 	//! The start time that the next transaction gets
 	transaction_t NextStartTimestamp();
 	//! The earliest start time of the active transactions, checkpoints aside, or else the next start time
@@ -136,8 +154,6 @@ private:
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
-	//! Runs the queued cleanups in order. Caller holds the cleanup lock
-	void CleanupQueuedTransactions();
 	//! Lets the block manager reuse the blocks that checkpoints freed and no active transaction can read
 	void ReuseFreedBlocks() noexcept;
 
@@ -160,6 +176,12 @@ private:
 	//! The lowest bound any active transaction reads at. A version preceding it is visible to
 	//! every active transaction, so whatever it supersedes can be cleaned up or compacted
 	atomic<VisibilityBound> lowest_visibility_bound;
+	//! Guards the dropped storage that is handed over to a checkpoint
+	mutex deferred_storage_lock;
+	//! Whether a checkpoint is running that frees the storage of the drops that commit meanwhile
+	bool defer_dropped_storage = false;
+	//! The storage that the running checkpoint frees once it has written its header
+	vector<DroppedStorage> deferred_storage;
 	//! The lowest start time of the transactions that stayed active when the last one ended, checkpoints aside
 	atomic<transaction_t> lowest_remaining_start;
 	//! The last commit timestamp

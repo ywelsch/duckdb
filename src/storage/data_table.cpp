@@ -1698,13 +1698,9 @@ struct DroppedBlockCollector : public BlockIdVisitor {
 
 void DataTable::CommitDropTable(CommitDropState &drop_state) {
 	row_groups->CommitDropTable(drop_state);
-}
-
-void DataTable::CommitDropTableInUse(CommitDropState &drop_state) {
-	row_groups->CommitDropTable(drop_state);
-	// the indexes stay usable: the cleanup of the drop disowns their blocks
+	// snapshots can still read the table: its indexes stay usable
 	DroppedBlockCollector collector(drop_state);
-	info->GetIndexes().VisitBlockIds(collector);
+	info->GetIndexes().ReleaseBlocks(collector);
 }
 
 idx_t DataTable::GetRowGroupCount() const {

@@ -7,13 +7,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/execution/index/bound_index.hpp"
-#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
-#include "duckdb/storage/storage_manager.hpp"
-#include "duckdb/storage/table/data_table_info.hpp"
-#include "duckdb/storage/table/table_index_list.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/transaction/cleanup_state.hpp"
 #include "duckdb/transaction/commit_state.hpp"
@@ -21,7 +17,6 @@
 #include "duckdb/transaction/rollback_state.hpp"
 #include "duckdb/transaction/wal_write_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
-#include "duckdb/transaction/transaction_manager.hpp"
 
 namespace duckdb {
 constexpr uint32_t UNDO_ENTRY_HEADER_SIZE = sizeof(UndoFlags) + sizeof(uint32_t);
@@ -174,8 +169,7 @@ void UndoBuffer::Cleanup(VisibilityBound lowest_visibility_bound) {
 	//      the chunks)
 	//  (2) there is no active transaction with start_id < commit_id of this
 	//  transaction
-	bool dropped_storage_freed = dropped_storage == DroppedStorageState::FREED_BY_CHECKPOINT;
-	CleanupState state(transaction, lowest_visibility_bound, active_transaction_state, dropped_storage_freed);
+	CleanupState state(transaction, lowest_visibility_bound, active_transaction_state);
 	UndoBuffer::IteratorState iterator_state;
 	idx_t entry_idx = 0;
 	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) {
@@ -185,41 +179,6 @@ void UndoBuffer::Cleanup(VisibilityBound lowest_visibility_bound) {
 		state.CleanupEntry(type, data);
 		cleaned_up_entries++;
 	});
-}
-
-void UndoBuffer::FreeDroppedStorage() {
-	if (dropped_storage != DroppedStorageState::PENDING) {
-		return;
-	}
-	auto &db = transaction.manager.GetDB();
-	CommitDropState drop_state(db.GetStorageManager().GetBlockManager());
-	UndoBuffer::IteratorState iterator_state;
-	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) {
-		if (type != UndoFlags::CATALOG_ENTRY) {
-			return;
-		}
-		auto &entry = *Load<CatalogEntry *>(data);
-		if (entry.temporary || entry.Parent().temporary || entry.Parent().type != CatalogType::DELETED_ENTRY) {
-			return;
-		}
-		switch (entry.type) {
-		case CatalogType::TABLE_ENTRY:
-			entry.Cast<DuckTableEntry>().GetStorage().CommitDropTableInUse(drop_state);
-			break;
-		case CatalogType::INDEX_ENTRY: {
-			// the checkpoint must not write the index
-			auto &index_entry = entry.Cast<DuckIndexEntry>();
-			index_entry.GetDataTableInfo().GetIndexes().RemoveDetachedIndex(index_entry.oid);
-			break;
-		}
-		default:
-			break;
-		}
-	});
-	// set first: if marking fails half-way, the cleanup must not mark the blocks again
-	dropped_storage = DroppedStorageState::FREED_BY_CHECKPOINT;
-	// the block manager keeps the blocks until the transactions that started before the checkpoint have ended
-	drop_state.FinalizeCommit();
 }
 
 void UndoBuffer::WriteToWAL(WriteAheadLog &wal, optional_ptr<StorageCommitState> commit_state) {
@@ -236,9 +195,6 @@ void UndoBuffer::Commit(UndoBuffer::IteratorState &iterator_state, CommitInfo &i
 	CommitState state(transaction, info.commit_id, active_transaction_state, CommitMode::COMMIT);
 	IterateEntries(iterator_state, [&](UndoFlags type, data_ptr_t data) { state.CommitEntry(type, data, info); });
 	state.Verify();
-	if (info.has_dropped_storage) {
-		dropped_storage = DroppedStorageState::PENDING;
-	}
 }
 
 void UndoBuffer::RevertCommit(UndoBuffer::IteratorState &end_state, transaction_t transaction_id) {
@@ -246,7 +202,6 @@ void UndoBuffer::RevertCommit(UndoBuffer::IteratorState &end_state, transaction_
 	ReverseIterateEntries(end_state, [&](UndoFlags type, data_ptr_t data) { state.RevertCommit(type, data); });
 
 	state.Verify();
-	dropped_storage = DroppedStorageState::NONE;
 }
 
 void UndoBuffer::Rollback() {

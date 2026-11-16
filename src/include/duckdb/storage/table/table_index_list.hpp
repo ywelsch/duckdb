@@ -44,10 +44,8 @@ public:
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
 	//! Adds an index entry to the list of index entries, and returns it.
 	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, idx_t index_oid, ConstraintCheckMode check_mode);
-	//! Visits the on-disk blocks of every index, once per use
-	void VisitBlockIds(BlockIdVisitor &visitor);
-	//! Disowns the on-disk blocks of every index: destroying an index no longer frees them
-	void DisownStorage();
+	//! Gives up the on-disk blocks of every index, which stays readable, and visits them once per use.
+	void ReleaseBlocks(BlockIdVisitor &visitor);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.
@@ -66,7 +64,7 @@ public:
 	                       optional_idx active_checkpoint = optional_idx());
 	//! Removes an index entry from the list of index entries and release any storage the index owns.
 	void RemoveIndex(idx_t index_oid);
-	//! Removes an index entry without releasing it: checkpoints still write it until RemoveDetachedIndex
+	//! Removes an index entry without releasing it: a running checkpoint still writes it until RemoveDetachedIndex
 	void DetachIndex(idx_t index_oid);
 	//! Removes an index entry detached by DetachIndex and releases any storage the index owns.
 	void RemoveDetachedIndex(idx_t index_oid);
@@ -167,7 +165,7 @@ private:
 	vector<shared_ptr<IndexEntry>> index_entries DUCKDB_GUARDED_BY(index_entries_lock);
 	//! Contains the number of unbound indexes.
 	idx_t unbound_count DUCKDB_GUARDED_BY(index_entries_lock) = 0;
-	//! Index entries detached by a commit, which checkpoints with an earlier bound still write
+	//! Index entries detached by a commit, which the checkpoint that runs meanwhile still writes
 	vector<shared_ptr<IndexEntry>> detached_index_entries DUCKDB_GUARDED_BY(index_entries_lock);
 };
 

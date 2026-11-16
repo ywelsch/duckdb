@@ -304,7 +304,7 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 			bool sync_now = commit_info.active_transactions == ActiveTransactionState::NO_OTHER_TRANSACTIONS;
 			commit_info.wal_sync_offset = commit_state->FlushCommit(commit_info.commit_id, sync_now);
 		}
-		drop_state.FinalizeCommit();
+		drop_state.FinalizeCommit(manager.Cast<DuckTransactionManager>());
 		return ErrorData();
 	} catch (std::exception &ex) {
 		// Record the error and run RevertCommit() outside this try-catch: RevertCommit() iterates the
@@ -351,10 +351,6 @@ void DuckTransaction::Cleanup(VisibilityBound lowest_visibility_bound) {
 	undo_buffer.Cleanup(lowest_visibility_bound);
 }
 
-void DuckTransaction::FreeDroppedStorage() {
-	undo_buffer.FreeDroppedStorage();
-}
-
 unique_ptr<StorageLockKey> DuckTransaction::GetCheckpointLockForStatement() {
 	if (checkpoint_lock) {
 		return nullptr;
@@ -370,7 +366,7 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		require_write_lock = require_write_lock || type.CreateCatalogEntry();
 		require_write_lock = require_write_lock || type.CreateIndex();
 		// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
-		// not DROP_CATALOG_ENTRY: dropped storage is freed once no snapshot or checkpoint reads it
+		// not DROP_CATALOG_ENTRY: a checkpoint that runs when the drop commits frees the dropped storage
 
 		if (require_write_lock) {
 			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running

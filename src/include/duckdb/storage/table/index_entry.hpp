@@ -142,10 +142,8 @@ public:
 	bool HasBufferedReplays() const;
 	//! Destroys the physical index.
 	void Retire();
-	//! Visits the on-disk blocks of the physical index, once per use
-	void VisitBlockIds(BlockIdVisitor &visitor);
-	//! Disowns the on-disk blocks of the physical index: destroying it no longer frees them
-	void DisownStorage();
+	//! Gives up the on-disk blocks of the physical index, which stays readable, and visits them once per use.
+	void ReleaseBlocks(BlockIdVisitor &visitor);
 	//! Binds the unbound physical index without replacing it (nullptr for skipped mismatched keys).
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types,
 	                            bool skip_mismatched_keys = false);

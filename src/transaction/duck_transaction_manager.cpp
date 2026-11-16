@@ -12,6 +12,10 @@
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/block_manager.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/table/table_index_list.hpp"
+#include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -123,25 +127,46 @@ void DuckTransactionManager::ResetActiveCheckpoint() {
 	active_checkpoint = 0;
 }
 
-void DuckTransactionManager::FreeDroppedStorage(VisibilityBound visibility_bound) {
-	// no cleanup runs meanwhile: the transactions below stay alive
-	lock_guard<mutex> c_lock(cleanup_lock);
-	vector<reference<DuckTransaction>> transactions;
+void DroppedStorage::Free() {
+	if (table) {
+		CommitDropState drop_state(table->GetAttached().GetStorageManager().GetBlockManager());
+		table->CommitDropTable(drop_state);
+		drop_state.FinalizeCommit();
+	}
+	if (index_table_info) {
+		index_table_info->GetIndexes().RemoveDetachedIndex(index_oid);
+	}
+}
+
+bool DuckTransactionManager::DeferDroppedStorage(const DroppedStorage &storage) {
+	lock_guard<mutex> guard(deferred_storage_lock);
+	if (!defer_dropped_storage) {
+		return false;
+	}
+	deferred_storage.push_back(storage);
+	return true;
+}
+
+void DuckTransactionManager::BeginDeferringDroppedStorage() {
+	lock_guard<mutex> guard(deferred_storage_lock);
+	defer_dropped_storage = true;
+}
+
+void DuckTransactionManager::EndDeferringDroppedStorage() noexcept {
+	vector<DroppedStorage> dropped;
 	{
-		lock_guard<mutex> t_lock(transaction_lock);
-		for (auto &transaction : recently_committed_transactions) {
-			if (transaction->commit_id >= visibility_bound) {
-				break;
-			}
-			transactions.push_back(*transaction);
+		lock_guard<mutex> guard(deferred_storage_lock);
+		defer_dropped_storage = false;
+		dropped = std::move(deferred_storage);
+		deferred_storage.clear();
+	}
+	for (auto &storage : dropped) {
+		try {
+			// the checkpoint no longer writes it: the next checkpoint frees the blocks
+			storage.Free();
+		} catch (std::exception &) { // NOLINT
 		}
 	}
-	for (auto &transaction : transactions) {
-		// older snapshots can still read the storage
-		transaction.get().FreeDroppedStorage();
-	}
-	// drops that no snapshot reads are queued: their cleanup frees the storage
-	CleanupQueuedTransactions();
 }
 
 transaction_t DuckTransactionManager::NextStartTimestamp() {
@@ -368,16 +393,6 @@ void DuckTransactionManager::WaitForDurability() {
 
 void DuckTransactionManager::CleanupTransactions() {
 	lock_guard<mutex> c_lock(cleanup_lock);
-	try {
-		CleanupQueuedTransactions();
-	} catch (FatalException &) {
-		throw;
-	} catch (std::exception &) {
-		return;
-	}
-}
-
-void DuckTransactionManager::CleanupQueuedTransactions() {
 	while (true) {
 		DuckCleanupInfo *top_cleanup_info = nullptr;
 		{
@@ -388,7 +403,13 @@ void DuckTransactionManager::CleanupQueuedTransactions() {
 			}
 			top_cleanup_info = cleanup_queue.front().get();
 		}
-		top_cleanup_info->Cleanup();
+		try {
+			top_cleanup_info->Cleanup();
+		} catch (FatalException &) {
+			throw;
+		} catch (std::exception &) {
+			return;
+		}
 		{
 			lock_guard<mutex> q_lock(cleanup_queue_lock);
 			cleanup_queue.pop();

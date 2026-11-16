@@ -103,17 +103,10 @@ shared_ptr<IndexEntry> TableIndexList::AddIndex(unique_ptr<Index> index, idx_t i
 	return index_entry;
 }
 
-void TableIndexList::VisitBlockIds(BlockIdVisitor &visitor) {
+void TableIndexList::ReleaseBlocks(BlockIdVisitor &visitor) {
 	annotated_lock_guard lock(index_entries_lock);
 	for (auto &entry : index_entries) {
-		entry->VisitBlockIds(visitor);
-	}
-}
-
-void TableIndexList::DisownStorage() {
-	annotated_lock_guard lock(index_entries_lock);
-	for (auto &entry : index_entries) {
-		entry->DisownStorage();
+		entry->ReleaseBlocks(visitor);
 	}
 }
 

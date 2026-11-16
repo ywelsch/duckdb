@@ -59,9 +59,9 @@ DataTableInfo &DuckIndexEntry::GetDataTableInfo() const {
 	return *info->info;
 }
 
-void DuckIndexEntry::CommitDetach(CommitDropState &drop_state) {
+void DuckIndexEntry::CommitDrop(CommitDropState &drop_state) {
 	D_ASSERT(info);
-	drop_state.DetachIndex(GetDataTableInfo().GetIndexes(), oid);
+	drop_state.RemoveIndex(info->info, oid);
 }
 
 } // namespace duckdb

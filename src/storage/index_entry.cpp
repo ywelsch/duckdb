@@ -360,23 +360,14 @@ void IndexEntry::Retire() {
 	bind_state = IndexBindState::RETIRED;
 }
 
-void IndexEntry::VisitBlockIds(BlockIdVisitor &visitor) {
+void IndexEntry::ReleaseBlocks(BlockIdVisitor &visitor) {
 	auto entry_lock = lock.GetSharedLock();
 	if (!owned_index) {
 		return;
 	}
 	// a dropped table keeps its constraint indexes, which are ART indexes that are bound when they are loaded
 	D_ASSERT(owned_index->IsBound() && GetIndexType() == ART::TYPE_NAME);
-	owned_index->Cast<ART>().VisitBlockIds(visitor);
-}
-
-void IndexEntry::DisownStorage() {
-	auto entry_lock = lock.GetSharedLock();
-	if (!owned_index) {
-		return;
-	}
-	D_ASSERT(owned_index->IsBound());
-	owned_index->Cast<BoundIndex>().DisownStorage();
+	owned_index->Cast<ART>().ReleaseBlocks(visitor);
 }
 
 unique_ptr<BoundIndex> IndexEntry::Bind(IndexBinder &binder, const vector<LogicalType> &table_types,
