@@ -73,7 +73,7 @@ bool CommitDropState::FinalizeCommit(DuckTransactionManager &transaction_manager
 	for (auto &table : dropped_tables) {
 		DroppedStorage storage {table, nullptr, 0};
 		if (!transaction_manager.DeferDroppedStorage(storage)) {
-			table->CommitDropTable(*this);
+			storage.Free();
 		}
 	}
 	dropped_tables.clear();
