@@ -52,9 +52,8 @@ ActiveCheckpointWrapper::ActiveCheckpointWrapper(optional_ptr<ClientContext> che
 ActiveCheckpointWrapper::~ActiveCheckpointWrapper() {
 	// This happens on failure before we commit the transaction.
 	if (active) {
-		transaction_manager.ResetActiveCheckpoint();
+		transaction_manager.ResetActiveCheckpoint(false);
 	}
-	transaction_manager.EndDeferringDroppedStorage(false);
 	if (checkpoint_transaction) {
 		transaction_manager.RollbackTransaction(*checkpoint_transaction);
 		checkpoint_transaction = nullptr;
@@ -65,8 +64,6 @@ ActiveCheckpointWrapper::~ActiveCheckpointWrapper() {
 }
 
 void ActiveCheckpointWrapper::Begin(CheckpointOptions &options) {
-	// the checkpoint may write what a drop that commits from here on dropped: it frees that storage when it ends
-	transaction_manager.BeginDeferringDroppedStorage();
 	if (checkpoint_context) {
 		// the start time of the checkpoint transaction defines the visibility for checkpointing
 		checkpoint_context->transaction.BeginTransaction();
@@ -87,8 +84,7 @@ void ActiveCheckpointWrapper::Begin(CheckpointOptions &options) {
 
 void ActiveCheckpointWrapper::Commit() {
 	// the header is written: the next checkpoint frees what was dropped meanwhile
-	transaction_manager.EndDeferringDroppedStorage(true);
-	transaction_manager.ResetActiveCheckpoint();
+	transaction_manager.ResetActiveCheckpoint(true);
 	active = false;
 	if (!checkpoint_transaction) {
 		return;

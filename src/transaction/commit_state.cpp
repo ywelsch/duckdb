@@ -39,16 +39,33 @@ void CommitDropState::DropBlock(block_id_t block_id) {
 	dropped_block_ids.push_back(block_id);
 }
 
+void DroppedStorage::Detach() {
+	if (index_table_info) {
+		index_table_info->GetIndexes().DetachIndex(index_oid);
+	}
+}
+
+void DroppedStorage::Free() {
+	if (table) {
+		CommitDropState drop_state(table->GetAttached().GetStorageManager().GetBlockManager());
+		table->CommitDropTable(drop_state);
+		drop_state.FinalizeCommit();
+	}
+	if (index_table_info) {
+		index_table_info->GetIndexes().RemoveIndex(index_oid);
+	}
+}
+
 void CommitDropState::DropTable(shared_ptr<DataTable> table) {
-	dropped_tables.push_back(std::move(table));
+	dropped_storage.push_back(DroppedStorage {std::move(table), nullptr, 0});
 }
 
 void CommitDropState::RemoveIndex(shared_ptr<DataTableInfo> table_info, idx_t index_oid) {
-	pending_index_removals.push_back(PendingIndexRemoval {std::move(table_info), index_oid});
+	dropped_storage.push_back(DroppedStorage {nullptr, std::move(table_info), index_oid});
 }
 
 void CommitDropState::FinalizeCommit() {
-	D_ASSERT(pending_index_removals.empty() && dropped_tables.empty());
+	D_ASSERT(dropped_storage.empty());
 	if (block_manager) {
 		for (auto block_id : dropped_block_ids) {
 			block_manager->MarkBlockAsModified(block_id);
@@ -60,28 +77,18 @@ void CommitDropState::FinalizeCommit() {
 }
 
 void CommitDropState::FinalizeCommit(DuckTransactionManager &transaction_manager) {
-	// the dropped indexes leave their lists first: a dropped table frees the blocks of the indexes it keeps
-	for (auto &removal : pending_index_removals) {
-		// a running checkpoint still writes the index
-		removal.table_info->GetIndexes().DetachIndex(removal.index_oid);
-		DroppedStorage storage {nullptr, removal.table_info, removal.index_oid};
+	// in the order of the drops: the indexes of a table before the table, which frees the blocks of those it keeps
+	for (auto &storage : dropped_storage) {
 		if (!transaction_manager.DeferDroppedStorage(storage)) {
 			storage.Free();
 		}
 	}
-	pending_index_removals.clear();
-	for (auto &table : dropped_tables) {
-		DroppedStorage storage {table, nullptr, 0};
-		if (!transaction_manager.DeferDroppedStorage(storage)) {
-			storage.Free();
-		}
-	}
-	dropped_tables.clear();
+	dropped_storage.clear();
 	FinalizeCommit();
 }
 
 bool CommitDropState::Empty() const {
-	return dropped_block_ids.empty() && pending_index_removals.empty() && dropped_tables.empty();
+	return dropped_block_ids.empty() && dropped_storage.empty();
 }
 
 //===--------------------------------------------------------------------===//

@@ -12,10 +12,6 @@
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/block_manager.hpp"
-#include "duckdb/storage/data_table.hpp"
-#include "duckdb/storage/table/data_table_info.hpp"
-#include "duckdb/storage/table/table_index_list.hpp"
-#include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -123,40 +119,11 @@ void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
 	active_checkpoint = checkpoint_id;
 }
 
-void DuckTransactionManager::ResetActiveCheckpoint() {
-	active_checkpoint = 0;
-}
-
-void DroppedStorage::Free() {
-	if (table) {
-		CommitDropState drop_state(table->GetAttached().GetStorageManager().GetBlockManager());
-		table->CommitDropTable(drop_state);
-		drop_state.FinalizeCommit();
-	}
-	if (index_table_info) {
-		index_table_info->GetIndexes().RemoveDetachedIndex(index_oid);
-	}
-}
-
-bool DuckTransactionManager::DeferDroppedStorage(const DroppedStorage &storage) {
-	lock_guard<mutex> guard(deferred_storage_lock);
-	if (!defer_dropped_storage) {
-		return false;
-	}
-	deferred_storage.push_back(storage);
-	return true;
-}
-
-void DuckTransactionManager::BeginDeferringDroppedStorage() {
-	lock_guard<mutex> guard(deferred_storage_lock);
-	defer_dropped_storage = true;
-}
-
-void DuckTransactionManager::EndDeferringDroppedStorage(bool checkpoint_succeeded) {
+void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
 	vector<DroppedStorage> dropped;
 	{
 		lock_guard<mutex> guard(deferred_storage_lock);
-		defer_dropped_storage = false;
+		active_checkpoint = 0;
 		dropped = std::move(deferred_storage);
 		deferred_storage.clear();
 	}
@@ -168,6 +135,17 @@ void DuckTransactionManager::EndDeferringDroppedStorage(bool checkpoint_succeede
 		// the checkpoint no longer writes it: the next checkpoint frees the blocks
 		storage.Free();
 	}
+}
+
+bool DuckTransactionManager::DeferDroppedStorage(DroppedStorage &storage) {
+	lock_guard<mutex> guard(deferred_storage_lock);
+	if (active_checkpoint == 0) {
+		return false;
+	}
+	// the checkpoint started before the drop committed: its catalog still has the table or index
+	storage.Detach();
+	deferred_storage.push_back(storage);
+	return true;
 }
 
 transaction_t DuckTransactionManager::NextStartTimestamp() {

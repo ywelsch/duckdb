@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
@@ -16,22 +17,8 @@
 #include <condition_variable>
 
 namespace duckdb {
-class DataTable;
-struct DataTableInfo;
 class DuckTransactionManager;
 class DuckTransaction;
-
-//! The storage of a table or of an index that a commit dropped
-struct DroppedStorage {
-	//! The dropped table, if any
-	shared_ptr<DataTable> table;
-	//! The table of the dropped index, if any: the index is detached from its index list
-	shared_ptr<DataTableInfo> index_table_info;
-	idx_t index_oid;
-
-	//! Frees the storage: its blocks are marked as modified
-	void Free();
-};
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -81,13 +68,10 @@ public:
 		return ++next_checkpoint_id;
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
-	void ResetActiveCheckpoint();
-	//! Hands dropped storage over to a running checkpoint, which frees it. False if none runs: the commit frees it
-	bool DeferDroppedStorage(const DroppedStorage &storage);
-	//! Starts handing dropped storage over to the checkpoint. Called as the checkpoint starts, under the commit lock
-	void BeginDeferringDroppedStorage();
-	//! Stops deferring. Frees the storage that was handed over, unless the checkpoint failed
-	void EndDeferringDroppedStorage(bool checkpoint_succeeded);
+	//! Ends the checkpoint. If it succeeded, frees the storage that drops handed over to it
+	void ResetActiveCheckpoint(bool checkpoint_succeeded);
+	//! Hands dropped storage over to the running checkpoint, which frees it. False if none runs: the commit frees it
+	bool DeferDroppedStorage(DroppedStorage &storage);
 	//! The start time that the next transaction gets
 	transaction_t NextStartTimestamp();
 	//! The earliest start time of the active transactions, checkpoints aside, or else the next start time
@@ -178,8 +162,6 @@ private:
 	atomic<VisibilityBound> lowest_visibility_bound;
 	//! Guards the dropped storage that is handed over to a checkpoint
 	mutex deferred_storage_lock;
-	//! Whether a checkpoint is running that frees the storage of the drops that commit meanwhile
-	bool defer_dropped_storage = false;
 	//! The storage that the running checkpoint frees once it has written its header
 	vector<DroppedStorage> deferred_storage;
 	//! The lowest start time of the transactions that stayed active when the last one ended, checkpoints aside

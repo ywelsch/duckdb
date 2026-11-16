@@ -33,10 +33,18 @@ struct UpdateInfo;
 
 enum class CommitMode { COMMIT, REVERT_COMMIT };
 
-//! An index that has been marked for removal from a table's index list once the commit chain succeeds.
-struct PendingIndexRemoval {
-	shared_ptr<DataTableInfo> table_info;
+//! The storage of a table or of an index that a commit dropped, freed once the commit chain succeeds.
+struct DroppedStorage {
+	//! The dropped table, if any
+	shared_ptr<DataTable> table;
+	//! The table of the dropped index, if any
+	shared_ptr<DataTableInfo> index_table_info;
 	idx_t index_oid;
+
+	//! Keeps the storage in place for a running checkpoint, which may still write it
+	void Detach();
+	//! Frees the storage: its blocks are marked as modified
+	void Free();
 };
 
 //! Accumulates block marks and index removals during commit so they can be applied together once the
@@ -65,8 +73,7 @@ public:
 private:
 	optional_ptr<BlockManager> block_manager;
 	vector<block_id_t> dropped_block_ids;
-	vector<PendingIndexRemoval> pending_index_removals;
-	vector<shared_ptr<DataTable>> dropped_tables;
+	vector<DroppedStorage> dropped_storage;
 };
 
 struct IndexDataRemover {
