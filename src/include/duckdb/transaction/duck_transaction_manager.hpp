@@ -86,8 +86,8 @@ public:
 	bool DeferDroppedStorage(const DroppedStorage &storage);
 	//! Starts handing dropped storage over to the checkpoint. Called as the checkpoint starts, under the commit lock
 	void BeginDeferringDroppedStorage();
-	//! Frees the storage that was handed over and stops deferring. Called once the checkpoint wrote its header
-	void EndDeferringDroppedStorage() noexcept;
+	//! Stops deferring. Frees the storage that was handed over, unless the checkpoint failed
+	void EndDeferringDroppedStorage(bool checkpoint_succeeded);
 	//! The start time that the next transaction gets
 	transaction_t NextStartTimestamp();
 	//! The earliest start time of the active transactions, checkpoints aside, or else the next start time

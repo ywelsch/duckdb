@@ -54,7 +54,7 @@ ActiveCheckpointWrapper::~ActiveCheckpointWrapper() {
 	if (active) {
 		transaction_manager.ResetActiveCheckpoint();
 	}
-	transaction_manager.EndDeferringDroppedStorage();
+	transaction_manager.EndDeferringDroppedStorage(false);
 	if (checkpoint_transaction) {
 		transaction_manager.RollbackTransaction(*checkpoint_transaction);
 		checkpoint_transaction = nullptr;
@@ -87,7 +87,7 @@ void ActiveCheckpointWrapper::Begin(CheckpointOptions &options) {
 
 void ActiveCheckpointWrapper::Commit() {
 	// the header is written: the next checkpoint frees what was dropped meanwhile
-	transaction_manager.EndDeferringDroppedStorage();
+	transaction_manager.EndDeferringDroppedStorage(true);
 	transaction_manager.ResetActiveCheckpoint();
 	active = false;
 	if (!checkpoint_transaction) {
