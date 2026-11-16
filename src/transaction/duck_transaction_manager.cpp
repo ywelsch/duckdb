@@ -352,6 +352,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
 	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
 	ErrorData error = transaction.PreFlushOptimisticBlocks(db);
+	// waits for a running checkpoint, so before the commit takes any lock that the checkpoint needs
+	transaction.LockCheckpointForDrop();
 	unique_lock<mutex> t_lock(transaction_lock);
 	if (!db.IsSystem() && !db.IsTemporary()) {
 		if (transaction.ChangesMade()) {

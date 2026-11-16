@@ -364,15 +364,16 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		require_write_lock = require_write_lock || type.UpdateData();
 		require_write_lock = require_write_lock || type.AlterTable();
 		require_write_lock = require_write_lock || type.CreateCatalogEntry();
-		require_write_lock = require_write_lock || type.DropCatalogEntry();
 		require_write_lock = require_write_lock || type.CreateIndex();
 		// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
+		// not DROP_CATALOG_ENTRY: a drop changes no storage until it commits, see LockCheckpointForDrop
 
 		if (require_write_lock) {
 			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
 			checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
 		}
 	}
+	drops_storage = drops_storage || type.DropCatalogEntry();
 	if (!vacuum_lock) {
 		bool require_vacuum_lock = false;
 		require_vacuum_lock = require_vacuum_lock || type.InsertData();
@@ -381,6 +382,13 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		if (require_vacuum_lock) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
 		}
+	}
+}
+
+void DuckTransaction::LockCheckpointForDrop() {
+	if (drops_storage && !checkpoint_lock) {
+		// the commit frees the dropped storage: no checkpoint runs from here until the drop is cleaned up
+		checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
 	}
 }
 

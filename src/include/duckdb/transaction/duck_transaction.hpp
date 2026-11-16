@@ -70,6 +70,8 @@ public:
 	//! Acquire a shared checkpoint lock for a statement, or return null if this transaction already holds one.
 	unique_ptr<StorageLockKey> GetCheckpointLockForStatement();
 	void SetModifications(DatabaseModificationType type) override;
+	//! Takes the checkpoint lock for a transaction that dropped a table or index, before it commits
+	void LockCheckpointForDrop();
 
 	bool ShouldWriteToWAL(AttachedDatabase &db);
 	ErrorData PreFlushOptimisticBlocks(AttachedDatabase &db) noexcept;
@@ -125,6 +127,8 @@ private:
 	unique_ptr<LocalStorage> storage;
 	//! Lock that prevents checkpoints from starting
 	unique_ptr<StorageLockKey> checkpoint_lock;
+	//! Whether the transaction dropped a table or index: its commit frees the storage
+	bool drops_storage = false;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
 	//! Lock for accessing sequence_usage
