@@ -370,6 +370,8 @@ void DuckTransactionManager::WaitForDurability() {
 }
 
 void DuckTransactionManager::CleanupTransactions() {
+	// a transaction ended: the blocks that only it could still read can be reused
+	ReuseFreedBlocks();
 	lock_guard<mutex> c_lock(cleanup_lock);
 	while (true) {
 		DuckCleanupInfo *top_cleanup_info = nullptr;
@@ -596,7 +598,6 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	CleanupTransactions();
-	ReuseFreedBlocks();
 
 	if (checkpoint_decision.can_checkpoint && undo_properties.has_updates &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
@@ -655,7 +656,6 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	}
 
 	CleanupTransactions();
-	ReuseFreedBlocks();
 
 	// Run external-resource teardowns the rollback queued (see RollbackState): they execute SQL, so
 	// they can only run here, after the transaction lock is released.
