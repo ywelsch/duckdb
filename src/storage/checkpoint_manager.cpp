@@ -83,7 +83,6 @@ void ActiveCheckpointWrapper::Begin(CheckpointOptions &options) {
 }
 
 void ActiveCheckpointWrapper::Commit() {
-	// the header is written: the next checkpoint frees what was dropped meanwhile
 	transaction_manager.ResetActiveCheckpoint(true);
 	active = false;
 	if (!checkpoint_transaction) {
