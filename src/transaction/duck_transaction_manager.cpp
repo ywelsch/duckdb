@@ -154,6 +154,13 @@ transaction_t DuckTransactionManager::NextStartTimestamp() {
 
 transaction_t DuckTransactionManager::LowestActiveStart() {
 	lock_guard<mutex> t_lock(transaction_lock);
+	{
+		// a cleanup that has not run can still read a dropped table, like a transaction older than all others
+		lock_guard<mutex> q_lock(cleanup_queue_lock);
+		if (!cleanup_queue.empty()) {
+			return 0;
+		}
+	}
 	return LowestActiveStartInternal();
 }
 

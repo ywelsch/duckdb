@@ -74,7 +74,7 @@ public:
 	bool DeferDroppedStorage(const DroppedStorage &storage);
 	//! The start time that the next transaction gets
 	transaction_t NextStartTimestamp();
-	//! The earliest start time of the active transactions, checkpoints aside, or else the next start time
+	//! The earliest start of the active transactions, checkpoints aside: the next start if none, 0 if a cleanup waits
 	transaction_t LowestActiveStart();
 
 	bool IsDuckTransactionManager() override {
