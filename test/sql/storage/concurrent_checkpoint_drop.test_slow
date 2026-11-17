@@ -198,11 +198,12 @@ onlyif threadid=1
 statement ok
 INSERT INTO u VALUES (5)
 
-sleep 4000 millisecond
-
+# the reader ends, and the drops are cleaned up, while the checkpoint that frees the table and the index still runs
 onlyif threadid=2
 statement ok
 COMMIT
+
+sleep 4000 millisecond
 
 endloop
 
@@ -269,7 +270,7 @@ CREATE TABLE tick1 AS SELECT 1 AS x
 statement ok
 CHECKPOINT
 
-# a reader whose snapshot is older than a drop reads the dropped table after checkpoints reused its storage
+# a reader older than a drop runs the checkpoint that frees the table, and reads it after later checkpoints
 statement ok
 SET force_compression='uncompressed'
 
@@ -315,7 +316,7 @@ SELECT COUNT(*) FROM c
 statement ok
 DROP TABLE d
 
-statement ok
+statement ok con1
 CHECKPOINT
 
 loop k 0 3
@@ -361,29 +362,50 @@ SELECT COUNT(*), SUM(i) FROM b2
 ----
 13333	133320000
 
-# a checkpoint after dropping an indexed table, while an older reader uses its indexes, frees their blocks on disk
+# a table dropped before any checkpoint wrote it: only the WAL references its blocks
 statement ok
-CREATE TABLE ia (i INTEGER PRIMARY KEY, s VARCHAR);
+SET checkpoint_threshold='1TB'
 
 statement ok
-INSERT INTO ia SELECT i, 'a' || i FROM range(100000) t(i);
-
-statement ok
-CREATE INDEX ia_s ON ia(s)
+CREATE TABLE f (i BIGINT, s VARCHAR)
 
 statement ok
 CHECKPOINT
+
+statement ok
+CREATE TABLE n AS SELECT i, i::VARCHAR || 'n' AS s FROM range(1000000) t(i)
 
 statement ok con2
 BEGIN TRANSACTION
 
 query I con2
-SELECT COUNT(*) FROM ia
+SELECT COUNT(*) FROM n
 ----
-100000
+1000000
 
 statement ok
-DROP TABLE ia
+DROP TABLE n
+
+# frees n on disk while con2 still reads it
+statement ok
+CHECKPOINT
+
+statement ok
+INSERT INTO f SELECT i, i::VARCHAR || 'f' AS s FROM range(1000000) t(i)
+
+statement ok
+CHECKPOINT
+
+query III con2
+SELECT COUNT(*), SUM(i), SUM(length(s)) FROM n
+----
+1000000	499999500000	6888890
+
+# a crash while con2 still reads n: its blocks are free on disk
+restart
+
+statement ok
+SET debug_verify_blocks=true
 
 statement ok
 INSERT INTO tick1 VALUES (3)
@@ -391,26 +413,7 @@ INSERT INTO tick1 VALUES (3)
 statement ok
 CHECKPOINT
 
-query II con2
-SELECT i, s FROM ia WHERE i = 4242
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'n'
 ----
-4242	a4242
-
-query II con2
-SELECT i, s FROM ia WHERE s = 'a777'
-----
-777	a777
-
-statement ok con2
-COMMIT
-
-restart
-
-statement ok
-SET debug_verify_blocks=true
-
-statement ok
-CREATE TABLE tick4 AS SELECT 1 AS x
-
-statement ok
-CHECKPOINT
+0
