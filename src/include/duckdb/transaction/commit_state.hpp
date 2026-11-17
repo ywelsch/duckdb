@@ -43,8 +43,6 @@ struct DroppedStorage {
 
 	//! Keeps the storage in place for a running checkpoint, which may still write it
 	void Detach();
-	//! Frees the storage: its blocks are marked as modified
-	void Free();
 };
 
 //! Accumulates block marks and index removals during commit so they can be applied together once the
@@ -59,6 +57,8 @@ public:
 	void DropBlock(block_id_t block_id);
 	//! Register a table whose on-disk blocks, and those of its indexes, are freed when the commit is finalized.
 	void DropTable(shared_ptr<DataTable> table);
+	//! Registers the blocks of dropped tables and removes dropped indexes. Changes nothing if it fails
+	void FreeStorage(vector<DroppedStorage> &dropped);
 	//! Register an index to be removed from a table's index list during FinalizeCommit. Index removal will drop in
 	//! memory index data and also marks all blocks on disk as free blocks allowing for reclamation. Block marking for
 	//! indexes is handled implicitly along destruction paths for index memory.

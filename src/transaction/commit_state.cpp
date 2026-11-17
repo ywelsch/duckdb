@@ -11,13 +11,12 @@
 #include "duckdb/catalog/duck_catalog.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
-#include "duckdb/main/attached_database.hpp"
 #include "duckdb/storage/block_manager.hpp"
-#include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/table/chunk_info.hpp"
 #include "duckdb/storage/table/column_data.hpp"
 #include "duckdb/storage/table/row_version_manager.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/table/index_entry.hpp"
 #include "duckdb/storage/table/table_index_list.hpp"
 #include "duckdb/storage/table/update_segment.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
@@ -47,14 +46,35 @@ void DroppedStorage::Detach() {
 	}
 }
 
-void DroppedStorage::Free() {
-	if (table) {
-		CommitDropState drop_state(table->GetAttached().GetStorageManager().GetBlockManager());
-		table->CommitDropTable(drop_state);
-		drop_state.FinalizeCommit();
+struct DroppedBlockCollector : public BlockIdVisitor {
+	explicit DroppedBlockCollector(CommitDropState &drop_state) : drop_state(drop_state) {
 	}
-	if (index_table_info) {
-		index_table_info->GetIndexes().RemoveIndex(index_oid);
+
+	void Visit(block_id_t block_id) override {
+		drop_state.DropBlock(block_id);
+	}
+
+	CommitDropState &drop_state;
+};
+
+void CommitDropState::FreeStorage(vector<DroppedStorage> &dropped) {
+	// first what can fail, which loads the tables: nothing is freed or removed unless all of it succeeds
+	for (auto &storage : dropped) {
+		if (storage.table) {
+			storage.table->CommitDropTable(*this);
+		}
+	}
+	// in the order of the drops: the indexes of a table before the table, which gives up the blocks of those it keeps
+	DroppedBlockCollector collector(*this);
+	for (auto &storage : dropped) {
+		if (!storage.table) {
+			storage.index_table_info->GetIndexes().RemoveIndex(storage.index_oid);
+			continue;
+		}
+		// transactions that still read the table keep using its indexes
+		for (auto entry : storage.table->GetDataTableInfo()->GetIndexes().IndexEntries()) {
+			entry->DisownBlocks(collector);
+		}
 	}
 }
 
@@ -79,14 +99,13 @@ void CommitDropState::FinalizeCommit() {
 }
 
 void CommitDropState::FinalizeCommit(DuckTransactionManager &transaction_manager) {
-	// in the order of the drops: the indexes of a table before the table, which frees the blocks of those it keeps
-	for (auto &storage : dropped_storage) {
-		if (transaction_manager.DeferDroppedStorage(storage)) {
-			// handed over: the running checkpoint may still write it
+	if (transaction_manager.DeferDroppedStorage(dropped_storage)) {
+		// handed over: the running checkpoint may still write them
+		for (auto &storage : dropped_storage) {
 			storage.Detach();
-		} else {
-			storage.Free();
 		}
+	} else {
+		FreeStorage(dropped_storage);
 	}
 	dropped_storage.clear();
 	FinalizeCommit();

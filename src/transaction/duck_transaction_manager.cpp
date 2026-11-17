@@ -127,23 +127,23 @@ void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
 		dropped = std::move(deferred_storage);
 		deferred_storage.clear();
 	}
-	if (!checkpoint_succeeded) {
+	if (!checkpoint_succeeded || dropped.empty()) {
 		// a failed checkpoint invalidates the database: the WAL replays the drops when it is opened again
 		return;
 	}
-	for (auto &storage : dropped) {
-		// the checkpoint no longer writes it: the next checkpoint frees the blocks
-		storage.Free();
-	}
+	// the checkpoint no longer writes them: the next checkpoint frees the blocks
+	CommitDropState drop_state(&db.GetStorageManager().GetBlockManager());
+	drop_state.FreeStorage(dropped);
+	drop_state.FinalizeCommit();
 }
 
-bool DuckTransactionManager::DeferDroppedStorage(const DroppedStorage &storage) {
+bool DuckTransactionManager::DeferDroppedStorage(const vector<DroppedStorage> &dropped) {
 	lock_guard<mutex> guard(deferred_storage_lock);
 	if (active_checkpoint == 0) {
 		return false;
 	}
-	// the checkpoint started before the drop committed: its catalog still has the table or index
-	deferred_storage.push_back(storage);
+	// the checkpoint started before the drops committed: its catalog still has the tables and indexes
+	deferred_storage.insert(deferred_storage.end(), dropped.begin(), dropped.end());
 	return true;
 }
 
@@ -184,7 +184,7 @@ void DuckTransactionManager::ReuseFreedBlocks(transaction_t lowest_start) noexce
 		// transactions that started since then started later: the true lowest start is not below this
 		db.GetStorageManager().GetBlockManager().ReuseFreedBlocks(lowest_start);
 	} catch (std::exception &) {
-		// the blocks stay unused until a later transaction ends
+		// e.g. the file could not be trimmed: a rollback, which destructors run, must not throw
 	}
 }
 
