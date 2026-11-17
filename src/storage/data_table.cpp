@@ -1700,7 +1700,9 @@ void DataTable::CommitDropTable(CommitDropState &drop_state) {
 	row_groups->CommitDropTable(drop_state);
 	// snapshots can still read the table: its indexes stay usable
 	DroppedBlockCollector collector(drop_state);
-	info->GetIndexes().DisownBlocks(collector);
+	for (auto entry : info->GetIndexes().IndexEntries()) {
+		entry->DisownBlocks(collector);
+	}
 }
 
 idx_t DataTable::GetRowGroupCount() const {

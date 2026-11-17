@@ -103,13 +103,6 @@ shared_ptr<IndexEntry> TableIndexList::AddIndex(unique_ptr<Index> index, idx_t i
 	return index_entry;
 }
 
-void TableIndexList::DisownBlocks(BlockIdVisitor &visitor) {
-	annotated_lock_guard lock(index_entries_lock);
-	for (auto &entry : index_entries) {
-		entry->DisownBlocks(visitor);
-	}
-}
-
 void TableIndexList::InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const {
 	D_ASSERT(this != &delete_indexes);
 	D_ASSERT(this != &append_indexes);
@@ -591,20 +584,11 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 	}
 
 #ifdef D_ASSERT_IS_ENABLED
-	// the list lock was not needed: no index was added or removed meanwhile, a drop only detaches
-	vector<shared_ptr<IndexEntry>> current;
 	{
+		// the list lock was not needed: no index was added or removed meanwhile, a drop only detaches
 		annotated_lock_guard lock(index_entries_lock);
-		current = CheckpointEntries();
+		D_ASSERT(CheckpointEntries().size() == entries.size());
 	}
-	auto entry_set = [](const vector<shared_ptr<IndexEntry>> &list) {
-		unordered_set<const IndexEntry *> result;
-		for (const auto &entry : list) {
-			result.insert(entry.get());
-		}
-		return result;
-	};
-	D_ASSERT(entry_set(current) == entry_set(entries));
 #endif
 	return infos;
 }
