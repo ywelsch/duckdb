@@ -362,12 +362,9 @@ void IndexEntry::Retire() {
 
 void IndexEntry::DisownBlocks(BlockIdVisitor &visitor) {
 	auto entry_lock = lock.GetSharedLock();
-	if (!owned_index) {
+	// a dropped table keeps its constraint indexes, which are bound ARTs: any other is uncommitted, with no blocks
+	if (!owned_index || !owned_index->IsBound() || owned_index->GetIndexType() != ART::TYPE_NAME) {
 		return;
-	}
-	// a dropped table keeps its constraint indexes, which DuckTableEntry creates as bound ART indexes
-	if (!owned_index->IsBound() || GetIndexType() != ART::TYPE_NAME) {
-		throw InternalException("Index %llu of a dropped table is not a bound ART index", index_oid);
 	}
 	owned_index->Cast<ART>().DisownBlocks(visitor);
 }
