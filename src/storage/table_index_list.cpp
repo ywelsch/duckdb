@@ -574,8 +574,6 @@ vector<shared_ptr<const IndexStorageInfo>> TableIndexList::Checkpoint(TableIndex
 	vector<shared_ptr<const IndexStorageInfo>> infos;
 	infos.reserve(entries.size());
 	for (const auto &entry : entries) {
-		// retired only once it leaves the lists
-		D_ASSERT(entry->GetBindState() != IndexBindState::RETIRED);
 		auto checkpoint = entry->Checkpoint(writer);
 		if (checkpoint.shadow_index) {
 			writer.AddPendingPublication(make_uniq<PendingIndexPublication>(entry, std::move(checkpoint.shadow_index)));
