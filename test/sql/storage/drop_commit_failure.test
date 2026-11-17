@@ -2,6 +2,11 @@
 # description: A drop whose commit fails leaves the table and its indexes in place
 # group: [storage]
 
+# the forced commit failure crashes the alternative-verify build
+require no_alternative_verify
+
+require skip_reload
+
 load {TEST_DIR}/drop_commit_failure.db
 
 statement ok

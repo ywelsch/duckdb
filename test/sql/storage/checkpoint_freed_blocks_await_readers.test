@@ -2,6 +2,9 @@
 # description: Blocks a checkpoint frees are reused only once the transactions that started before it have ended
 # group: [storage]
 
+# a restart between the statements checkpoints without the readers
+require skip_reload
+
 load {TEST_DIR}/checkpoint_freed_blocks_await_readers.db
 
 statement ok
