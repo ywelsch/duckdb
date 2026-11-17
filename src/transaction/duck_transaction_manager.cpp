@@ -154,6 +154,10 @@ transaction_t DuckTransactionManager::NextStartTimestamp() {
 
 transaction_t DuckTransactionManager::LowestActiveStart() {
 	lock_guard<mutex> t_lock(transaction_lock);
+	return LowestActiveStartInternal();
+}
+
+transaction_t DuckTransactionManager::LowestActiveStartInternal() {
 	transaction_t lowest_start = current_start_timestamp;
 	for (auto &transaction : active_transactions) {
 		if (transaction->IsCheckpointTransaction()) {
@@ -165,13 +169,13 @@ transaction_t DuckTransactionManager::LowestActiveStart() {
 	return lowest_start;
 }
 
-void DuckTransactionManager::ReuseFreedBlocks() noexcept {
+void DuckTransactionManager::ReuseFreedBlocks(transaction_t lowest_start) noexcept {
 	if (!db.HasStorageManager()) {
 		return;
 	}
 	try {
 		// transactions that started since then started later: the true lowest start is not below this
-		db.GetStorageManager().GetBlockManager().ReuseFreedBlocks(lowest_remaining_start);
+		db.GetStorageManager().GetBlockManager().ReuseFreedBlocks(lowest_start);
 	} catch (std::exception &) {
 		// the blocks stay unused until a later transaction ends
 	}
@@ -370,16 +374,16 @@ void DuckTransactionManager::WaitForDurability() {
 }
 
 void DuckTransactionManager::CleanupTransactions() {
-	// a transaction ended: the blocks that only it could still read can be reused
-	ReuseFreedBlocks();
 	lock_guard<mutex> c_lock(cleanup_lock);
+	// read before the cleanups run: every cleanup that this start time allows is queued by now
+	transaction_t lowest_start = lowest_remaining_start;
 	while (true) {
 		DuckCleanupInfo *top_cleanup_info = nullptr;
 		{
 			lock_guard<mutex> q_lock(cleanup_queue_lock);
 			if (cleanup_queue.empty()) {
 				// all transactions have been cleaned up - done
-				return;
+				break;
 			}
 			top_cleanup_info = cleanup_queue.front().get();
 		}
@@ -395,6 +399,8 @@ void DuckTransactionManager::CleanupTransactions() {
 			cleanup_queue.pop();
 		}
 	}
+	// a cleanup can still read a dropped table: only now can the blocks that waited for readers be reused
+	ReuseFreedBlocks(lowest_start);
 }
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
@@ -729,7 +735,6 @@ DuckTransactionManager::RemoveTransaction(DuckTransaction &transaction, bool sto
 idx_t DuckTransactionManager::UpdateLowestVisibilityBound(optional_ptr<DuckTransaction> exclude) noexcept {
 	idx_t exclude_index = active_transactions.size();
 	auto computed_lowest_visibility_bound = VisibilityBound::AllCommitted();
-	transaction_t computed_lowest_start = current_start_timestamp;
 	for (idx_t i = 0; i < active_transactions.size(); i++) {
 		if (exclude && active_transactions[i].get() == exclude.get()) {
 			exclude_index = i;
@@ -737,12 +742,8 @@ idx_t DuckTransactionManager::UpdateLowestVisibilityBound(optional_ptr<DuckTrans
 		}
 		computed_lowest_visibility_bound =
 		    VisibilityBound::Min(computed_lowest_visibility_bound, active_transactions[i]->view.visibility_bound);
-		if (!active_transactions[i]->IsCheckpointTransaction()) {
-			computed_lowest_start = MinValue<transaction_t>(computed_lowest_start, active_transactions[i]->start_time);
-		}
 	}
 	lowest_visibility_bound = computed_lowest_visibility_bound;
-	lowest_remaining_start = computed_lowest_start;
 	return exclude_index;
 }
 
@@ -780,6 +781,8 @@ void DuckTransactionManager::QueueCleanup(unique_ptr<DuckCleanupInfo> cleanup_in
 		lock_guard<mutex> q_lock(cleanup_queue_lock);
 		cleanup_queue.emplace(std::move(cleanup_info));
 	}
+	// under the transaction lock, and only after the cleanup that this start time allows is queued
+	lowest_remaining_start = LowestActiveStartInternal();
 }
 
 idx_t DuckTransactionManager::GetCatalogVersion(Transaction &transaction_p) {
