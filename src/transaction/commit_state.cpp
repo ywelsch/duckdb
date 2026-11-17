@@ -81,7 +81,10 @@ void CommitDropState::FinalizeCommit() {
 void CommitDropState::FinalizeCommit(DuckTransactionManager &transaction_manager) {
 	// in the order of the drops: the indexes of a table before the table, which frees the blocks of those it keeps
 	for (auto &storage : dropped_storage) {
-		if (!transaction_manager.DeferDroppedStorage(storage)) {
+		if (transaction_manager.DeferDroppedStorage(storage)) {
+			// handed over: the running checkpoint may still write it
+			storage.Detach();
+		} else {
 			storage.Free();
 		}
 	}

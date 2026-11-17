@@ -137,13 +137,12 @@ void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
 	}
 }
 
-bool DuckTransactionManager::DeferDroppedStorage(DroppedStorage &storage) {
+bool DuckTransactionManager::DeferDroppedStorage(const DroppedStorage &storage) {
 	lock_guard<mutex> guard(deferred_storage_lock);
 	if (active_checkpoint == 0) {
 		return false;
 	}
 	// the checkpoint started before the drop committed: its catalog still has the table or index
-	storage.Detach();
 	deferred_storage.push_back(storage);
 	return true;
 }

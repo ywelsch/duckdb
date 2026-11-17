@@ -71,7 +71,7 @@ public:
 	//! Ends the checkpoint. If it succeeded, frees the storage that drops handed over to it
 	void ResetActiveCheckpoint(bool checkpoint_succeeded);
 	//! Hands dropped storage over to the running checkpoint, which frees it. False if none runs: the commit frees it
-	bool DeferDroppedStorage(DroppedStorage &storage);
+	bool DeferDroppedStorage(const DroppedStorage &storage);
 	//! The start time that the next transaction gets
 	transaction_t NextStartTimestamp();
 	//! The earliest start time of the active transactions, checkpoints aside, or else the next start time
