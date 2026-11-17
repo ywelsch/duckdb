@@ -78,7 +78,7 @@ Cannot CHECKPOINT
 
 sleep 4000 millisecond
 
-# a later checkpoint while the reader still sees the dropped table
+# a later checkpoint while the reader still sees the dropped table and its indexes
 onlyif threadid=1
 statement ok
 INSERT INTO keep VALUES (-2)
@@ -361,7 +361,7 @@ SELECT COUNT(*), SUM(i) FROM b2
 ----
 13333	133320000
 
-# a checkpoint after dropping an indexed table, while an older reader reads it, frees the index blocks on disk
+# a checkpoint after dropping an indexed table, while an older reader uses its indexes, frees their blocks on disk
 statement ok
 CREATE TABLE ia (i INTEGER PRIMARY KEY, s VARCHAR);
 
