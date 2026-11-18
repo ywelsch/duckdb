@@ -1,0 +1,318 @@
+# name: test/sql/storage/vacuum_checkpoint_concurrent_delete_index.test_slow
+# description: Deletes and index scans run while a checkpoint merges row groups of a table with indexes
+# group: [storage]
+
+load {TEST_DIR}/vacuum_checkpoint_concurrent_delete_index.db readwrite v2.1.0
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+CREATE TABLE test (i INTEGER PRIMARY KEY, j INTEGER, s VARCHAR);
+
+# five row groups
+statement ok
+INSERT INTO test SELECT i, i % 1000, 'base' FROM range(614400) t(i);
+
+statement ok
+CREATE INDEX idx_j ON test (j);
+
+statement ok
+CHECKPOINT
+
+# every row group keeps a tenth of its rows
+statement ok
+DELETE FROM test WHERE i % 10 <> 0
+
+# the timing table lives in a database the checkpoint does not write
+statement ok
+ATTACH ':memory:' AS mem
+
+statement ok
+CREATE TABLE mem.timing (who VARCHAR, t TIMESTAMP);
+
+# the checkpoint sleeps for six seconds after it became active, before it writes any table, and again for six
+# seconds after it merged the row groups, before it writes the header
+statement ok
+SET debug_checkpoint_sleep_ms=6000
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=6000
+
+concurrentloop threadid 0 6
+
+sleep 1000 millisecond
+
+onlyif threadid=0
+statement ok
+INSERT INTO mem.timing VALUES ('checkpoint start', now())
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+onlyif threadid=0
+statement ok
+INSERT INTO mem.timing VALUES ('checkpoint end', now())
+
+sleep 2000 millisecond
+
+# during the first sleep: index scans, and a delete in the first row group, which the checkpoint then keeps as it is
+onlyif threadid=1
+query III
+SELECT rowid, i, j FROM test WHERE i = 300010
+----
+300010	300010	10
+
+onlyif threadid=1
+statement ok
+DELETE FROM test WHERE i = 0
+
+# without the row that the transaction of thread 4 deletes at the same time
+onlyif threadid=1
+query II
+SELECT COUNT(*), SUM(i) FROM test WHERE j = 0 AND abs(i) <> 130000
+----
+613	188675000
+
+onlyif threadid=1
+statement ok
+INSERT INTO mem.timing VALUES ('first', now())
+
+# during the first sleep: a transaction deletes in the second row group, which is kept as well
+# once it has committed it no longer holds the merges back
+onlyif threadid=4
+statement ok
+BEGIN
+
+onlyif threadid=4
+statement ok
+DELETE FROM test WHERE i = 130000
+
+onlyif threadid=4
+statement ok
+COMMIT
+
+onlyif threadid=4
+statement ok
+INSERT INTO mem.timing VALUES ('transaction', now())
+
+sleep 6000 millisecond
+
+# during the second sleep: the last three row groups are merged, the header is not written yet
+
+# index scans find the rows where the merge put them
+onlyif threadid=2
+query III
+SELECT rowid, i, j FROM test WHERE i = 300010
+----
+251185	300010	10
+
+onlyif threadid=2
+query III
+SELECT COUNT(*), SUM(i), SUM(rowid) FROM test WHERE j = 990
+----
+614	188798860	127616077
+
+onlyif threadid=2
+query III
+SELECT COUNT(*), SUM(i), SUM(rowid) FROM test WHERE abs(j) = 990
+----
+614	188798860	127616077
+
+# a delete in a row group that was kept, an insert and a duplicate of a row that moved
+onlyif threadid=2
+statement ok
+DELETE FROM test WHERE i = 10
+
+onlyif threadid=2
+statement ok
+INSERT INTO test VALUES (-1, 1, 'during')
+
+onlyif threadid=2
+statement error
+INSERT INTO test VALUES (300010, 10, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+onlyif threadid=2
+statement ok
+INSERT INTO mem.timing VALUES ('second', now())
+
+# a delete in the merged row group that is rolled back
+onlyif threadid=5
+statement ok
+BEGIN
+
+onlyif threadid=5
+statement ok
+DELETE FROM test WHERE i = 400000
+
+onlyif threadid=5
+statement ok
+ROLLBACK
+
+onlyif threadid=5
+statement ok
+INSERT INTO mem.timing VALUES ('rollback', now())
+
+# a delete in the merged row group: its commit waits until the checkpoint is durable
+onlyif threadid=3
+statement ok
+DELETE FROM test WHERE i = 300000
+
+onlyif threadid=3
+statement ok
+INSERT INTO mem.timing VALUES ('third', now())
+
+endloop
+
+# the first thread and the transaction finished while the checkpoint slept the first time
+query I
+SELECT COUNT(*) FROM mem.timing f, mem.timing s WHERE f.who IN ('first', 'transaction') AND s.who = 'checkpoint start' AND f.t > s.t AND f.t < s.t + INTERVAL 6 SECOND
+----
+2
+
+# these finished while the checkpoint slept the second time
+query I
+SELECT COUNT(*) FROM mem.timing w, mem.timing s, mem.timing e WHERE w.who IN ('second', 'rollback') AND s.who = 'checkpoint start' AND e.who = 'checkpoint end' AND w.t > s.t + INTERVAL 6 SECOND AND w.t < e.t - INTERVAL 2 SECOND
+----
+2
+
+# the delete in the merged row group started during the second sleep and committed when the checkpoint was done
+query I
+SELECT COUNT(*) FROM mem.timing w, mem.timing s WHERE w.who = 'third' AND s.who = 'checkpoint start' AND w.t > s.t + INTERVAL 11 SECOND
+----
+1
+
+statement ok
+SET debug_checkpoint_sleep_ms=0
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) = COUNT(DISTINCT rowid) FROM test
+----
+61437	18873630789	true
+
+# the last three row groups were merged into one that starts where the first of them started
+query III
+SELECT min(rowid), max(rowid), COUNT(*) FROM test WHERE abs(i) >= 245760
+----
+245760	282623	36863
+
+# both indexes agree with the table
+query II
+SELECT COUNT(*), SUM(i) FROM test WHERE j = 0
+----
+612	188375000
+
+query II
+SELECT COUNT(*), SUM(i) FROM test WHERE abs(j) = 0
+----
+612	188375000
+
+query II
+SELECT rowid, i FROM test WHERE i = 400000
+----
+261184	400000
+
+query I
+SELECT COUNT(*) FROM test WHERE i = 0 OR i = 10 OR i = 130000 OR i = 300000
+----
+0
+
+# WAL replay of the deletes and the insert on top of the merged row groups
+restart
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) = COUNT(DISTINCT rowid) FROM test
+----
+61437	18873630789	true
+
+query II
+SELECT COUNT(*), SUM(i) FROM test WHERE j = 0
+----
+612	188375000
+
+query II
+SELECT COUNT(*), SUM(i) FROM test WHERE abs(j) = 0
+----
+612	188375000
+
+query III
+SELECT rowid, i, j FROM test WHERE i = 300010
+----
+251185	300010	10
+
+query I
+SELECT COUNT(*) FROM test WHERE i = 0 OR i = 10 OR i = 130000 OR i = 300000
+----
+0
+
+query III
+SELECT rowid, i, s FROM test WHERE i = -1
+----
+614400	-1	during
+
+# the keys of deleted rows are free again, the others are not
+statement ok
+INSERT INTO test VALUES (0, 0, 'again'), (300000, 0, 'again')
+
+statement error
+INSERT INTO test VALUES (300010, 10, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+statement error
+INSERT INTO test VALUES (-1, 1, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+# a delete that finds moved rows through the index
+statement ok
+DELETE FROM test WHERE j = 990
+
+# this checkpoint merges the row groups the first one kept
+statement ok
+CHECKPOINT
+
+restart
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) = COUNT(DISTINCT rowid) FROM test
+----
+60825	18685131929	true
+
+query II
+SELECT COUNT(*), SUM(i) FROM test WHERE j = 0
+----
+614	188675000
+
+query II
+SELECT COUNT(*), SUM(i) FROM test WHERE abs(j) = 0
+----
+614	188675000
+
+query I
+SELECT COUNT(*) FROM test WHERE j = 990
+----
+0
+
+query II
+SELECT i, s FROM test WHERE i = 300000 OR i = 300010 OR i = 130000 ORDER BY i
+----
+300000	again
+300010	base
+
+statement error
+INSERT INTO test VALUES (300000, 0, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+statement ok
+INSERT INTO test VALUES (130000, 0, 'again'), (990, 990, 'again')

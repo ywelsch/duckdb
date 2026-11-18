@@ -1,0 +1,157 @@
+# name: test/sql/storage/vacuum_checkpoint_transaction_row_groups_versions.test_slow
+# description: A transaction keeps its row ids across a checkpoint that merges row groups, on every storage version
+# group: [storage]
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+foreach version v1.0.0 v2.0.0 v2.1.0
+
+statement ok
+ATTACH '{TEST_DIR}/vacuum_checkpoint_transaction_row_groups_{version}.db' AS db (STORAGE_VERSION '{version}')
+
+# five row groups, of which the last three keep a tenth of their rows
+statement ok
+CREATE TABLE db.test (i BIGINT, s VARCHAR);
+
+statement ok
+INSERT INTO db.test SELECT i, 'base' FROM range(614400) t(i);
+
+# six row groups, of which the second to fourth keep a tenth of their rows: the last two follow the merged ones
+statement ok
+CREATE TABLE db.test2 (i BIGINT, s VARCHAR);
+
+statement ok
+INSERT INTO db.test2 SELECT i, 'base' FROM range(737280) t(i);
+
+statement ok
+CHECKPOINT db
+
+statement ok
+DELETE FROM db.test WHERE i >= 245760 AND i % 10 <> 0
+
+statement ok
+DELETE FROM db.test2 WHERE i >= 122880 AND i < 491520 AND i % 10 <> 0
+
+statement ok con4
+BEGIN
+
+query II con4
+SELECT rowid, i FROM db.test2 WHERE i IN (200000, 500000) ORDER BY i
+----
+200000	200000
+500000	500000
+
+statement ok con1
+BEGIN
+
+query II con1
+SELECT rowid, i FROM db.test WHERE i = 300000
+----
+300000	300000
+
+# a transaction that reads the table without its row ids
+statement ok con3
+BEGIN
+
+query TI con3
+SELECT MIN(s), SUM(i) FROM db.test
+----
+base	46053150720
+
+statement ok con2
+CHECKPOINT db
+
+query III con2
+SELECT rowid, i, (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('db.test')) FROM db.test WHERE i = 300000
+----
+251184	300000	3
+
+# storage that cannot leave gaps between row ids also renumbers the row groups that follow the merged ones
+onlyif version=v1.0.0
+query II con2
+SELECT rowid, i FROM db.test2 WHERE i IN (200000, 500000) ORDER BY i
+----
+130592	200000
+168224	500000
+
+skipif version=v1.0.0
+query II con2
+SELECT rowid, i FROM db.test2 WHERE i IN (200000, 500000) ORDER BY i
+----
+130592	200000
+500000	500000
+
+query II con4
+SELECT rowid, i FROM db.test2 WHERE i IN (200000, 500000) ORDER BY i
+----
+200000	200000
+500000	500000
+
+# a row of a row group that was only renumbered cannot be addressed by its old row id either
+onlyif version=v1.0.0
+statement error con4
+DELETE FROM db.test2 WHERE i = 500000
+----
+<REGEX>:.*Transaction conflict: cannot delete rows of table "test2" that a checkpoint moved.*
+
+skipif version=v1.0.0
+statement ok con4
+DELETE FROM db.test2 WHERE i = 500000
+
+statement ok con4
+ROLLBACK
+
+# it has no row ids from before the checkpoint: it reads and deletes the rows where they are now
+statement ok con3
+DELETE FROM db.test WHERE i = 300020
+
+query II con3
+SELECT rowid, i FROM db.test WHERE i IN (300000, 300020)
+----
+251184	300000
+
+statement ok con3
+ROLLBACK
+
+query II con1
+SELECT rowid, i FROM db.test WHERE i = 300000
+----
+300000	300000
+
+query IIII con1
+SELECT COUNT(*), SUM(i), COUNT(DISTINCT rowid), MAX(rowid) FROM db.test
+----
+282624	46053150720	282624	614390
+
+query III con1
+SELECT rowid, i, s FROM db.test WHERE i % 20 = 0 ORDER BY i DESC LIMIT 3
+----
+614380	614380	base
+614360	614360	base
+614340	614340	base
+
+# a row group that the checkpoint left alone, and one that it merged
+statement ok con1
+DELETE FROM db.test WHERE i = 5
+
+statement error con1
+DELETE FROM db.test WHERE i = 300010
+----
+<REGEX>:.*Transaction conflict: cannot delete rows of table "test" that a checkpoint moved.*
+
+statement ok con1
+ROLLBACK
+
+query IIII con1
+SELECT COUNT(*), SUM(i), COUNT(DISTINCT rowid), MAX(rowid) FROM db.test
+----
+282624	46053150720	282624	282623
+
+statement ok
+DETACH db
+
+endloop

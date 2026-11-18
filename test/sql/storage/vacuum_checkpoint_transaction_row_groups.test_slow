@@ -1,0 +1,387 @@
+# name: test/sql/storage/vacuum_checkpoint_transaction_row_groups.test_slow
+# description: A transaction keeps reading the row groups from before a checkpoint merged them: its row ids stay
+# group: [storage]
+
+load {TEST_DIR}/vacuum_checkpoint_transaction_row_groups.db readwrite v2.1.0
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+CREATE TABLE other (i BIGINT);
+
+# five row groups, of which the last three keep a tenth of their rows
+statement ok
+CREATE TABLE test (i BIGINT, s VARCHAR);
+
+statement ok
+INSERT INTO test SELECT i, 'base' FROM range(614400) t(i);
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM test WHERE i >= 245760 AND i % 10 <> 0
+
+statement ok con1
+BEGIN
+
+query II con1
+SELECT rowid, i FROM test WHERE i = 300000
+----
+300000	300000
+
+# the checkpoint merges the last three row groups while the transaction is open
+statement ok con2
+CHECKPOINT
+
+query III con2
+SELECT rowid, i, (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('test')) FROM test WHERE i = 300000
+----
+251184	300000	3
+
+# the transaction reads the rows where they were
+query II con1
+SELECT rowid, i FROM test WHERE i = 300000
+----
+300000	300000
+
+query IIII con1
+SELECT COUNT(*), SUM(i), COUNT(DISTINCT rowid), MAX(rowid) FROM test
+----
+282624	46053150720	282624	614390
+
+# a query that reads the row ids first and fetches the rows by them afterwards
+query II con1
+EXPLAIN SELECT rowid, i, s FROM test WHERE i % 20 = 0 ORDER BY i DESC LIMIT 3
+----
+physical_plan	<REGEX>:.*SEMI.*rowid.*
+
+query III con1
+SELECT rowid, i, s FROM test WHERE i % 20 = 0 ORDER BY i DESC LIMIT 3
+----
+614380	614380	base
+614360	614360	base
+614340	614340	base
+
+query III con2
+SELECT rowid, i, s FROM test WHERE i % 20 = 0 ORDER BY i DESC LIMIT 3
+----
+282622	614380	base
+282620	614360	base
+282618	614340	base
+
+# it deletes and updates rows of the row groups that the checkpoint left alone
+statement ok con1
+DELETE FROM test WHERE i = 5
+
+statement ok con1
+UPDATE test SET s = 'mine' WHERE i = 122885
+
+query III con1
+SELECT COUNT(*) FILTER (WHERE i = 5), MIN(s) FILTER (WHERE i = 122885), MAX(rowid) FROM test
+----
+0	mine	614390
+
+statement ok con1
+COMMIT
+
+query IIII con2
+SELECT COUNT(*) FILTER (WHERE i = 5), MIN(s) FILTER (WHERE i = 122885), COUNT(*), MAX(rowid) FROM test
+----
+0	mine	282623	282623
+
+# a checkpoint that rewrites a row group without moving rows: the transaction follows it and sees its own update
+statement ok con2
+UPDATE test SET s = 'theirs' WHERE i = 122881
+
+statement ok con1
+BEGIN
+
+query II con1
+SELECT rowid, s FROM test WHERE i = 122890
+----
+122890	base
+
+statement ok con2
+CHECKPOINT
+
+statement ok con1
+UPDATE test SET s = 'mine' WHERE i = 122890
+
+query III con1
+SELECT rowid, i, s FROM test WHERE i IN (122881, 122890) ORDER BY i
+----
+122881	122881	theirs
+122890	122890	mine
+
+statement ok con1
+COMMIT
+
+query III con2
+SELECT rowid, i, s FROM test WHERE i IN (122881, 122885, 122890) ORDER BY i
+----
+122881	122881	theirs
+122885	122885	mine
+122890	122890	mine
+
+# deletes, updates and index lookups of transactions that read the tables before a checkpoint merged row groups
+foreach tbl t_del t_upd t_free
+
+statement ok
+CREATE TABLE {tbl} (i BIGINT, s VARCHAR);
+
+endloop
+
+statement ok
+CREATE TABLE t_pk (i BIGINT PRIMARY KEY, s VARCHAR);
+
+foreach tbl t_del t_upd t_pk t_free
+
+statement ok
+INSERT INTO {tbl} SELECT i, 'base' FROM range(614400) t(i);
+
+endloop
+
+statement ok
+CHECKPOINT
+
+foreach tbl t_del t_upd t_pk t_free
+
+statement ok
+DELETE FROM {tbl} WHERE i >= 245760 AND i % 10 <> 0
+
+endloop
+
+statement ok con1
+BEGIN
+
+query IIII con1
+SELECT (SELECT rowid FROM t_del WHERE i = 300000), (SELECT rowid FROM t_upd WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i + 0 = 300000)
+----
+300000	300000	300000	300000
+
+statement ok con3
+BEGIN
+
+query IIII con3
+SELECT (SELECT rowid FROM t_del WHERE i = 300000), (SELECT rowid FROM t_upd WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i + 0 = 300000)
+----
+300000	300000	300000	300000
+
+statement ok con4
+BEGIN
+
+query IIII con4
+SELECT (SELECT rowid FROM t_del WHERE i = 300000), (SELECT rowid FROM t_upd WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i + 0 = 300000)
+----
+300000	300000	300000	300000
+
+
+# a transaction that reads a table without asking for its row ids: a query that fetches rows by row id on its own
+# account does not tie the transaction to them
+statement ok con5
+BEGIN
+
+query TI con5
+SELECT MIN(s), SUM(i) FROM t_free
+----
+base	46053150720
+
+query II con5
+EXPLAIN SELECT i, s FROM t_free WHERE i % 20 = 0 ORDER BY i DESC LIMIT 3
+----
+physical_plan	<REGEX>:.*SEMI.*rowid.*
+
+query IT con5
+SELECT i, s FROM t_free WHERE i % 20 = 0 ORDER BY i DESC LIMIT 3
+----
+614380	base
+614360	base
+614340	base
+
+statement ok con2
+CHECKPOINT
+
+query IIII con2
+SELECT (SELECT rowid FROM t_del WHERE i = 300000), (SELECT rowid FROM t_upd WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i + 0 = 300000)
+----
+251184	251184	251184	251184
+
+# it has no row ids from before the checkpoint: it reads, deletes and updates the rows where they are now
+statement ok con5
+DELETE FROM t_free WHERE i = 300010
+
+statement ok con5
+UPDATE t_free SET s = 'changed' WHERE i = 300020
+
+query III con5
+SELECT rowid, i, s FROM t_free WHERE i IN (300000, 300010, 300020) ORDER BY i
+----
+251184	300000	base
+251186	300020	changed
+
+statement ok con5
+COMMIT
+
+# the primary key index holds the new row ids: these transactions find the rows without it
+query IIII con1
+SELECT (SELECT rowid FROM t_del WHERE i = 300000), (SELECT rowid FROM t_upd WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i + 0 = 300000)
+----
+300000	300000	300000	300000
+
+query III con1
+SELECT rowid, i, s FROM t_pk WHERE i = 614390
+----
+614390	614390	base
+
+query IIII con3
+SELECT (SELECT rowid FROM t_del WHERE i = 300000), (SELECT rowid FROM t_upd WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i + 0 = 300000)
+----
+300000	300000	300000	300000
+
+query III con3
+SELECT rowid, i, s FROM t_pk WHERE i = 614390
+----
+614390	614390	base
+
+query IIII con4
+SELECT (SELECT rowid FROM t_del WHERE i = 300000), (SELECT rowid FROM t_upd WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT rowid FROM t_pk WHERE i + 0 = 300000)
+----
+300000	300000	300000	300000
+
+query III con4
+SELECT rowid, i, s FROM t_pk WHERE i = 614390
+----
+614390	614390	base
+
+
+# rows that the checkpoint moved cannot be addressed by the row ids from before
+statement error con1
+DELETE FROM t_del WHERE i = 300010
+----
+<REGEX>:.*Transaction conflict: cannot delete rows of table "t_del" that a checkpoint moved.*
+
+statement ok con1
+ROLLBACK
+
+statement error con3
+UPDATE t_upd SET s = 'changed' WHERE i = 300010
+----
+<REGEX>:.*Transaction conflict: cannot update rows of table "t_upd" that a checkpoint moved.*
+
+statement ok con3
+ROLLBACK
+
+# the primary key still rejects a duplicate of a row that moved
+statement ok con4
+INSERT INTO t_pk VALUES (-1, 'new')
+
+statement error con4
+INSERT INTO t_pk VALUES (300000, 'duplicate')
+----
+<REGEX>:.*Constraint Error.*
+
+statement ok con4
+ROLLBACK
+
+# new transactions read the merged row groups
+statement ok con1
+DELETE FROM t_del WHERE i = 300010
+
+statement ok con3
+UPDATE t_upd SET s = 'changed' WHERE i = 300010
+
+query IIII con4
+SELECT (SELECT COUNT(*) FROM t_del WHERE i = 300010), (SELECT rowid FROM t_upd WHERE s = 'changed'), (SELECT rowid FROM t_pk WHERE i = 300000), (SELECT COUNT(*) FROM t_pk WHERE i = -1)
+----
+0	251185	251184	0
+
+# a table whose row groups are not in memory when the transaction starts
+statement ok
+CREATE TABLE t_cold (i BIGINT, s VARCHAR);
+
+# ten row groups: four keep all their rows, four a tenth, two none
+statement ok
+INSERT INTO t_cold SELECT i, 'row_' || i::VARCHAR || '_padding' FROM range(1228800) t(i);
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM t_cold WHERE i >= 491520 AND i < 983040 AND i % 10 <> 0
+
+statement ok
+DELETE FROM t_cold WHERE i >= 983040
+
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok con1
+BEGIN
+
+query II con1
+SELECT rowid, i FROM t_cold WHERE i = 5
+----
+5	5
+
+statement ok con2
+CHECKPOINT
+
+query II con2
+SELECT COUNT(DISTINCT row_group_id), (SELECT MAX(rowid) FROM t_cold) FROM pragma_storage_info('t_cold')
+----
+5	540671
+
+# a second checkpoint writes new data: the blocks of the merged row groups are not handed out while they are read
+statement ok con2
+INSERT INTO t_cold SELECT i, 'new_' || i::VARCHAR || '_padding' FROM range(100000000, 100491520) t(i);
+
+statement ok con2
+CHECKPOINT
+
+query IIIII con1
+SELECT COUNT(*), SUM(i), SUM(length(s)), COUNT(DISTINCT rowid), MAX(rowid) FROM t_cold
+----
+540672	157034250240	9620986	540672	983030
+
+query I con1
+SELECT COUNT(*) FROM t_cold WHERE s <> 'row_' || i::VARCHAR || '_padding'
+----
+0
+
+statement ok con1
+COMMIT
+
+query III con1
+SELECT COUNT(*), MAX(rowid), COUNT(*) FILTER (WHERE s LIKE 'new_%') FROM t_cold
+----
+1032192	1720319	491520
+
+restart
+
+query IIII
+SELECT (SELECT COUNT(*) FROM test), (SELECT COUNT(*) FROM t_del), (SELECT rowid FROM t_upd WHERE s = 'changed'), (SELECT COUNT(*) FROM t_cold)
+----
+282623	282623	251185	1032192
+
+query III
+SELECT rowid, i, s FROM t_free WHERE i IN (300000, 300010, 300020) ORDER BY i
+----
+251184	300000	base
+251186	300020	changed
+
+query III
+SELECT rowid, i, s FROM test WHERE i IN (122881, 122885, 122890) ORDER BY i
+----
+122881	122881	theirs
+122885	122885	mine
+122890	122890	mine
