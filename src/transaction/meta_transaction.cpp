@@ -211,6 +211,7 @@ void MetaTransaction::SetActiveQuery(transaction_t query_number) {
 	active_query = query_number;
 	for (auto &entry : transactions) {
 		entry.second.transaction.active_query = query_number;
+		entry.second.transaction.ReleaseStatementState();
 	}
 }
 

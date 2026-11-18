@@ -44,6 +44,7 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/main/profiler/profiling_node.hpp"
 
 namespace duckdb {
@@ -1033,8 +1034,21 @@ unique_ptr<GlobalTableFunctionState> TableScanInitGlobal(ClientContext &context,
 	auto &attached = storage.GetAttached();
 	const bool indexed_vacuum_may_move_rowids = attached.GetVacuumRebuildIndexThreshold() > 0 ||
 	                                            StorageCompatibility::FromDatabase(attached).CanPersistRowIdGaps();
-	if (indexed_vacuum_may_move_rowids) {
-		vacuum_lock = DuckTransactionManager::Get(attached).SharedVacuumLock();
+	auto &transaction_manager = DuckTransactionManager::Get(attached);
+	auto &transaction = DuckTransaction::Get(context, attached);
+	if (indexed_vacuum_may_move_rowids && !transaction.HoldsVacuumLock()) {
+		vacuum_lock = transaction_manager.SharedVacuumLock();
+	}
+	bool reads_row_ids = false;
+	if (MetaTransaction::Get(context).StatementReadsRowIds()) {
+		for (auto &column_index : input.column_indexes) {
+			reads_row_ids = reads_row_ids || column_index.IsRowIdColumn();
+		}
+	}
+	if (!storage.ReadsLiveRowGroups(transaction, reads_row_ids)) {
+		// the indexes hold the row ids of the live row groups, this transaction reads the ones from before a merge
+		vacuum_lock.reset();
+		return DuckTableScanInitGlobal(context, input, storage, bind_data);
 	}
 
 	for (auto entry : indexes.IndexEntries()) {
@@ -1052,7 +1066,12 @@ unique_ptr<GlobalTableFunctionState> TableScanInitGlobal(ClientContext &context,
 	}
 
 	if (!index_scan) {
+		vacuum_lock.reset();
 		return DuckTableScanInitGlobal(context, input, storage, bind_data);
+	}
+	if (transaction_manager.VacuumSealsMerges()) {
+		// the rows are fetched from the row groups the transaction reads, whatever is merged from here on
+		vacuum_lock.reset();
 	}
 	return DuckIndexScanInitGlobal(context, input, bind_data, row_ids.TakeRows(), std::move(vacuum_lock));
 }

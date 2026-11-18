@@ -24,6 +24,7 @@
 #include "duckdb/storage/table/column_data.hpp"
 #include "duckdb/storage/table/row_version_manager.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
+#include "duckdb/storage/table/vacuum_seal_latch.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/transaction/delete_info.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
@@ -1156,7 +1157,26 @@ void RowGroup::Scan(CollectionScanState &state, DataChunk &result, TableScanType
 // RowGroupVersionInfo
 //===--------------------------------------------------------------------===//
 RowGroupVersionInfo::RowGroupVersionInfo(vector<MetaBlockPointer> deletes_pointers_p)
-    : deletes_pointers(std::move(deletes_pointers_p)), deletes_is_loaded(false), version_info(nullptr) {
+    : deletes_pointers(std::move(deletes_pointers_p)), deletes_is_loaded(false), version_info(nullptr),
+      registered_writers(0), released_writers(0), has_seal_latch(false) {
+}
+
+void RowGroupVersionInfo::SetSealLatch(shared_ptr<VacuumSealLatch> latch) {
+	lock_guard<mutex> guard(lock);
+	seal_latch = std::move(latch);
+	has_seal_latch = seal_latch != nullptr;
+}
+
+shared_ptr<VacuumSealLatch> RowGroupVersionInfo::GetSealLatch() {
+	if (!has_seal_latch) {
+		return nullptr;
+	}
+	lock_guard<mutex> guard(lock);
+	if (seal_latch && seal_latch->IsReleased()) {
+		seal_latch.reset();
+		has_seal_latch = false;
+	}
+	return seal_latch;
 }
 
 bool RowGroupVersionInfo::HasUnloadedDeletes() const {
@@ -1580,6 +1600,15 @@ idx_t RowGroup::GetCommittedRowCount() {
 	options.insert_type = InsertedScanType::ALL_ROWS;
 	options.delete_type = DeletedScanType::OMIT_COMMITTED_DELETES;
 	return vinfo->GetRowCount(options, count);
+}
+
+bool RowGroup::HasVersionsFrom(VisibilityBound bound) {
+	if (HasUnloadedDeletes()) {
+		// deletes that were never loaded were checkpointed before any active transaction started
+		return false;
+	}
+	auto vinfo = GetVersionInfo();
+	return vinfo && vinfo->HasVersionsFrom(bound, count);
 }
 
 idx_t RowGroup::GetVisibleRowCount(TransactionData transaction) {
@@ -2207,6 +2236,10 @@ void RowGroup::Verify() {
 
 void RowGroup::WriteRows(TransactionData transaction, DuckTableEntry &table_entry, idx_t vector_idx, idx_t base_row,
                          const row_t ids[], idx_t count, row_t offset, bool is_update, WrittenRows &written) {
+	if (transaction.transaction) {
+		// keeps this row group out of merges until the transaction is cleaned up
+		transaction.transaction->RegisterRowGroupWrite(this->version_info);
+	}
 	auto &version_info = GetOrCreateVersionInfo();
 	version_info.WriteRows(vector_idx, transaction, ids, count, offset, is_update, written);
 	if (transaction.transaction && written.count > 0) {

@@ -260,6 +260,9 @@ unique_ptr<QueryResult> ClientContext::SubmitPreparedStatementInternal(
     ClientContextLock &lock, shared_ptr<PreparedStatementData> statement_data_p, const QueryParameters &parameters) {
 	D_ASSERT(active_query);
 	auto &statement_data = *statement_data_p;
+	if (transaction.HasActiveTransaction()) {
+		MetaTransaction::Get(*this).SetStatementReadsRowIds(statement_data.properties.reads_row_ids);
+	}
 	BindPreparedStatementParameters(*this, statement_data, parameters);
 	// The plan must outlive the executor, also when Initialize throws
 	active_query->prepared = std::move(statement_data_p);

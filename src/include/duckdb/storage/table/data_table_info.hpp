@@ -47,6 +47,8 @@ public:
 	IndexStorageInfo ExtractIndexStorageInfo(const Identifier &name);
 	bool AppendRequiresNewRowGroup(RowGroupCollection &collection, optional_idx checkpoint_id);
 	optional_idx CheckpointRowGroupCount(const CheckpointOptions &options) const;
+	//! Accounts for row groups that a merge of the checkpoint took out. Runs under the table's append lock
+	void ReduceCheckpointRowGroupCount(const CheckpointOptions &options, idx_t count);
 	void VerifyIndexBuffers() const;
 
 	Identifier GetSchemaName();

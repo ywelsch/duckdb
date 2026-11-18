@@ -471,7 +471,8 @@ static idx_t HandleInsertConflicts(DuckTableEntry &table, ExecutionContext &cont
 
 		if (GLOBAL) {
 			auto &transaction = DuckTransaction::Get(context.client, table.catalog);
-			data_table.Fetch(transaction, scan_chunk, columns_to_fetch, row_ids, conflict_count, *fetch_state);
+			// the row ids of the conflicts were just read from the indexes
+			data_table.Fetch(transaction, scan_chunk, columns_to_fetch, row_ids, conflict_count, *fetch_state, true);
 		} else {
 			local_storage.FetchChunk(data_table, row_ids, conflict_count, columns_to_fetch, scan_chunk, *fetch_state);
 		}

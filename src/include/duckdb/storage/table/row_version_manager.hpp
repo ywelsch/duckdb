@@ -60,6 +60,8 @@ public:
 	bool HasUnserializedChanges(VisibilityBound bound);
 	bool HasDeletes();
 	bool HasUncommittedChanges();
+	//! Whether a writer at or past the bound inserted, deleted or updated any of the first row_count rows
+	bool HasVersionsFrom(VisibilityBound bound, idx_t row_count);
 	vector<MetaBlockPointer> GetStoragePointers();
 
 private:

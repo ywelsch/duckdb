@@ -41,6 +41,8 @@ public:
 	unique_ptr<StorageLockKey> GetSharedLock();
 	//! Try to get an exclusive lock - if we cannot get it immediately we return `nullptr`
 	unique_ptr<StorageLockKey> TryGetExclusiveLock();
+	//! Try to get an exclusive lock, waiting at most `timeout_ms` - returns `nullptr` if the wait times out
+	unique_ptr<StorageLockKey> TryGetExclusiveLock(idx_t timeout_ms);
 	//! This is a special method that only exists for checkpointing
 	//! This method takes a shared lock, and returns an exclusive lock if the parameter is the only active shared lock
 	//! If this method succeeds, we have **both** a shared and exclusive lock active (which normally is not allowed)

@@ -112,8 +112,11 @@ public:
 	void Scan(DuckTransaction &transaction, DataChunk &result, TableScanState &state);
 
 	//! Fetch data from the specific row identifiers from the base table
+	//! Row ids taken from an index just now address the live row groups, others the ones the transaction reads
 	void Fetch(DuckTransaction &transaction, DataChunk &result, const vector<StorageIndex> &column_ids,
-	           const Vector &row_ids, idx_t fetch_count, ColumnFetchState &state);
+	           const Vector &row_ids, idx_t fetch_count, ColumnFetchState &state, bool live_row_ids = false);
+	//! Whether the transaction reads the live row groups of the table: their row ids are those in the indexes
+	bool ReadsLiveRowGroups(DuckTransaction &transaction, bool reads_row_ids);
 	void FetchCommitted(DataChunk &result, const vector<StorageIndex> &column_ids, const Vector &row_identifiers,
 	                    idx_t fetch_count, ColumnFetchState &state);
 	//! Returns true, if the transaction can fetch the row ID.
@@ -325,6 +328,8 @@ private:
 	void VerifyDeleteForeignKeyConstraint(optional_ptr<LocalTableStorage> storage,
 	                                      const BoundForeignKeyConstraint &bound_foreign_key, ClientContext &context,
 	                                      DataChunk &chunk);
+	//! Fails if a checkpoint moved the rows that the transaction is about to delete or update
+	void VerifyRowIds(DuckTransaction &transaction, const Vector &row_ids, idx_t count, bool is_update);
 
 private:
 	//! The table info

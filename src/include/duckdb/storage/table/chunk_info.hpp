@@ -96,6 +96,8 @@ public:
 	//! Whether any of the first row_count rows are deleted (or not yet committed) as of visibility_bound
 	bool HasDeletes(VisibilityBound visibility_bound, idx_t row_count) const;
 	bool HasUncommittedChanges() const;
+	//! Whether a writer at or past the bound inserted, deleted or updated any of the first row_count rows
+	bool HasVersionsFrom(VisibilityBound bound, idx_t row_count) const;
 	bool AnyDeleted() const;
 	bool HasConstantInsertionId() const;
 	transaction_t ConstantInsertId() const;

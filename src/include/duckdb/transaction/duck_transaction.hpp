@@ -13,13 +13,16 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/transaction/undo_buffer.hpp"
+#include "duckdb/storage/table/transaction_row_groups.hpp"
 #include "duckdb/common/enums/active_transaction_state.hpp"
 
 namespace duckdb {
 class CommitDropState;
 class DuckTableEntry;
 class RowGroupCollection;
+class RowGroupVersionInfo;
 class RowVersionManager;
+class VacuumSealLatch;
 class DuckTransactionManager;
 class StorageLockKey;
 class StorageCommitState;
@@ -70,6 +73,18 @@ public:
 	//! Acquire a shared checkpoint lock for a statement, or return null if this transaction already holds one.
 	unique_ptr<StorageLockKey> GetCheckpointLockForStatement();
 	void SetModifications(DatabaseModificationType type) override;
+	void ReleaseStatementState() override;
+	//! Whether the transaction holds the shared vacuum lock
+	bool HoldsVacuumLock();
+	//! The row groups to read a table from: the live ones, or the ones from before a checkpoint moved rows
+	//! A statement reads one version of them; once it has read row ids, so does the rest of the transaction
+	TransactionRowGroups GetRowGroups(const shared_ptr<RowGroupCollection> &collection, bool reads_row_ids);
+	//! The same, without making the statement a reader of the table (for use before it holds its locks)
+	TransactionRowGroups PeekRowGroups(const shared_ptr<RowGroupCollection> &collection);
+	//! Keeps a row group this transaction writes deletes or update markers to out of merges
+	void RegisterRowGroupWrite(const shared_ptr<RowGroupVersionInfo> &version_info);
+	//! Waits until the checkpoints that merged row groups this transaction wrote to are durable
+	ErrorData WaitForVacuumSeals();
 
 	bool ShouldWriteToWAL(AttachedDatabase &db);
 	ErrorData PreFlushOptimisticBlocks(AttachedDatabase &db) noexcept;
@@ -118,6 +133,10 @@ public:
 	}
 
 private:
+	void ReleaseVacuumLock();
+	//! Stops reading tables at the row ids first seen: the transaction runs no further statement
+	void ReleaseRowGroups();
+
 	//! The undo buffer is used to store old versions of rows that are updated
 	//! or deleted
 	UndoBuffer undo_buffer;
@@ -125,8 +144,31 @@ private:
 	unique_ptr<LocalStorage> storage;
 	//! Lock that prevents checkpoints from starting
 	unique_ptr<StorageLockKey> checkpoint_lock;
+	//! Lock for taking and releasing the vacuum lock
+	mutex vacuum_lock_mutex;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
+	//! Whether the vacuum lock is released when the transaction commits or rolls back, not when it is destroyed
+	atomic<bool> transaction_holds_vacuum_lock;
+	//! A table this transaction reads, with the row id version it reads it at
+	struct ReadTable {
+		shared_ptr<RowGroupCollection> collection;
+		idx_t row_id_version;
+		//! Whether row ids of this version were read: the version is then kept until the transaction ends
+		bool row_ids_read;
+	};
+	//! Lock for the tables read
+	mutex read_tables_lock;
+	//! The tables read by the running statement, and those this transaction has read row ids of
+	reference_map_t<RowGroupCollection, ReadTable> read_tables;
+	//! Whether tables are read from the live row groups only: the transaction is ending
+	bool reads_live_row_groups = false;
+	//! Lock for the row groups and latches below
+	mutex row_group_write_lock;
+	//! The row groups this transaction wrote deletes or update markers to
+	reference_map_t<RowGroupVersionInfo, shared_ptr<RowGroupVersionInfo>> written_row_groups;
+	//! The checkpoints that have to be durable before this transaction commits
+	vector<shared_ptr<VacuumSealLatch>> seal_latches;
 	//! Lock for accessing sequence_usage
 	mutex sequence_lock;
 	//! Map of all sequences that were used during the transaction and the value they had in this transaction

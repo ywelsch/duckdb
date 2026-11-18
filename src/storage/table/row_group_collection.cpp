@@ -192,9 +192,77 @@ shared_ptr<RowGroupSegmentTree> RowGroupCollection::GetRowGroups() const {
 	return owned_row_groups;
 }
 
-void RowGroupCollection::SetRowGroups(shared_ptr<RowGroupSegmentTree> new_row_groups) {
+TransactionRowGroups RowGroupCollection::GetLiveRowGroups() const {
 	lock_guard<mutex> guard(row_group_pointer_lock);
+	TransactionRowGroups result;
+	result.row_groups = owned_row_groups;
+	result.row_id_version = row_id_version;
+	return result;
+}
+
+idx_t RowGroupCollection::RegisterReader() {
+	lock_guard<mutex> guard(row_group_pointer_lock);
+	readers[row_id_version]++;
+	return row_id_version;
+}
+
+void RowGroupCollection::UnregisterReader(idx_t version) {
+	// destroyed after the lock is released
+	shared_ptr<RowGroupSegmentTree> released_row_groups;
+	lock_guard<mutex> guard(row_group_pointer_lock);
+	auto entry = readers.find(version);
+	D_ASSERT(entry != readers.end());
+	if (entry == readers.end() || --entry->second > 0) {
+		return;
+	}
+	readers.erase(entry);
+	auto replaced = replaced_row_groups.find(version);
+	if (replaced != replaced_row_groups.end()) {
+		released_row_groups = std::move(replaced->second);
+		replaced_row_groups.erase(replaced);
+	}
+}
+
+TransactionRowGroups RowGroupCollection::GetReaderRowGroups(idx_t version) const {
+	lock_guard<mutex> guard(row_group_pointer_lock);
+	TransactionRowGroups result;
+	result.row_id_version = version;
+	if (version == row_id_version) {
+		result.row_groups = owned_row_groups;
+		return result;
+	}
+	auto replaced = replaced_row_groups.find(version);
+	if (replaced == replaced_row_groups.end()) {
+		throw InternalException("The row groups of row id version %d were not kept for their reader", version);
+	}
+	result.row_groups = replaced->second;
+	result.stale = true;
+	return result;
+}
+
+void RowGroupCollection::SetRowGroups(shared_ptr<RowGroupSegmentTree> new_row_groups, bool row_ids_changed) {
+	lock_guard<mutex> guard(row_group_pointer_lock);
+	if (row_ids_changed) {
+		if (readers.find(row_id_version) != readers.end()) {
+			// the open transactions that read the table keep reading the rows where they were
+			replaced_row_groups[row_id_version] = owned_row_groups;
+		}
+		row_id_version++;
+	}
 	owned_row_groups = std::move(new_row_groups);
+}
+
+idx_t RowGroupCollection::GetScanEnd(RowGroupSegmentTree &row_groups, bool stale) const {
+	if (!stale) {
+		return row_groups.GetBaseRowId() + next_row_id.load();
+	}
+	// row groups that were replaced no longer grow
+	auto l = row_groups.Lock();
+	auto last_row_group = row_groups.GetLastSegment(l);
+	if (!last_row_group) {
+		return row_groups.GetBaseRowId();
+	}
+	return last_row_group->GetRowStart() + last_row_group->GetNode().count;
 }
 
 //===--------------------------------------------------------------------===//
@@ -309,10 +377,11 @@ void RowGroupCollection::Verify() {
 //===--------------------------------------------------------------------===//
 void RowGroupCollection::InitializeScan(const QueryContext &context, CollectionScanState &state,
                                         const vector<StorageIndex> &column_ids,
-                                        optional_ptr<TableFilterSet> table_filters) {
-	state.row_groups = GetRowGroups();
+                                        optional_ptr<TableFilterSet> table_filters,
+                                        optional_ptr<const TransactionRowGroups> transaction_row_groups) {
+	state.row_groups = transaction_row_groups ? transaction_row_groups->row_groups : GetRowGroups();
 	auto row_group = state.GetRootSegment();
-	state.max_row = state.row_groups->GetBaseRowId() + next_row_id.load();
+	state.max_row = GetScanEnd(*state.row_groups, transaction_row_groups && transaction_row_groups->stale);
 	state.Initialize(context, GetTypes());
 	while (row_group && !row_group->GetNode().InitializeScan(state, *row_group)) {
 		row_group = state.GetNextRowGroup(*row_group);
@@ -349,12 +418,13 @@ bool RowGroupCollection::InitializeScanInRowGroup(ClientContext &context, Collec
 	return row_group.GetNode().InitializeScanWithOffset(state, row_group, vector_index, initialize_columns);
 }
 
-void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state) {
+void RowGroupCollection::InitializeParallelScan(ParallelCollectionScanState &state,
+                                                optional_ptr<const TransactionRowGroups> transaction_row_groups) {
 	state.collection = this;
-	state.row_groups = GetRowGroups();
+	state.row_groups = transaction_row_groups ? transaction_row_groups->row_groups : GetRowGroups();
 	state.AssignRowGroup(state.GetRootSegment(*state.row_groups));
 	state.vector_index = 0;
-	state.max_row = state.row_groups->GetBaseRowId() + next_row_id.load();
+	state.max_row = GetScanEnd(*state.row_groups, transaction_row_groups && transaction_row_groups->stale);
 	state.batch_index = 0;
 	state.skipped_rows = 0;
 	if (state.reorderer) {
@@ -528,7 +598,8 @@ RowGroupIterationHelper RowGroupCollection::Chunks(DuckTransaction &transaction,
 // Fetch
 //===--------------------------------------------------------------------===//
 void RowGroupCollection::Fetch(TransactionData transaction, DataChunk &result, const vector<StorageIndex> &column_ids,
-                               const Vector &row_identifiers, idx_t fetch_count, ColumnFetchState &state) {
+                               const Vector &row_identifiers, idx_t fetch_count, ColumnFetchState &state,
+                               optional_ptr<const TransactionRowGroups> transaction_row_groups) {
 	if (fetch_count == 0) {
 		result.SetChildCardinality(0);
 		return;
@@ -536,7 +607,7 @@ void RowGroupCollection::Fetch(TransactionData transaction, DataChunk &result, c
 	ALWAYS_ASSERT(fetch_count <= STANDARD_VECTOR_SIZE);
 
 	auto row_ids = FlatVector::GetData<row_t>(row_identifiers);
-	auto row_groups = GetRowGroups();
+	auto row_groups = transaction_row_groups ? transaction_row_groups->row_groups : GetRowGroups();
 	idx_t count = 0;
 
 	// Stack-allocated scratch buffers reused across runs/iterations within this call.
@@ -936,6 +1007,61 @@ void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<Dat
 //===--------------------------------------------------------------------===//
 // Delete
 //===--------------------------------------------------------------------===//
+void RowGroupCollection::VerifyRowIds(const TransactionRowGroups &transaction_row_groups, const Vector &row_ids,
+                                      idx_t count, bool is_update, const Identifier &table_name) const {
+	auto live_row_groups = GetRowGroups();
+	auto &read_row_groups = *transaction_row_groups.row_groups;
+	UnifiedVectorFormat format;
+	row_ids.ToUnifiedFormat(format);
+	auto ids = UnifiedVectorFormat::GetData<row_t>(format);
+	// the rows of the row group that was verified last
+	idx_t verified_start = 0;
+	idx_t verified_end = 0;
+	for (idx_t i = 0; i < count; i++) {
+		auto row_id = ids[format.sel->get_index(i)];
+		if (row_id >= MAX_ROW_ID) {
+			// transaction-local row
+			continue;
+		}
+		auto row_number = UnsafeNumericCast<idx_t>(row_id);
+		if (row_number >= verified_start && row_number < verified_end) {
+			continue;
+		}
+		optional_ptr<SegmentNode<RowGroup>> read_row_group;
+		optional_ptr<SegmentNode<RowGroup>> live_row_group;
+		idx_t segment_index;
+		{
+			auto l = read_row_groups.Lock();
+			if (read_row_groups.TryGetSegmentIndex(l, row_number, segment_index)) {
+				read_row_group = read_row_groups.GetSegmentByIndex(l, UnsafeNumericCast<int64_t>(segment_index));
+			}
+		}
+		{
+			auto l = live_row_groups->Lock();
+			if (live_row_groups->TryGetSegmentIndex(l, row_number, segment_index)) {
+				live_row_group = live_row_groups->GetSegmentByIndex(l, UnsafeNumericCast<int64_t>(segment_index));
+			}
+		}
+		bool same_rows =
+		    read_row_group && live_row_group && read_row_group->GetRowStart() == live_row_group->GetRowStart();
+		if (same_rows && is_update) {
+			// an update is only read back from the row group it was written to
+			same_rows = RefersToSameObject(read_row_group->GetNode(), live_row_group->GetNode());
+		} else if (same_rows) {
+			// a row group rewritten by a checkpoint shares its deletes with the one it was written from
+			same_rows = RefersToSameObject(read_row_group->GetNode().GetVersionInfoHolder(),
+			                               live_row_group->GetNode().GetVersionInfoHolder());
+		}
+		if (!same_rows) {
+			throw TransactionException("Transaction conflict: cannot %s rows of table %s that a checkpoint moved "
+			                           "after this transaction read them",
+			                           is_update ? "update" : "delete", table_name);
+		}
+		verified_start = read_row_group->GetRowStart();
+		verified_end = verified_start + read_row_group->GetNode().count;
+	}
+}
+
 idx_t RowGroupCollection::Delete(TransactionData transaction, DuckTableEntry &table_entry, row_t *ids, idx_t count,
                                  optional_ptr<DeletedRowIds> deleted_ids) {
 	idx_t delete_count = 0;
@@ -1105,6 +1231,11 @@ struct VacuumState {
 	idx_t row_start = 0;
 	idx_t next_vacuum_idx = 0;
 	vector<optional_idx> row_group_counts;
+	//! Whether merges take the vacuum lock one at a time instead of the checkpoint holding it throughout
+	bool seal_merges = false;
+	//! The writers registered on each row group when its merge was planned
+	vector<idx_t> registered_writers;
+	VisibilityBound lowest_visibility_bound;
 };
 
 struct CollectionCheckpointState {
@@ -1133,6 +1264,10 @@ struct CollectionCheckpointState {
 	VacuumState vacuum_state;
 	TableStatistics &global_stats;
 	RowGroupSegmentTree &row_groups;
+	//! The append lock of the table, taken while a merge replaces live row groups
+	optional_ptr<mutex> append_lock;
+	//! How many row groups the merges took out of the live row groups so far
+	atomic<idx_t> removed_row_groups = {0};
 
 	idx_t SegmentCount() const {
 		return writers.size();
@@ -1332,6 +1467,22 @@ public:
 		}
 
 		auto &collection = checkpoint_state.collection;
+		auto &transaction_manager = DuckTransactionManager::Get(collection.GetAttached());
+		// the row groups to merge: the ones in between were dropped when the merge was planned
+		vector<idx_t> source_indexes;
+		idx_t total_row_groups = vacuum_state.row_group_counts.size();
+		for (idx_t c_idx = segment_idx; source_indexes.size() < merge_count && c_idx < total_row_groups; c_idx++) {
+			if (vacuum_state.row_group_counts[c_idx] == 0) {
+				continue;
+			}
+			source_indexes.push_back(c_idx);
+		}
+		if (vacuum_state.seal_merges && transaction_manager.VacuumSealsAbandoned()) {
+			// an earlier merge of this checkpoint did not get the vacuum lock in time
+			timer.EndTimer();
+			KeepRowGroups(source_indexes);
+			return;
+		}
 		const idx_t row_group_size = collection.GetRowGroupSize();
 		auto &types = collection.GetTypes();
 		unique_ptr<VacuumIndexRemapper> remapper;
@@ -1374,16 +1525,9 @@ public:
 		scan_state.Initialize(column_ids);
 		scan_state.table_state.Initialize(QueryContext(), types);
 		scan_state.table_state.max_row = idx_t(-1);
-		idx_t merged_groups = 0;
-		idx_t total_row_groups = vacuum_state.row_group_counts.size();
 		optional_idx row_start;
 		idx_t live_row_offset = 0;
-		for (idx_t c_idx = segment_idx; merged_groups < merge_count && c_idx < total_row_groups; c_idx++) {
-			if (vacuum_state.row_group_counts[c_idx] == 0) {
-				continue;
-			}
-			merged_groups++;
-
+		for (auto c_idx : source_indexes) {
 			auto current_segment = checkpoint_state.GetSegment(c_idx);
 			if (!row_start.IsValid()) {
 				row_start = current_segment->GetRowStart();
@@ -1400,6 +1544,9 @@ public:
 				}
 				scan_chunk.Flatten();
 				const auto chunk_count = scan_chunk.size();
+				if (live_row_offset + chunk_count > merge_rows) {
+					throw InternalException("Vacuum found more than the %d rows planned for the merge", merge_rows);
+				}
 				// Buffer shifted rows and strip the scanned rowid column before appending to the new row groups.
 				auto &append_chunk =
 				    remapper ? remapper->ProcessScanChunk(scan_chunk, row_start.GetIndex() + live_row_offset)
@@ -1428,34 +1575,19 @@ public:
 				}
 				live_row_offset += chunk_count;
 			}
-			// drop the row group after merging
-			current_row_group.CommitDrop();
-			checkpoint_state.DropSegment(c_idx);
 		}
 		// finalize the final append
 		new_row_groups[current_append_idx]->GetNode().FinalizeAppend(append_state.row_group_append_state);
 
-		idx_t total_append_count = 0;
-		for (idx_t target_idx = 0; target_idx < target_count; target_idx++) {
-			auto row_group = new_row_groups[target_idx]->MoveNode();
-			row_group->Verify();
-
-			// assign the new row group to the current segment
-			checkpoint_state.SetSegment(row_start.GetIndex() + total_append_count, segment_idx + target_idx,
-			                            std::move(row_group));
-			total_append_count += append_counts[target_idx];
-		}
-		if (total_append_count != merge_rows) {
-			throw InternalException(
-			    "Mismatch in row group count %d vs verify count %d in RowGroupCollection::Checkpoint", merge_rows,
-			    total_append_count);
-		}
-		if (remapper) {
-			remapper->Apply();
-		}
+		bool merged = FinishMerge(transaction_manager, source_indexes, new_row_groups, append_counts,
+		                          row_start.GetIndex(), live_row_offset, remapper.get());
 
 		// Explicitly end the timer for the vacuum tasks here.
 		timer.EndTimer();
+		if (!merged) {
+			KeepRowGroups(source_indexes);
+			return;
+		}
 
 		// merging is complete - execute checkpoint tasks of the target row groups
 		for (idx_t i = 0; i < target_count; i++) {
@@ -1472,6 +1604,95 @@ public:
 	}
 
 private:
+	//! How long a merge waits for running statements that delete or scan an index
+	static constexpr idx_t SEAL_LOCK_TIMEOUT_MS = 500;
+
+	//! Replaces the merged row groups by the new ones - false if rows changed since the merge was planned
+	bool FinishMerge(DuckTransactionManager &transaction_manager, const vector<idx_t> &source_indexes,
+	                 vector<unique_ptr<SegmentNode<RowGroup>>> &new_row_groups, const vector<idx_t> &append_counts,
+	                 idx_t row_start, idx_t merged_rows, optional_ptr<VacuumIndexRemapper> remapper) {
+		unique_lock<mutex> append_guard;
+		unique_ptr<StorageLockKey> vacuum_lock;
+		shared_ptr<VacuumSealLatch> latch;
+		if (!vacuum_state.seal_merges) {
+			if (merged_rows != merge_rows) {
+				throw InternalException(
+				    "Mismatch in row group count %d vs verify count %d in RowGroupCollection::Checkpoint", merge_rows,
+				    merged_rows);
+			}
+		} else {
+			if (merged_rows != merge_rows) {
+				return false;
+			}
+			// appends, deletes and index scans stay out while the live row groups are replaced
+			append_guard = unique_lock<mutex>(*checkpoint_state.append_lock);
+			vacuum_lock = transaction_manager.TryGetVacuumLock(SEAL_LOCK_TIMEOUT_MS);
+			if (!vacuum_lock) {
+				transaction_manager.AbandonVacuumSeals();
+				return false;
+			}
+			for (auto c_idx : source_indexes) {
+				auto &version_info_holder = checkpoint_state.GetSegment(c_idx)->GetNode().GetVersionInfoHolder();
+				if (version_info_holder.RegisteredWriters() != vacuum_state.registered_writers[c_idx]) {
+					// a transaction wrote to the row group after the merge was planned
+					return false;
+				}
+			}
+			// commits that delete merged rows are logged with the new row ids: they wait for this checkpoint
+			latch = transaction_manager.GetVacuumSealLatch();
+		}
+		// the row groups to take out of the live row groups, including the dropped ones in between
+		reference_set_t<RowGroup> removed;
+		for (idx_t c_idx = segment_idx; c_idx <= source_indexes.back(); c_idx++) {
+			removed.insert(checkpoint_state.row_groups.GetSegmentByIndex(NumericCast<int64_t>(c_idx))->GetNode());
+		}
+		for (auto c_idx : source_indexes) {
+			// drop the row group after merging
+			checkpoint_state.GetSegment(c_idx)->GetNode().CommitDrop();
+			checkpoint_state.DropSegment(c_idx);
+		}
+		vector<pair<idx_t, shared_ptr<RowGroup>>> replacements;
+		idx_t total_append_count = 0;
+		for (idx_t target_idx = 0; target_idx < target_count; target_idx++) {
+			auto row_group = new_row_groups[target_idx]->MoveNode();
+			row_group->Verify();
+			if (latch) {
+				row_group->GetVersionInfoHolder().SetSealLatch(latch);
+			}
+			replacements.emplace_back(row_start + total_append_count, row_group);
+
+			// assign the new row group to the current segment
+			checkpoint_state.SetSegment(row_start + total_append_count, segment_idx + target_idx, std::move(row_group));
+			total_append_count += append_counts[target_idx];
+		}
+		if (remapper) {
+			remapper->Apply();
+		}
+		if (vacuum_state.seal_merges) {
+			auto &collection = checkpoint_state.collection;
+			idx_t removed_count = collection.ReplaceRowGroups(removed, replacements) - target_count;
+			checkpoint_state.removed_row_groups += removed_count;
+			auto options = checkpoint_state.writer.GetCheckpointOptions();
+			collection.GetTableInfo().ReduceCheckpointRowGroupCount(options, removed_count);
+		}
+		return true;
+	}
+
+	//! Checkpoints the row groups as they are, as is done for row groups that no merge was planned for
+	void KeepRowGroups(const vector<idx_t> &source_indexes) {
+		auto &collection = checkpoint_state.collection;
+		for (auto c_idx : source_indexes) {
+			checkpoint_state.GetSegment(c_idx)->GetNode().CompressVersionInfo(vacuum_state.lowest_visibility_bound);
+			if (checkpoint_state.writer.GetCheckpointOptions().type == CheckpointType::VACUUM_ONLY) {
+				continue;
+			}
+			auto checkpoint_task = collection.GetCheckpointTask(checkpoint_state, c_idx);
+			if (checkpoint_task) {
+				checkpoint_task->ExecuteTask();
+			}
+		}
+	}
+
 	VacuumState &vacuum_state;
 	idx_t segment_idx;
 	idx_t merge_count;
@@ -1498,6 +1719,18 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	auto num_row_groups = checkpoint_state.SegmentCount();
 	state.row_group_counts.reserve(num_row_groups);
 
+	// row groups that an active snapshot sees differently from the checkpoint keep their version info
+	auto &transaction_manager = DuckTransactionManager::Get(attached);
+	auto lowest_visibility_bound =
+	    VisibilityBound::Min(transaction_manager.LowestVisibilityBound(), options.visibility_bound);
+	lowest_visibility_bound = VisibilityBound::Min(lowest_visibility_bound, VisibilityBound::AllCommitted());
+	if (transaction_manager.VacuumSealsMerges()) {
+		if (!checkpoint_state.append_lock) {
+			throw InternalException("Vacuuming without the vacuum lock requires the append lock of the table");
+		}
+		state.seal_merges = true;
+	}
+
 	bool legacy_vacuum_with_stable_row_ids =
 	    !checkpoint_state.writer.CanPersistRowIdGaps() && !state.can_change_row_ids;
 	// RowIdsChanged condition: legacy storage cannot persist rowid gaps. If we are allowed to change rowids,
@@ -1511,14 +1744,23 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 			break;
 		}
 		auto &row_group = entry.GetNode();
+		// read the released writers first: a writer that registers later is noticed when the merge is sealed
+		auto &version_info_holder = row_group.GetVersionInfoHolder();
+		auto released_writers = version_info_holder.ReleasedWriters();
+		auto registered_writers = version_info_holder.RegisteredWriters();
+		state.registered_writers.push_back(registered_writers);
 		auto row_group_num_rows = row_group.GetCommittedRowCount();
+		// vacuuming drops the version info: only possible if every active snapshot sees the committed state
+		// and no transaction that wrote to the row group still refers to its rows
+		bool keep_versions =
+		    registered_writers != released_writers || row_group.HasVersionsFrom(lowest_visibility_bound);
 		if (legacy_vacuum_with_stable_row_ids) {
 			// In this legacy path, empty row groups in the middle must be kept because they would create a rowid gap
 			// that cannot be persisted or densely rewritten. Keep the committed counts so the pass below can
 			// still remove trailing deleted row groups.
-			committed_counts.emplace_back(row_group_num_rows);
+			committed_counts.emplace_back(keep_versions ? row_group.count.load() : row_group_num_rows);
 		}
-		if (row_group_num_rows == 0) {
+		if (row_group_num_rows == 0 && !keep_versions) {
 			if (!checkpoint_state.writer.CanPersistRowIdGaps()) {
 				// Older storage versions cannot represent rowid gaps. Dropping a row group in the middle of the
 				// table therefore requires dense rowid rewriting.
@@ -1551,6 +1793,10 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 		if (rowid_gap_seen) {
 			// checkpointing will later re-number rowids densely.
 			checkpoint_state.writer.SetRowIdsChanged();
+		}
+		if (keep_versions) {
+			state.row_group_counts.emplace_back();
+			continue;
 		}
 		state.row_group_counts.push_back(row_group_num_rows);
 	}
@@ -1754,12 +2000,14 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 		    MinValue<idx_t>(checkpointed_row_group_count, snapshot.row_group_count.GetIndex());
 	}
 	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups, checkpointed_row_group_count);
+	checkpoint_state.append_lock = snapshot.append_lock;
 
 	auto &vacuum_state = checkpoint_state.vacuum_state;
 	InitializeVacuumState(checkpoint_state, vacuum_state);
 
 	auto &transaction_manager = DuckTransactionManager::Get(GetAttached());
 	auto lowest_visibility_bound = transaction_manager.LowestVisibilityBound();
+	vacuum_state.lowest_visibility_bound = lowest_visibility_bound;
 	{
 		// schedule tasks
 		idx_t total_vacuum_tasks = 0;
@@ -2121,8 +2369,42 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	result.row_groups = std::move(new_row_groups);
 	result.total_rows = new_total_rows;
 	result.next_row_id = MaxValue<idx_t>(new_next_row_id, snapshot.next_row_id);
-	result.checkpointed_row_group_count = checkpointed_row_group_count;
+	// merges already replaced their row groups in the live row groups
+	result.checkpointed_row_group_count = checkpointed_row_group_count - checkpoint_state.removed_row_groups;
+	result.row_ids_changed = writer.RowIdsChanged() && !vacuum_state.seal_merges;
 	return result;
+}
+
+idx_t RowGroupCollection::ReplaceRowGroups(const reference_set_t<RowGroup> &removed,
+                                           const vector<pair<idx_t, shared_ptr<RowGroup>>> &replacements) {
+	auto row_groups = GetRowGroups();
+	auto l = row_groups->Lock();
+	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, row_groups->GetBaseRowId());
+	auto new_lock = new_row_groups->Lock();
+	idx_t removed_count = 0;
+	idx_t new_total_rows = 0;
+	for (auto &entry : row_groups->SegmentNodes(l)) {
+		if (removed.find(entry.GetNode()) == removed.end()) {
+			new_total_rows += entry.GetNode().count;
+			new_row_groups->AppendSegment(new_lock, entry.ReferenceNode(), entry.GetRowStart());
+			continue;
+		}
+		if (removed_count++ > 0) {
+			continue;
+		}
+		// the replacements take the place of the first removed row group
+		for (auto &replacement : replacements) {
+			new_total_rows += replacement.second->count;
+			new_row_groups->AppendSegment(new_lock, replacement.second, replacement.first);
+		}
+	}
+	if (removed_count != removed.size()) {
+		throw InternalException("Vacuum found %d of the %d row groups it merged in the table", removed_count,
+		                        removed.size());
+	}
+	total_rows = new_total_rows;
+	SetRowGroups(std::move(new_row_groups), true);
+	return removed_count;
 }
 
 void RowGroupCollection::InstallCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats) {
@@ -2176,7 +2458,7 @@ void RowGroupCollection::InstallCheckpoint(CollectionCheckpointResult result, Ta
 	total_rows = result.total_rows;
 	next_row_id = result.next_row_id;
 	D_ASSERT(next_row_id.load() >= total_rows.load());
-	SetRowGroups(std::move(new_row_groups));
+	SetRowGroups(std::move(new_row_groups), result.row_ids_changed);
 	Verify();
 }
 
@@ -2242,9 +2524,11 @@ void RowGroupCollection::CommitDropTable() {
 //===--------------------------------------------------------------------===//
 // GetPartitionStats
 //===--------------------------------------------------------------------===//
-vector<PartitionStatistics> RowGroupCollection::GetPartitionStats(TransactionData transaction) const {
+vector<PartitionStatistics>
+RowGroupCollection::GetPartitionStats(TransactionData transaction,
+                                      optional_ptr<const TransactionRowGroups> transaction_row_groups) const {
 	vector<PartitionStatistics> result;
-	auto row_groups = GetRowGroups();
+	auto row_groups = transaction_row_groups ? transaction_row_groups->row_groups : GetRowGroups();
 	for (auto &entry : row_groups->SegmentNodes()) {
 		result.push_back(RowGroup::GetPartitionStats(entry, transaction));
 	}

@@ -329,6 +329,8 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	header.block_alloc_size = block_manager.GetBlockAllocSize();
 	header.vector_size = STANDARD_VECTOR_SIZE;
 	block_manager.WriteHeader(QueryContext(GetContext()), header);
+	// the merged row groups are on disk: commits that wrote to them can go to the WAL
+	transaction_manager.EndVacuumSeals(true);
 
 	auto debug_verify_blocks = Settings::Get<DebugVerifyBlocksSetting>(db.GetDatabase());
 	if (debug_verify_blocks) {
