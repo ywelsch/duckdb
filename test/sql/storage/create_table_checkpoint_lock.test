@@ -1,0 +1,353 @@
+# name: test/sql/storage/create_table_checkpoint_lock.test
+# description: Only creating a table without indexes runs alongside checkpoints: every other table create holds them back
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/create_table_checkpoint_lock.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+CREATE TABLE ref (i INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO ref VALUES (1), (2), (3)
+
+statement ok
+CREATE TABLE existing (i INTEGER)
+
+statement ok
+CREATE SEQUENCE seq
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CHECKPOINT
+
+# tables without indexes: the open transaction does not hold a checkpoint back
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE plain (i INTEGER, s VARCHAR)
+
+statement ok con1
+INSERT INTO plain VALUES (1, 'one')
+
+statement ok con1
+CREATE TABLE checked (i INTEGER NOT NULL CHECK (i > 0), j BIGINT DEFAULT nextval('seq'), k AS (i * 2))
+
+statement ok con1
+INSERT INTO checked (i) VALUES (5)
+
+statement ok con1
+CREATE TABLE IF NOT EXISTS existing (i INTEGER, j INTEGER)
+
+statement ok con1
+CREATE TABLE IF NOT EXISTS not_existing (i INTEGER)
+
+statement ok
+INSERT INTO tick VALUES (1)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+COMMIT
+
+# CREATE TABLE AS with row groups written to blocks before its commit, across a checkpoint that writes a header
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE ctas AS SELECT i, 's' || i AS s FROM range(300000) t(i)
+
+statement ok
+INSERT INTO tick VALUES (2)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+COMMIT
+
+# the same, rolled back
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE ctas_rolled_back AS SELECT i, 's' || i AS s FROM range(300000) t(i)
+
+statement ok
+INSERT INTO tick VALUES (3)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# after a checkpoint, the transaction changes the rows of its own table: UPDATE, DELETE and ALTER hold checkpoints back
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE own AS SELECT i, 's' || i AS s FROM range(300000) t(i)
+
+statement ok
+INSERT INTO tick VALUES (4)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+UPDATE own SET s = 'updated' WHERE i < 10
+
+statement ok con1
+DELETE FROM own WHERE i % 2 = 1
+
+statement ok con1
+ALTER TABLE own ALTER i TYPE BIGINT
+
+statement ok con1
+ALTER TABLE own ADD COLUMN k INTEGER DEFAULT 7
+
+statement ok
+INSERT INTO tick VALUES (5)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+COMMIT
+
+# a table created and dropped in one transaction, across a checkpoint
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE created_and_dropped AS SELECT i, 's' || i AS s FROM range(300000) t(i)
+
+statement ok
+INSERT INTO tick VALUES (6)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+DROP TABLE created_and_dropped
+
+statement ok
+INSERT INTO tick VALUES (7)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+COMMIT
+
+# an index on the new table holds checkpoints back from then on
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE indexed_later (i INTEGER)
+
+statement ok
+INSERT INTO tick VALUES (8)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+CREATE INDEX indexed_later_idx ON indexed_later(i)
+
+statement ok
+INSERT INTO tick VALUES (9)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# a primary key, as a column constraint
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE pk_column (i INTEGER PRIMARY KEY)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# a primary key, as a table constraint
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE pk_table (i INTEGER, j INTEGER, PRIMARY KEY (i, j))
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# a unique constraint
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE unique_column (i INTEGER UNIQUE)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# a foreign key, as a column constraint
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE fk_column (i INTEGER REFERENCES ref(i))
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# a foreign key, as a table constraint
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE TABLE fk_table (i INTEGER, FOREIGN KEY (i) REFERENCES ref(i))
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# replacing a table
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE OR REPLACE TABLE existing (i INTEGER)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE OR REPLACE TABLE replaced_nothing (i INTEGER)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok
+INSERT INTO tick VALUES (10)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query I
+SELECT table_name FROM duckdb_tables() ORDER BY ALL
+----
+checked
+ctas
+existing
+not_existing
+own
+plain
+ref
+tick
+
+query I
+SELECT COUNT(*) FROM duckdb_indexes()
+----
+0
+
+query II
+SELECT * FROM plain
+----
+1	one
+
+query III
+SELECT * FROM checked
+----
+5	1	10
+
+query I
+SELECT COUNT(*) FROM duckdb_columns() WHERE table_name = 'existing'
+----
+1
+
+query III
+SELECT COUNT(*), SUM(i), MAX(s) FROM ctas
+----
+300000	44999850000	s99999
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (WHERE s = 'updated'), MIN(k) FROM own
+----
+150000	22499850000	5	7
+
+query I
+SELECT typeof(i) FROM own LIMIT 1
+----
+BIGINT
+
+query II
+SELECT COUNT(*), SUM(i) FROM tick
+----
+10	55
+
+statement ok
+INSERT INTO tick VALUES (11)
+
+# the checkpoint accounts for every block
+statement ok
+CHECKPOINT

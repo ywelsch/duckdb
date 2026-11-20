@@ -1,0 +1,288 @@
+# name: test/sql/storage/concurrent_checkpoint_create_table.test_slow
+# description: Tables without indexes created while a checkpoint runs are not part of it, and replay from the WAL
+# group: [storage]
+
+load {TEST_DIR}/concurrent_checkpoint_create_table.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE keep (i INTEGER, s VARCHAR);
+
+statement ok
+INSERT INTO keep SELECT i, 'k' || i FROM range(100000) t(i);
+
+statement ok
+CHECKPOINT
+
+# the checkpoint sleeps for four seconds before it scans the catalog, and for two seconds after it wrote a table
+statement ok
+SET debug_checkpoint_sleep_ms=4000
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 4
+
+# thread 3 is a reader that needs the state from before the insert below, so that this is a concurrent checkpoint
+onlyif threadid=3
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=3
+query I
+SELECT COUNT(*) FROM keep
+----
+100000
+
+# thread 2 keeps a transaction open across the checkpoint, with row groups written to blocks before its commit
+onlyif threadid=2
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=2
+statement ok
+CREATE TABLE open_ctas AS SELECT i, 'o' || i AS s FROM range(200000) t(i)
+
+sleep 500 millisecond
+
+onlyif threadid=0
+statement ok
+INSERT INTO keep VALUES (-1, 'k-1')
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 1000 millisecond
+
+# during the sleep before the catalog scan, after the checkpoint's bound
+onlyif threadid=1
+statement ok
+CREATE TABLE small (i INTEGER, s VARCHAR)
+
+onlyif threadid=1
+statement ok
+INSERT INTO small VALUES (1, 'x'), (2, 'y')
+
+# the commits did not wait for the running checkpoint
+onlyif threadid=1
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+onlyif threadid=1
+statement ok
+CREATE TABLE big AS SELECT i, 'b' || i AS s FROM range(300000) t(i)
+
+# created and dropped after the bound, while the checkpoint still runs
+onlyif threadid=1
+statement ok
+CREATE TABLE gone AS SELECT i, 'g' || i AS s FROM range(200000) t(i)
+
+onlyif threadid=1
+statement ok
+CREATE TABLE gone_blocks AS SELECT DISTINCT block_id FROM pragma_storage_info('gone') WHERE block_id >= 0
+
+onlyif threadid=1
+statement ok
+DROP TABLE gone
+
+sleep 7000 millisecond
+
+onlyif threadid=2
+statement ok
+COMMIT
+
+onlyif threadid=3
+statement ok
+COMMIT
+
+endloop
+
+statement ok
+SET debug_checkpoint_sleep_ms=0
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+# the WAL still refers to the blocks of the table dropped during the checkpoint: new rows must not reuse them yet
+statement ok
+CREATE TABLE after AS SELECT i, 'a' || i AS s FROM range(300000) t(i)
+
+query II
+SELECT COUNT(*) > 0, COUNT(*) FILTER (WHERE block_id IN (SELECT block_id FROM pragma_storage_info('after'))) FROM gone_blocks
+----
+true	0
+
+loop k 0 2
+
+query III
+SELECT COUNT(*), SUM(i), MAX(s) FROM after
+----
+300000	44999850000	a99999
+
+query II
+SELECT COUNT(*), SUM(i) FROM keep
+----
+100001	4999949999
+
+query II
+SELECT * FROM small ORDER BY i
+----
+1	x
+2	y
+
+query III
+SELECT COUNT(*), SUM(i), MAX(s) FROM big
+----
+300000	44999850000	b99999
+
+query III
+SELECT COUNT(*), SUM(i), MAX(s) FROM open_ctas
+----
+200000	19999900000	o99999
+
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'gone'
+----
+0
+
+# replay the WAL as after a crash
+restart
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+endloop
+
+statement ok
+INSERT INTO keep VALUES (-2, 'k-2')
+
+# the checkpoint accounts for every block, also those of the tables created during the previous one
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(i), MAX(s) FROM big
+----
+300000	44999850000	b99999
+
+query III
+SELECT COUNT(*), SUM(i), MAX(s) FROM open_ctas
+----
+200000	19999900000	o99999
+
+# a full checkpoint: a table created while it runs commits right away, rows inserted into it wait for the checkpoint
+statement ok
+SET debug_checkpoint_sleep_ms=3000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+INSERT INTO keep VALUES (-3, 'k-3')
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 1000 millisecond
+
+onlyif threadid=1
+statement ok
+CREATE TABLE during_full (i INTEGER)
+
+onlyif threadid=1
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+onlyif threadid=1
+statement ok
+INSERT INTO during_full SELECT i FROM range(1000) t(i)
+
+onlyif threadid=1
+statement ok
+CREATE TABLE ctas_during_full AS SELECT i FROM range(200000) t(i)
+
+endloop
+
+statement ok
+SET debug_checkpoint_sleep_ms=0
+
+loop k 0 2
+
+query II
+SELECT COUNT(*), SUM(i) FROM during_full
+----
+1000	499500
+
+query II
+SELECT COUNT(*), SUM(i) FROM ctas_during_full
+----
+200000	19999900000
+
+restart
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+endloop
+
+statement ok
+INSERT INTO keep VALUES (-4, 'k-4')
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query II
+SELECT COUNT(*), SUM(i) FROM keep
+----
+100004	4999949990
+
+query I
+SELECT table_name FROM duckdb_tables() ORDER BY ALL
+----
+after
+big
+ctas_during_full
+during_full
+gone_blocks
+keep
+open_ctas
+small
+
+statement ok
+INSERT INTO keep VALUES (-5, 'k-5')
+
+statement ok
+CHECKPOINT
