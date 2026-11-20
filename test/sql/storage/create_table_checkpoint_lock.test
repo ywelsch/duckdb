@@ -1,5 +1,5 @@
 # name: test/sql/storage/create_table_checkpoint_lock.test
-# description: Only creating a table without indexes runs alongside checkpoints: every other table create holds them back
+# description: Creating a table runs alongside checkpoints, also with indexes: only replacing a table holds them back
 # group: [storage]
 
 require skip_reload
@@ -185,10 +185,8 @@ BEGIN TRANSACTION
 statement ok con1
 CREATE TABLE pk_column (i INTEGER PRIMARY KEY)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK
@@ -200,10 +198,8 @@ BEGIN TRANSACTION
 statement ok con1
 CREATE TABLE pk_table (i INTEGER, j INTEGER, PRIMARY KEY (i, j))
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK
@@ -215,10 +211,8 @@ BEGIN TRANSACTION
 statement ok con1
 CREATE TABLE unique_column (i INTEGER UNIQUE)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK
@@ -230,10 +224,8 @@ BEGIN TRANSACTION
 statement ok con1
 CREATE TABLE fk_column (i INTEGER REFERENCES ref(i))
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK
@@ -245,10 +237,8 @@ BEGIN TRANSACTION
 statement ok con1
 CREATE TABLE fk_table (i INTEGER, FOREIGN KEY (i) REFERENCES ref(i))
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK

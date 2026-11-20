@@ -25,6 +25,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/table/index_entry.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 
 namespace duckdb {
@@ -295,6 +296,10 @@ ErrorData DuckTransaction::Commit(ClientContext &context, AttachedDatabase &db, 
 	try {
 		storage->Commit(context.GetContext(), commit_state.get());
 		undo_buffer.Commit(iterator_state, commit_info);
+		// with the commit id of the catalog entries: a checkpoint writes the indexes its catalog has
+		for (auto &index : created_indexes) {
+			index->MarkCommitted(commit_info.commit_id);
+		}
 		if (!db.IsSystem() && !db.IsTemporary() && Settings::Get<DebugForceCommitFailureSetting>(db.GetDatabase())) {
 			throw InvalidInputException("Forced commit failure (debug_force_commit_failure)");
 		}
@@ -306,6 +311,7 @@ ErrorData DuckTransaction::Commit(ClientContext &context, AttachedDatabase &db, 
 			commit_info.wal_sync_offset = commit_state->FlushCommit(commit_info.commit_id, sync_now);
 		}
 		drop_state.FinalizeCommit(manager.Cast<DuckTransactionManager>());
+		created_indexes.clear();
 		return ErrorData();
 	} catch (std::exception &ex) {
 		// Record the error and run RevertCommit() outside this try-catch: RevertCommit() iterates the
@@ -316,6 +322,9 @@ ErrorData DuckTransaction::Commit(ClientContext &context, AttachedDatabase &db, 
 
 	try {
 		undo_buffer.RevertCommit(iterator_state, GetTransactionId());
+		for (auto &index : created_indexes) {
+			index->MarkUncommitted(GetTransactionId());
+		}
 		if (!db.IsSystem() && !db.IsTemporary() &&
 		    Settings::Get<DebugForceCommitRevertFailureSetting>(db.GetDatabase())) {
 			throw IOException("Forced RevertCommit failure (debug_force_commit_revert_failure)");
@@ -342,6 +351,7 @@ ErrorData DuckTransaction::Rollback() {
 	try {
 		storage->Rollback();
 		undo_buffer.Rollback();
+		created_indexes.clear();
 		return ErrorData();
 	} catch (std::exception &ex) {
 		return ErrorData(ex);
@@ -357,6 +367,12 @@ unique_ptr<StorageLockKey> DuckTransaction::GetCheckpointLockForStatement() {
 		return nullptr;
 	}
 	return GetTransactionManager().SharedCheckpointLock();
+}
+
+void DuckTransaction::AddCreatedIndex(shared_ptr<IndexEntry> index) {
+	index->MarkUncommitted(GetTransactionId());
+	lock_guard<mutex> guard(created_indexes_lock);
+	created_indexes.push_back(std::move(index));
 }
 
 void DuckTransaction::SetModifications(DatabaseModificationType type) {

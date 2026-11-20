@@ -1,4 +1,5 @@
 #include "duckdb/storage/table/table_index_list.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/shared_ptr_ipp.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -124,7 +125,7 @@ void TableIndexList::Append(DataChunk &chunk, Vector &row_ids) {
 }
 
 ErrorData TableIndexList::Append(optional_ptr<TableIndexList> delete_indexes, DataChunk &chunk, row_t row_start,
-                                 IndexAppendMode append_mode, optional_idx active_checkpoint) {
+                                 IndexAppendMode append_mode, const ActiveCheckpoint &active_checkpoint) {
 	Vector row_ids(LogicalType::ROW_TYPE);
 	VectorOperations::GenerateSequence(row_ids, chunk.size(), row_start, 1);
 
@@ -173,10 +174,17 @@ void TableIndexList::AppendToDeleteIndexes(DataChunk &chunk, Vector &row_ids) {
 }
 
 void TableIndexList::RemoveFromIndexes(DataChunk &chunk, Vector &row_ids, const IndexRemovalType removal_type,
-                                       const optional_idx active_checkpoint) {
+                                       const ActiveCheckpoint &active_checkpoint) {
 	annotated_lock_guard lock(index_entries_lock);
 	for (const auto &entry : index_entries) {
 		entry->RemoveFromIndex(chunk, row_ids, removal_type, active_checkpoint);
+	}
+}
+
+void TableIndexList::MarkCreatedBy(DuckTransaction &transaction) {
+	annotated_lock_guard lock(index_entries_lock);
+	for (auto &entry : index_entries) {
+		transaction.AddCreatedIndex(entry);
 	}
 }
 

@@ -12,6 +12,7 @@
 #include "duckdb/common/enums/index_removal_type.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/execution/index/bound_index.hpp"
+#include "duckdb/storage/checkpoint/checkpoint_options.hpp"
 #include "duckdb/storage/checkpoint/table_index_writer.hpp"
 #include "duckdb/storage/index.hpp"
 #include "duckdb/storage/storage_info.hpp"
@@ -119,14 +120,14 @@ public:
 	void Append(DataChunk &chunk, Vector &row_ids);
 	//! Appends a chunk using delete and checkpoint indexes where required.
 	ErrorData Append(DataChunk &chunk, Vector &row_ids, const shared_ptr<IndexEntry> &delete_entry,
-	                 IndexAppendMode append_mode, optional_idx active_checkpoint);
+	                 IndexAppendMode append_mode, const ActiveCheckpoint &active_checkpoint);
 	//! Reverts an append to the physical index or its checkpoint delta.
 	void RevertAppend(DataChunk &chunk, Vector &row_ids);
 	//! Appends deleted rows to the bound physical index if it enforces uniqueness.
 	void AppendToDeleteIndexes(DataChunk &chunk, Vector &row_ids);
 	//! Applies a removal or removal rollback to the physical index and its deltas.
 	void RemoveFromIndex(DataChunk &chunk, Vector &row_ids, IndexRemovalType removal_type,
-	                     optional_idx active_checkpoint);
+	                     const ActiveCheckpoint &active_checkpoint);
 	//! Returns whether the physical index enforces a unique constraint.
 	bool IsUnique() const;
 	//! Returns whether the constraint enforced by the physical index is only checked when committing.
@@ -181,6 +182,12 @@ public:
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Adds only the transaction-local delete index.
 	void InitializeLocalDeleteIndex(TableIndexList &delete_indexes) const;
+	//! Marks the index as added by an open transaction: no checkpoint writes it until it commits
+	void MarkUncommitted(transaction_t transaction_id);
+	//! Marks the index as committed with the given commit id
+	void MarkCommitted(transaction_t commit_id);
+	//! Whether a checkpoint that sees the commits before the given bound writes this index
+	bool PartOfCheckpoint(VisibilityBound visibility_bound) const;
 
 public:
 	//! Acquire shared access to a stable physical index.
@@ -225,6 +232,8 @@ private:
 	//! Whether the enforced constraint is deferred. Derived from the catalog constraint, not serialized.
 	const ConstraintCheckMode check_mode;
 	IndexDeltas deltas;
+	//! The commit id of the transaction that added the index, its transaction id while open, 0 if loaded
+	atomic<transaction_t> commit_id {0};
 };
 
 template <class TARGET>

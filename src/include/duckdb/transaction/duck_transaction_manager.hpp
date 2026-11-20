@@ -11,6 +11,7 @@
 #include "duckdb/transaction/transaction_manager.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
+#include "duckdb/storage/checkpoint/checkpoint_options.hpp"
 #include "duckdb/common/queue.hpp"
 
 #include <condition_variable>
@@ -60,14 +61,14 @@ public:
 	//! Wait until every published commit is durable. Called under the commit lock, so no new commit can
 	//! enter its sync window and the wait is bounded by the syncs in flight
 	void WaitForDurability();
-	optional_idx GetActiveCheckpoint() const {
-		auto id = active_checkpoint.load();
-		return id == 0 ? optional_idx() : optional_idx(id);
+	ActiveCheckpoint GetActiveCheckpoint() const {
+		lock_guard<mutex> guard(active_checkpoint_lock);
+		return active_checkpoint;
 	}
 	idx_t NextCheckpointId() {
 		return ++next_checkpoint_id;
 	}
-	void SetActiveCheckpoint(idx_t checkpoint_id);
+	void SetActiveCheckpoint(idx_t checkpoint_id, VisibilityBound visibility_bound);
 	//! Ends the checkpoint. If it succeeded, frees the tables that drops handed over to it
 	void ResetActiveCheckpoint(bool checkpoint_succeeded);
 	//! Hands dropped tables over to the running checkpoint, which frees them. False if none runs: the commit does
@@ -160,16 +161,16 @@ private:
 	//! The lowest bound any active transaction reads at. A version preceding it is visible to
 	//! every active transaction, so whatever it supersedes can be cleaned up or compacted
 	atomic<VisibilityBound> lowest_visibility_bound;
-	//! Guards the dropped tables that are handed over to a checkpoint
-	mutex deferred_tables_lock;
+	//! Guards the active checkpoint and the dropped tables that are handed over to it
+	mutable mutex active_checkpoint_lock;
 	//! The dropped tables that the running checkpoint frees once it has written its header
 	vector<shared_ptr<DataTable>> deferred_tables;
 	//! The lowest start time of the transactions that stayed active when the last one ended, checkpoints aside
 	atomic<transaction_t> lowest_remaining_start;
 	//! The last commit timestamp
 	atomic<transaction_t> last_commit;
-	//! The currently active checkpoint, zero when none is running
-	atomic<idx_t> active_checkpoint;
+	//! The currently active checkpoint, empty when none is running
+	ActiveCheckpoint active_checkpoint;
 	//! Source of checkpoint identities
 	atomic<idx_t> next_checkpoint_id = {0};
 	//! Set of currently running transactions

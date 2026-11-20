@@ -15,6 +15,7 @@
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/execution/index/index_type.hpp"
 
@@ -189,6 +190,7 @@ SinkFinalizeType PhysicalCreateIndex::Finalize(Pipeline &pipeline, Event &event,
 
 	// Add the index to the storage.
 	auto index_entry = storage.GetDataTableInfo()->GetIndexes().AddIndex(std::move(bound_index), index_oid, check_mode);
+	DuckTransaction::Get(context, storage.db).AddCreatedIndex(index_entry);
 	if (local_table_storage) {
 		// Existing transaction-local rows are verified when committing, so we only add a delete index.
 		index_entry->InitializeLocalDeleteIndex(local_table_storage->delete_indexes);

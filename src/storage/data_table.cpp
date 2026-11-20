@@ -1090,7 +1090,7 @@ void DataTable::AppendLock(DuckTransaction &transaction, TableAppendState &state
 	state.current_row = state.row_start;
 	auto &transaction_manager = transaction.GetTransactionManager();
 	auto active_checkpoint = transaction_manager.GetActiveCheckpoint();
-	if (info->AppendRequiresNewRowGroup(*row_groups, active_checkpoint)) {
+	if (info->AppendRequiresNewRowGroup(*row_groups, active_checkpoint.checkpoint_id)) {
 		// there is a checkpoint active while we are appending
 		// in this case we cannot just blindly append to the last row group, because we need to checkpoint that
 		// always start a new row group in this case
@@ -1291,7 +1291,7 @@ void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_
 // Indexes
 //===--------------------------------------------------------------------===//
 void DataTable::RemoveFromIndexes(const QueryContext &context, Vector &row_identifiers, idx_t count,
-                                  IndexRemovalType removal_type, optional_idx active_checkpoint) {
+                                  IndexRemovalType removal_type, const ActiveCheckpoint &active_checkpoint) {
 	row_groups->RemoveFromIndexes(context, info->indexes, row_identifiers, count, removal_type, active_checkpoint);
 }
 

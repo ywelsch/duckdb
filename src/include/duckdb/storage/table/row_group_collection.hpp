@@ -160,7 +160,8 @@ public:
 	bool IsPersistent() const;
 
 	void RemoveFromIndexes(const QueryContext &context, TableIndexList &indexes, Vector &row_identifiers, idx_t count,
-	                       IndexRemovalType removal_type, optional_idx active_checkpoint = optional_idx());
+	                       IndexRemovalType removal_type,
+	                       const ActiveCheckpoint &active_checkpoint = ActiveCheckpoint());
 
 	//! Delete the given rows - optionally collects the ids of the rows that were deleted (excluding duplicates)
 	idx_t Delete(TransactionData transaction, DuckTableEntry &table_entry, row_t *ids, idx_t count,

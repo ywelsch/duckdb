@@ -17,6 +17,7 @@
 
 namespace duckdb {
 class CommitDropState;
+class IndexEntry;
 class DuckTableEntry;
 class RowGroupCollection;
 class RowVersionManager;
@@ -119,6 +120,8 @@ public:
 	bool IsCheckpointTransaction() const {
 		return is_checkpoint_transaction;
 	}
+	//! Registers an index this transaction added: its commit marks the index as committed
+	void AddCreatedIndex(shared_ptr<IndexEntry> index);
 
 private:
 	//! The undo buffer is used to store old versions of rows that are updated
@@ -136,6 +139,10 @@ private:
 	reference_map_t<SequenceCatalogEntry, reference<SequenceValue>> sequence_usage;
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
 	atomic<bool> is_checkpoint_transaction {false};
+	//! Lock for accessing created_indexes
+	mutex created_indexes_lock;
+	//! The indexes this transaction added
+	vector<shared_ptr<IndexEntry>> created_indexes;
 };
 
 } // namespace duckdb

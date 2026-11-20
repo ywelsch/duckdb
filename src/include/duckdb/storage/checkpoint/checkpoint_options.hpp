@@ -32,4 +32,12 @@ struct CheckpointOptions {
 	optional_ptr<unique_lock<mutex>> commit_lock;
 };
 
+//! The checkpoint that runs while a transaction changes an index, if any
+struct ActiveCheckpoint {
+	//! Empty when no checkpoint runs
+	optional_idx checkpoint_id;
+	//! What the running checkpoint writes: indexes that committed before it
+	VisibilityBound visibility_bound;
+};
+
 } // namespace duckdb

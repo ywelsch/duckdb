@@ -61,7 +61,6 @@ DuckTransactionManager::DuckTransactionManager(AttachedDatabase &db) : Transacti
 	// uncommitted data could be read by
 	current_transaction_id = TRANSACTION_ID_START;
 	lowest_visibility_bound = VisibilityBound::IncludingUncommitted();
-	active_checkpoint = 0;
 	if (!db.GetCatalog().IsDuckCatalog()) {
 		// Specifically the StorageManager of the DuckCatalog is relied on, with `db.GetStorageManager`
 		throw InternalException("DuckTransactionManager should only be created together with a DuckCatalog");
@@ -115,16 +114,18 @@ Transaction &DuckTransactionManager::StartTransaction(ClientContext &context) {
 	return transaction_ref;
 }
 
-void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
+void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id, VisibilityBound visibility_bound) {
 	// called under the commit lock: a commit's flush and its commit or revert are entirely before or after this
-	active_checkpoint = checkpoint_id;
+	lock_guard<mutex> guard(active_checkpoint_lock);
+	active_checkpoint.checkpoint_id = checkpoint_id;
+	active_checkpoint.visibility_bound = visibility_bound;
 }
 
 void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
 	vector<shared_ptr<DataTable>> dropped;
 	{
-		lock_guard<mutex> guard(deferred_tables_lock);
-		active_checkpoint = 0;
+		lock_guard<mutex> guard(active_checkpoint_lock);
+		active_checkpoint = ActiveCheckpoint();
 		dropped = std::move(deferred_tables);
 		deferred_tables.clear();
 	}
@@ -139,8 +140,8 @@ void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
 }
 
 bool DuckTransactionManager::DeferDroppedTables(const vector<shared_ptr<DataTable>> &tables) {
-	lock_guard<mutex> guard(deferred_tables_lock);
-	if (active_checkpoint == 0) {
+	lock_guard<mutex> guard(active_checkpoint_lock);
+	if (!active_checkpoint.checkpoint_id.IsValid()) {
 		return false;
 	}
 	// the checkpoint started before the drops committed: its catalog still has the tables

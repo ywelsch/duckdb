@@ -182,6 +182,11 @@ bool DuckSchemaEntry::DropEntryInternal(CatalogTransaction transaction, CatalogE
 
 optional_ptr<CatalogEntry> DuckSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
 	auto table = make_uniq<DuckTableEntry>(catalog, *this, info);
+	if (transaction.transaction && transaction.transaction->IsDuckTransaction()) {
+		// the indexes of the new table commit with it
+		table->GetStorage().GetDataTableInfo()->GetIndexes().MarkCreatedBy(
+		    transaction.transaction->Cast<DuckTransaction>());
+	}
 	auto &dependencies = info.Base().dependencies;
 
 	vector<unique_ptr<AlterForeignKeyInfo>> fk_arrays;

@@ -20,6 +20,7 @@
 namespace duckdb {
 
 class ConflictManager;
+class DuckTransaction;
 class ConflictInfo;
 class IndexEntry;
 class TableIndexList;
@@ -43,13 +44,15 @@ public:
 	TableIndexIterationHelper<shared_ptr<IndexEntry>> IndexEntries() const;
 	//! Adds an index entry to the list of index entries, and returns it.
 	shared_ptr<IndexEntry> AddIndex(unique_ptr<Index> index, idx_t index_oid, ConstraintCheckMode check_mode);
+	//! Registers every index entry as added by the given transaction
+	void MarkCreatedBy(DuckTransaction &transaction);
 	//! Initializes the transaction-local delete and append indexes.
 	void InitializeLocalIndexes(TableIndexList &delete_indexes, TableIndexList &append_indexes) const;
 	//! Appends a chunk to all index entries.
 	void Append(DataChunk &chunk, Vector &row_ids);
 	//! Appends a table chunk with generated row IDs, using delete and checkpoint indexes where required.
 	ErrorData Append(optional_ptr<TableIndexList> delete_indexes, DataChunk &chunk, row_t row_start,
-	                 IndexAppendMode append_mode, optional_idx active_checkpoint);
+	                 IndexAppendMode append_mode, const ActiveCheckpoint &active_checkpoint);
 	//! Reverts an append to all index entries.
 	void RevertAppend(DataChunk &chunk, Vector &row_ids);
 	//! Reverts an append with generated row IDs starting at row_start.
@@ -58,7 +61,7 @@ public:
 	void AppendToDeleteIndexes(DataChunk &chunk, Vector &row_ids);
 	//! Applies a removal or removal rollback to all index entries.
 	void RemoveFromIndexes(DataChunk &chunk, Vector &row_ids, IndexRemovalType removal_type,
-	                       optional_idx active_checkpoint = optional_idx());
+	                       const ActiveCheckpoint &active_checkpoint = ActiveCheckpoint());
 	//! Removes an index entry from the list of index entries and release any storage the index owns.
 	void RemoveIndex(idx_t index_oid);
 	//! Returns the entry matching the index OID.

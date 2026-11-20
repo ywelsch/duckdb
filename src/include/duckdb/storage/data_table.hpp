@@ -211,7 +211,8 @@ public:
 
 	//! Remove the row identifiers from all the indexes of the table
 	void RemoveFromIndexes(const QueryContext &context, Vector &row_identifiers, idx_t count,
-	                       IndexRemovalType removal_type, optional_idx checkpoint_id = optional_idx());
+	                       IndexRemovalType removal_type,
+	                       const ActiveCheckpoint &active_checkpoint = ActiveCheckpoint());
 
 	void SetAsMainTable() {
 		this->version = DataTableVersion::MAIN_TABLE;
