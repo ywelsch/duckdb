@@ -7,7 +7,6 @@ namespace duckdb {
 
 SourceResultType PhysicalTransaction::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                       OperatorSourceInput &input) const {
-	// a COMMIT that waits for its durability blocks the pipeline instead of the thread
 	optional_ptr<const InterruptState> interrupt_state;
 	if (input.interrupt_state.CanCallback()) {
 		interrupt_state = &input.interrupt_state;
