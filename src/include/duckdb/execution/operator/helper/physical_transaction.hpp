@@ -29,6 +29,7 @@ public:
 	unique_ptr<TransactionInfo> info;
 
 public:
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
 
