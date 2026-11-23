@@ -55,8 +55,6 @@ public:
 	//! While the committer waits for durability without blocking its thread: called back once the commit is durable
 	//! or its sync failed, or once no sync runs anymore. Guarded by the transaction lock
 	InterruptState sync_callback;
-	//! Set when a sync of the WAL the commit was published to failed
-	ErrorData sync_error;
 	//! Passed to RemoveTransaction by the committer that finishes a parked commit
 	bool store_after_commit = false;
 

@@ -325,7 +325,7 @@ void DuckTransactionManager::WaitForDurability() {
 		idx_t offset = 0;
 		for (auto &active_transaction : active_transactions) {
 			if (active_transaction->wal_sync_offset != 0 && active_transaction->commit_id >= durable_bound &&
-			    !active_transaction->sync_error.HasError()) {
+			    active_transaction->commit_id >= failed_bound) {
 				offset = MaxValue(offset, active_transaction->wal_sync_offset);
 			}
 		}
@@ -376,15 +376,16 @@ ErrorData DuckTransactionManager::SyncCommits(WriteAheadLog &wal, idx_t offset, 
 				// advance the durable bound over every commit the sync covered
 				durable_bound = VisibilityBound::Through(transaction.commit_id);
 			}
-			if (!covered && sync_error.HasError() && !transaction.sync_error.HasError()) {
-				// the WAL is never synced again: nothing else published to it becomes durable
-				transaction.sync_error = sync_error;
-			}
 			// a parked committer resumes once durable or failed, or once no sync runs anymore, so that it syncs
 			if (transaction.sync_callback.CanCallback() && (covered || sync_error.HasError() || running_syncs == 0)) {
 				to_wake.push_back(std::move(transaction.sync_callback));
 				transaction.sync_callback = InterruptState();
 			}
+		}
+		if (sync_error.HasError()) {
+			// the WAL is never synced again: the commits published to it that are not durable now never will be
+			failed_bound = VisibilityBound::Through(last_commit);
+			sync_failure = sync_error;
 		}
 		if (committer) {
 			QueueCleanup(RemoveTransaction(*committer, store_committer, CreateCleanupInfo()));
@@ -407,7 +408,7 @@ bool DuckTransactionManager::FinishParkedCommit(DuckTransaction &transaction,
 	transaction.sync_callback = InterruptState();
 	auto store_transaction = transaction.store_after_commit;
 	optional_ptr<WriteAheadLog> wal;
-	if (transaction.commit_id >= durable_bound && !transaction.sync_error.HasError()) {
+	if (transaction.commit_id >= durable_bound && transaction.commit_id >= failed_bound) {
 		// not replaced before this commit is durable or its sync failed
 		wal = db.GetStorageManager().GetWAL();
 		if (transaction.wal_sync_offset <= wal->GetDurableOffset()) {
@@ -427,7 +428,9 @@ bool DuckTransactionManager::FinishParkedCommit(DuckTransaction &transaction,
 		t_lock.unlock();
 		error = SyncCommits(*wal, transaction.wal_sync_offset, transaction, store_transaction);
 	} else {
-		error = transaction.sync_error;
+		if (transaction.commit_id >= durable_bound) {
+			error = sync_failure;
+		}
 		QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
 		t_lock.unlock();
 	}

@@ -194,6 +194,10 @@ private:
 	//! Threads between deciding to sync the WAL for a published commit and completing that sync. Commits park only
 	//! while one is running, since the last one to complete wakes the parked commits it did not cover
 	idx_t running_syncs = 0;
+	//! A commit before this bound that is not durable never becomes durable: a sync of its WAL failed with
+	//! sync_failure. Only ever advances
+	VisibilityBound failed_bound;
+	ErrorData sync_failure;
 
 	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START};
 	idx_t last_committed_version = 0;
