@@ -62,6 +62,7 @@ class BufferedData;
 struct ClientData;
 class ClientContextState;
 class Connection;
+class InterruptState;
 class PhysicalTransaction;
 class RegisteredStateManager;
 struct TransactionInfo;
@@ -336,8 +337,10 @@ private:
 
 	//! Runs a transaction statement without going through the local query processing pipeline.
 	void RunTransactionStatement(const TransactionInfo &info);
-	//! Same as RunTransactionStatement, but does not obtain a lock or route CONNECT statements.
-	void RunTransactionStatementInternal(const TransactionInfo &info);
+	//! Same as RunTransactionStatement, but does not obtain a lock or route CONNECT statements. With an interrupt
+	//! state, a COMMIT returns false while it waits for its durability; it must then be run again once called back
+	bool RunTransactionStatementInternal(const TransactionInfo &info,
+	                                     optional_ptr<const InterruptState> commit_callback = nullptr);
 
 	//! Whether a submission settles its result as retained before the first task is scheduled. A caller that
 	//! completes the query itself settles it, so no producer parks for a decision it has already made

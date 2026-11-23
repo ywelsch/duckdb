@@ -25,6 +25,10 @@ void TransactionContext::BeginTransaction() {
 	if (current_transaction) {
 		throw TransactionException("cannot start a transaction within a transaction");
 	}
+	if (committing_transaction) {
+		// e.g. RunFunctionInTransaction, which does not end the open query first
+		throw TransactionException("cannot start a transaction while a COMMIT waits for its durability");
+	}
 	auto start_timestamp = Timestamp::GetCurrentTimestamp();
 	auto global_transaction_id = context.db->GetDatabaseManager().GetNewTransactionNumber();
 	current_transaction = make_uniq<MetaTransaction>(*context.db, start_timestamp, global_transaction_id);
@@ -48,13 +52,53 @@ void TransactionContext::SetAutocheckpointError(ErrorData error) {
 }
 
 void TransactionContext::Commit() {
+	StartCommit();
+	FinishPendingCommit();
+}
+
+bool TransactionContext::TryCommit(const InterruptState &interrupt_state) {
+	if (!committing_transaction) {
+		StartCommit();
+	}
+	ErrorData error;
+	try {
+		if (!committing_transaction->TryCommit(context, interrupt_state, error)) {
+			return false;
+		}
+	} catch (...) {
+		committing_transaction.reset();
+		throw;
+	}
+	CompleteCommit(std::move(error));
+	return true;
+}
+
+void TransactionContext::FinishPendingCommit() {
+	if (!committing_transaction) {
+		return;
+	}
+	ErrorData error;
+	try {
+		error = committing_transaction->Commit(context);
+	} catch (...) {
+		committing_transaction.reset();
+		throw;
+	}
+	CompleteCommit(std::move(error));
+}
+
+void TransactionContext::StartCommit() {
+	D_ASSERT(!committing_transaction);
 	if (!current_transaction) {
 		throw TransactionException("failed to commit: no transaction active");
 	}
 	autocheckpoint_error = ErrorData();
-	auto transaction = std::move(current_transaction);
+	committing_transaction = std::move(current_transaction);
 	ClearTransaction();
-	auto error = transaction->Commit(context);
+}
+
+void TransactionContext::CompleteCommit(ErrorData error) {
+	auto transaction = std::move(committing_transaction);
 	// Notify any registered state of transaction commit
 	if (error.HasError()) {
 		for (auto const &s : context.GetContext().GetRegisteredState().States()) {

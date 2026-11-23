@@ -129,6 +129,8 @@ public:
 	idx_t FlushMarker();
 	//! Block until the WAL is durable up to the given offset
 	void SyncUpTo(idx_t offset);
+	//! The logical offset up to which the WAL is durable
+	idx_t GetDurableOffset();
 	//! Increment the WAL entry count, which is used for the auto-checkpoint threshold.
 	void IncrementWALEntriesCount();
 	void WriteCheckpoint(MetaBlockPointer meta_block);

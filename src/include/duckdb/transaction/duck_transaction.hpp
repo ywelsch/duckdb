@@ -25,6 +25,7 @@ class StorageLockKey;
 class StorageCommitState;
 struct UndoBufferProperties;
 struct WrittenRows;
+struct ParkedCommit;
 
 struct CommitInfo {
 	transaction_t commit_id;
@@ -51,6 +52,8 @@ public:
 	idx_t wal_sync_offset = 0;
 	//! The committed catalog version just before this commit published
 	idx_t catalog_version_before_commit = 0;
+	//! Set when the committer left the wait for durability to another committer's sync (see ParkedCommit)
+	shared_ptr<ParkedCommit> parked_commit;
 
 	atomic<idx_t> catalog_version;
 

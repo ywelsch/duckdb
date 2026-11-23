@@ -24,6 +24,8 @@ class DatabaseInstance;
 class SecretManager;
 class SecretStorage;
 struct DatabaseModificationType;
+class InterruptState;
+class PendingCommit;
 class Transaction;
 
 enum class TransactionState { UNCOMMITTED, COMMITTED, ROLLED_BACK };
@@ -62,6 +64,9 @@ public:
 	void RemoveTransaction(AttachedDatabase &db);
 
 	ErrorData Commit(ClientContext &context);
+	//! Commits like Commit, but returns false while a database's commit waits for its durability, after arranging
+	//! for the interrupt state to be called back. Must be called again until it returns true
+	bool TryCommit(ClientContext &context, const InterruptState &interrupt_state, ErrorData &error);
 	void Rollback(ClientContext &context);
 	// Finalize the transaction after a COMMIT of ROLLBACK.
 	void Finalize(ClientContext &context);
@@ -81,6 +86,8 @@ public:
 	void DetachDatabase(AttachedDatabase &database);
 
 private:
+	bool CommitInternal(ClientContext &context, optional_ptr<const InterruptState> interrupt_state, ErrorData &result);
+
 	friend class SecretManager;
 
 	//! Lock to prevent all_transactions and transactions from getting out of sync.
@@ -101,6 +108,12 @@ private:
 	identifier_map_t<reference<AttachedDatabase>> used_databases;
 	//! Secrets that only live for the duration of this transaction.
 	unique_ptr<SecretStorage> transaction_secret_storage;
+	//! The commit in progress: the databases of all_transactions left to commit, the error so far, and the
+	//! database whose commit waits for its durability
+	optional_idx commit_cursor;
+	ErrorData commit_error;
+	optional_ptr<AttachedDatabase> pending_database;
+	unique_ptr<PendingCommit> pending_commit;
 };
 
 } // namespace duckdb
