@@ -357,14 +357,21 @@ ErrorData DuckTransactionManager::SyncCommits(WriteAheadLog &wal, idx_t offset, 
 		lock_guard<mutex> t_lock(transaction_lock);
 		D_ASSERT(running_syncs > 0);
 		running_syncs--;
-		// after a failure, earlier syncs may still have covered more than their own offsets
-		auto covered_offset = sync_error.HasError() ? wal.GetDurableOffset() : offset;
+		// a sync covers up to the WAL's durable offset, which can lie beyond its own offset. Only parked commits and
+		// a failed sync need it: a running committer checks its own offset
+		optional_idx durable_offset;
 		for (auto &active_transaction : active_transactions) {
 			auto &transaction = *active_transaction;
 			if (transaction.wal_sync_offset == 0) {
 				continue;
 			}
-			auto covered = transaction.wal_sync_offset <= covered_offset;
+			auto covered = !sync_error.HasError() && transaction.wal_sync_offset <= offset;
+			if (!covered && (sync_error.HasError() || transaction.sync_callback.CanCallback())) {
+				if (!durable_offset.IsValid()) {
+					durable_offset = wal.GetDurableOffset();
+				}
+				covered = transaction.wal_sync_offset <= durable_offset.GetIndex();
+			}
 			if (covered && transaction.commit_id >= durable_bound) {
 				// advance the durable bound over every commit the sync covered
 				durable_bound = VisibilityBound::Through(transaction.commit_id);
@@ -399,20 +406,30 @@ bool DuckTransactionManager::FinishParkedCommit(DuckTransaction &transaction,
 	// nobody may call back the task that is running this
 	transaction.sync_callback = InterruptState();
 	auto store_transaction = transaction.store_after_commit;
-	if (transaction.commit_id < durable_bound || transaction.sync_error.HasError()) {
+	optional_ptr<WriteAheadLog> wal;
+	if (transaction.commit_id >= durable_bound && !transaction.sync_error.HasError()) {
+		// not replaced before this commit is durable or its sync failed
+		wal = db.GetStorageManager().GetWAL();
+		if (transaction.wal_sync_offset <= wal->GetDurableOffset()) {
+			// a sync covered it beyond its own offset, and with it every earlier commit
+			durable_bound = VisibilityBound::Through(transaction.commit_id);
+			wal = nullptr;
+		} else if (interrupt_state && running_syncs > 0) {
+			// a running sync covers this commit, or wakes it when it ends
+			transaction.sync_callback = *interrupt_state;
+			return false;
+		} else {
+			// no sync runs for this commit: run it on this thread
+			running_syncs++;
+		}
+	}
+	if (wal) {
+		t_lock.unlock();
+		error = SyncCommits(*wal, transaction.wal_sync_offset, transaction, store_transaction);
+	} else {
 		error = transaction.sync_error;
 		QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
 		t_lock.unlock();
-	} else if (interrupt_state && running_syncs > 0) {
-		// a running sync covers this commit, or wakes it when it ends
-		transaction.sync_callback = *interrupt_state;
-		return false;
-	} else {
-		// no sync runs for this commit: run it on this thread. The WAL is not replaced while a sync runs
-		auto &wal = *db.GetStorageManager().GetWAL();
-		running_syncs++;
-		t_lock.unlock();
-		error = SyncCommits(wal, transaction.wal_sync_offset, transaction, store_transaction);
 	}
 	CleanupTransactions();
 	DatabaseManager::Get(db.GetDatabase()).DrainPendingTeardowns();
