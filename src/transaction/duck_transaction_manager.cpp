@@ -357,35 +357,31 @@ ErrorData DuckTransactionManager::SyncCommits(WriteAheadLog &wal, idx_t offset, 
 		lock_guard<mutex> t_lock(transaction_lock);
 		D_ASSERT(running_syncs > 0);
 		running_syncs--;
-		// a sync covers up to the WAL's durable offset, which can lie beyond its own offset. Only parked commits and
-		// a failed sync need it: a running committer checks its own offset
-		optional_idx durable_offset;
+		// after a failure, earlier syncs may still have covered more than their own offsets
+		auto covered_offset = sync_error.HasError() ? wal.GetDurableOffset() : offset;
+		auto previous_bound = durable_bound;
 		for (auto &active_transaction : active_transactions) {
-			auto &transaction = *active_transaction;
-			if (transaction.wal_sync_offset == 0) {
-				continue;
-			}
-			auto covered = !sync_error.HasError() && transaction.wal_sync_offset <= offset;
-			if (!covered && (sync_error.HasError() || transaction.sync_callback.CanCallback())) {
-				if (!durable_offset.IsValid()) {
-					durable_offset = wal.GetDurableOffset();
-				}
-				covered = transaction.wal_sync_offset <= durable_offset.GetIndex();
-			}
-			if (covered && transaction.commit_id >= durable_bound) {
+			if (active_transaction->wal_sync_offset != 0 && active_transaction->wal_sync_offset <= covered_offset &&
+			    active_transaction->commit_id >= durable_bound) {
 				// advance the durable bound over every commit the sync covered
-				durable_bound = VisibilityBound::Through(transaction.commit_id);
-			}
-			// a parked committer resumes once durable or failed, or once no sync runs anymore, so that it syncs
-			if (transaction.sync_callback.CanCallback() && (covered || sync_error.HasError() || running_syncs == 0)) {
-				to_wake.push_back(std::move(transaction.sync_callback));
-				transaction.sync_callback = InterruptState();
+				durable_bound = VisibilityBound::Through(active_transaction->commit_id);
 			}
 		}
 		if (sync_error.HasError()) {
 			// the WAL is never synced again: the commits published to it that are not durable now never will be
 			failed_bound = VisibilityBound::Through(last_commit);
 			sync_failure = sync_error;
+		}
+		// parked committers check for themselves whether they are done: wake them once the durable bound moved, a
+		// sync failed, or no sync runs anymore, so that one of them syncs
+		if (durable_bound != previous_bound || sync_error.HasError() || running_syncs == 0) {
+			for (auto &active_transaction : active_transactions) {
+				auto &callback = active_transaction->sync_callback;
+				if (callback.CanCallback()) {
+					to_wake.push_back(std::move(callback));
+					callback = InterruptState();
+				}
+			}
 		}
 		if (committer) {
 			QueueCleanup(RemoveTransaction(*committer, store_committer, CreateCleanupInfo()));
@@ -406,7 +402,8 @@ bool DuckTransactionManager::FinishParkedCommit(DuckTransaction &transaction,
 	unique_lock<mutex> t_lock(transaction_lock);
 	// nobody may call back the task that is running this
 	transaction.sync_callback = InterruptState();
-	auto store_transaction = transaction.store_after_commit;
+	// the commit's undo properties are not kept: keep the transaction until no snapshot can need it
+	auto store_transaction = true;
 	optional_ptr<WriteAheadLog> wal;
 	if (transaction.commit_id >= durable_bound && transaction.commit_id >= failed_bound) {
 		// not replaced before this commit is durable or its sync failed
@@ -643,7 +640,6 @@ bool DuckTransactionManager::CommitTransactionInternal(ClientContext &context, D
 		// A commit that needs a WAL sync stays active until the sync below has completed.
 		QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
 	} else if (park) {
-		transaction.store_after_commit = store_transaction;
 		transaction.sync_callback = *interrupt_state;
 	}
 

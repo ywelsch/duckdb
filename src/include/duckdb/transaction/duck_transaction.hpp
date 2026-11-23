@@ -52,11 +52,9 @@ public:
 	idx_t wal_sync_offset = 0;
 	//! The committed catalog version just before this commit published
 	idx_t catalog_version_before_commit = 0;
-	//! While the committer waits for durability without blocking its thread: called back once the commit is durable
-	//! or its sync failed, or once no sync runs anymore. Guarded by the transaction lock
+	//! While the committer waits for durability without blocking its thread: called back when the durable bound moves,
+	//! a sync fails, or no sync runs anymore. Guarded by the transaction lock
 	InterruptState sync_callback;
-	//! Passed to RemoveTransaction by the committer that finishes a parked commit
-	bool store_after_commit = false;
 
 	atomic<idx_t> catalog_version;
 
