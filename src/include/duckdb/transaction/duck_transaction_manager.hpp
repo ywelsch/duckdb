@@ -18,6 +18,7 @@
 namespace duckdb {
 class DuckTransactionManager;
 class DuckTransaction;
+class WriteAheadLog;
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -45,6 +46,9 @@ public:
 	Transaction &StartTransaction(Context &context, MetaTransaction &meta_transaction) override;
 	//! Commit the given transaction
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
+	//! Commit the given transaction; a commit that would wait for another committer's WAL sync parks instead
+	bool TryCommitTransaction(ClientContext &context, Transaction &transaction, const InterruptState &interrupt_state,
+	                          ErrorData &error) override;
 	//! Rollback the given transaction
 	void RollbackTransaction(ClientContext &context, Transaction &transaction) override;
 
@@ -56,8 +60,8 @@ public:
 	transaction_t GetLastCommit() const {
 		return last_commit;
 	}
-	//! Wait until every published commit is durable. Called under the commit lock, so no new commit can
-	//! enter its sync window and the wait is bounded by the syncs in flight
+	//! Wait until every published commit is durable, syncing for parked commits. Called under the commit lock, so
+	//! no new commit can enter its sync window and the wait is bounded by the syncs in flight
 	void WaitForDurability();
 	optional_idx GetActiveCheckpoint() const {
 		auto id = active_checkpoint.load();
@@ -131,6 +135,18 @@ private:
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
 
+	bool CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction,
+	                               optional_ptr<const InterruptState> interrupt_state, ErrorData &result);
+	//! Finish a commit that parked while it waited for its durability. Without an interrupt state, or when no sync
+	//! runs, the calling thread syncs the WAL itself
+	bool FinishParkedCommit(DuckTransaction &transaction, optional_ptr<const InterruptState> interrupt_state,
+	                        ErrorData &error);
+	//! Sync the WAL up to the offset as one of the running syncs, then advance the durable bound, wake the parked
+	//! commits that are done or should sync themselves, and remove `committer`. Called without the transaction
+	//! lock; returns the sync's error
+	ErrorData SyncCommits(WriteAheadLog &wal, idx_t offset, optional_ptr<DuckTransaction> committer,
+	                      bool store_committer);
+
 	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
 	bool HasUnsyncedCommits();
 	struct DurableSnapshot {
@@ -173,8 +189,15 @@ private:
 	//! active_transactions until its commit is durable, so new snapshots are bounded below commits
 	//! that are not yet durable
 	VisibilityBound durable_bound;
-	//! Signalled (under transaction_lock) when no active transaction awaits its WAL sync
+	//! Signalled when running_syncs drops to zero
 	std::condition_variable durability_cv;
+	//! Threads between deciding to sync the WAL for a published commit and completing that sync. Commits park only
+	//! while one is running, since the last one to complete wakes the parked commits it did not cover
+	idx_t running_syncs = 0;
+	//! A commit before this bound that is not durable never becomes durable: a sync of its WAL failed with
+	//! sync_failure. Only ever advances
+	VisibilityBound failed_bound;
+	ErrorData sync_failure;
 
 	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START};
 	idx_t last_committed_version = 0;

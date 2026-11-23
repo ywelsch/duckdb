@@ -1201,6 +1201,10 @@ void ClientContext::InterruptCheck() const {
 	if (IsInterrupted()) {
 		throw InterruptException();
 	}
+	if (interrupt_state.load(std::memory_order_relaxed) == ClientInterruptState::INTERRUPTS_SUPPRESSED) {
+		// an irreversible commit does not time out either
+		return;
+	}
 	if (QueryDeadlinePassed()) {
 		throw InterruptException(QUERY_DEADLINE_ERROR);
 	}
@@ -1257,7 +1261,17 @@ void ClientContext::RegisterFunction(CreateFunctionInfo &info) {
 	});
 }
 
-void ClientContext::RunTransactionStatementInternal(const TransactionInfo &info) {
+bool ClientContext::RunTransactionStatementInternal(const TransactionInfo &info,
+                                                    optional_ptr<const InterruptState> commit_callback) {
+	if (transaction.HasPendingCommit()) {
+		// resume a COMMIT that waited for its durability
+		D_ASSERT(info.type == TransactionType::COMMIT);
+		if (!commit_callback) {
+			transaction.FinishPendingCommit();
+			return true;
+		}
+		return transaction.TryCommit(*commit_callback);
+	}
 	auto type = info.type;
 	if (type == TransactionType::COMMIT && transaction.HasActiveTransaction() &&
 	    ValidChecker::IsInvalidated(ActiveTransaction())) {
@@ -1290,6 +1304,13 @@ void ClientContext::RunTransactionStatementInternal(const TransactionInfo &info)
 		if (transaction.IsAutoCommit()) {
 			throw TransactionException("cannot commit - no transaction is active");
 		}
+		if (commit_callback) {
+			auto done = transaction.TryCommit(*commit_callback);
+			// The commit is irreversible, also while it waits for its durability, so ignore interrupts until the
+			// next query.
+			SuppressInterrupts();
+			return done;
+		}
 		transaction.Commit();
 		// The commit is irreversible, so ignore interrupts until the next query.
 		SuppressInterrupts();
@@ -1310,6 +1331,7 @@ void ClientContext::RunTransactionStatementInternal(const TransactionInfo &info)
 	default:
 		throw NotImplementedException("Unrecognized transaction type!");
 	}
+	return true;
 }
 
 void ClientContext::RunTransactionStatement(const TransactionInfo &info) {

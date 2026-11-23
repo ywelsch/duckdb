@@ -24,9 +24,11 @@ class DatabaseInstance;
 class SecretManager;
 class SecretStorage;
 struct DatabaseModificationType;
+class InterruptState;
 class Transaction;
 
-enum class TransactionState { UNCOMMITTED, COMMITTED, ROLLED_BACK };
+//! COMMITTING: the commit has been published and waits for its durability (see MetaTransaction::TryCommit)
+enum class TransactionState { UNCOMMITTED, COMMITTING, COMMITTED, ROLLED_BACK };
 
 struct TransactionReference {
 	explicit TransactionReference(Transaction &transaction_p)
@@ -62,6 +64,9 @@ public:
 	void RemoveTransaction(AttachedDatabase &db);
 
 	ErrorData Commit(ClientContext &context);
+	//! Commits like Commit, but returns false while a database's commit waits for its durability, after arranging
+	//! for the interrupt state to be called back. Must be called again until it returns true
+	bool TryCommit(ClientContext &context, const InterruptState &interrupt_state, ErrorData &error);
 	void Rollback(ClientContext &context);
 	// Finalize the transaction after a COMMIT of ROLLBACK.
 	void Finalize(ClientContext &context);
@@ -81,6 +86,8 @@ public:
 	void DetachDatabase(AttachedDatabase &database);
 
 private:
+	bool CommitInternal(ClientContext &context, optional_ptr<const InterruptState> interrupt_state, ErrorData &result);
+
 	friend class SecretManager;
 
 	//! Lock to prevent all_transactions and transactions from getting out of sync.
