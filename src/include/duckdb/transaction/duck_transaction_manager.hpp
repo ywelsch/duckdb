@@ -142,10 +142,10 @@ private:
 	bool FinishParkedCommit(DuckTransaction &transaction, optional_ptr<const InterruptState> interrupt_state,
 	                        ErrorData &error);
 	//! Sync the WAL up to the offset as one of the running syncs, then advance the durable bound, wake the parked
-	//! commits that are done or should sync themselves, and remove `committer`. Called without the transaction
-	//! lock; returns the sync's error
-	ErrorData SyncCommits(WriteAheadLog &wal, idx_t offset, optional_ptr<DuckTransaction> committer,
-	                      bool store_committer);
+	//! commits, and remove `committer`. Called with the transaction lock that decided to sync, which it releases;
+	//! returns the sync's error
+	ErrorData SyncCommits(unique_lock<mutex> &t_lock, WriteAheadLog &wal, idx_t offset,
+	                      optional_ptr<DuckTransaction> committer, bool store_committer);
 
 	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
 	bool HasUnsyncedCommits();
@@ -191,8 +191,8 @@ private:
 	VisibilityBound durable_bound;
 	//! Signalled when running_syncs drops to zero
 	std::condition_variable durability_cv;
-	//! Threads between deciding to sync the WAL for a published commit and completing that sync. Commits park only
-	//! while one is running, since the last one to complete wakes the parked commits it did not cover
+	//! Threads inside SyncCommits. A commit parks only while one runs, as the last one to end wakes every parked
+	//! commit; the drain waits for none to run before it syncs itself or the WAL is replaced
 	idx_t running_syncs = 0;
 	//! A commit before this bound that is not durable never becomes durable: a sync of its WAL failed with
 	//! sync_failure. Only ever advances
