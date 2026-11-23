@@ -124,39 +124,13 @@ bool MetaTransaction::TryCommit(ClientContext &context, const InterruptState &in
 }
 
 bool MetaTransaction::CommitInternal(ClientContext &context, optional_ptr<const InterruptState> interrupt_state,
-                                     ErrorData &result) {
+                                     ErrorData &error) {
 #ifdef DEBUG
 	reference_set_t<AttachedDatabase> committed_tx;
 #endif
-	if (!commit_cursor.IsValid()) {
-		commit_cursor = all_transactions.size();
-	}
-	while (true) {
-		if (pending_commit) {
-			ErrorData error;
-			try {
-				if (!interrupt_state) {
-					error = pending_commit->Finish();
-				} else if (!pending_commit->TryFinish(*interrupt_state, error)) {
-					return false;
-				}
-			} catch (std::exception &ex) {
-				error = ErrorData(ex);
-			}
-			auto &db = *pending_database;
-			pending_commit.reset();
-			pending_database = nullptr;
-			if (error.HasError()) {
-				commit_error.Merge(db.ScopeFatalError(error));
-				transactions.find(db)->second.state = TransactionState::ROLLED_BACK;
-			}
-		}
-		if (commit_cursor.GetIndex() == 0) {
-			break;
-		}
-		// commit transactions in reverse order
-		auto i = commit_cursor.GetIndex();
-		commit_cursor = i - 1;
+	// commit transactions in reverse order. Called again after a commit waited for its durability, this skips the
+	// databases that are done and finishes the waiting one; no earlier database failed, or it would not have waited
+	for (idx_t i = all_transactions.size(); i > 0; i--) {
 		auto &db = all_transactions[i - 1].get();
 		auto entry = transactions.find(db);
 		if (entry == transactions.end()) {
@@ -172,44 +146,41 @@ bool MetaTransaction::CommitInternal(ClientContext &context, optional_ptr<const 
 
 		auto &transaction_manager = db.GetTransactionManager();
 		auto &transaction_ref = entry->second;
-		if (ValidChecker::IsInvalidated(db)) {
-			commit_error.Merge(ErrorData(IOException("%s", ValidChecker::InvalidatedMessage(db))));
+		if (transaction_ref.state == TransactionState::COMMITTED ||
+		    transaction_ref.state == TransactionState::ROLLED_BACK) {
 			continue;
 		}
-		if (transaction_ref.state != TransactionState::UNCOMMITTED) {
+		if (transaction_ref.state == TransactionState::UNCOMMITTED && ValidChecker::IsInvalidated(db)) {
+			error.Merge(ErrorData(IOException("%s", ValidChecker::InvalidatedMessage(db))));
 			continue;
 		}
 		auto &transaction = transaction_ref.transaction;
 		try {
-			if (commit_error.HasError()) {
+			if (error.HasError()) {
 				// Rollback due to previous error.
+				D_ASSERT(transaction_ref.state == TransactionState::UNCOMMITTED);
 				transaction_manager.RollbackTransaction(context, transaction);
 				transaction_ref.state = TransactionState::ROLLED_BACK;
-			} else if (interrupt_state) {
-				// Commit the transaction, possibly leaving its wait for durability to the top of the loop.
-				unique_ptr<PendingCommit> pending;
-				auto error =
-				    db.ScopeFatalError(transaction_manager.CommitTransactionDeferred(context, transaction, pending));
-				transaction_ref.state = error.HasError() ? TransactionState::ROLLED_BACK : TransactionState::COMMITTED;
-				commit_error.Merge(error);
-				if (pending) {
-					pending_commit = std::move(pending);
-					pending_database = db;
-				}
-			} else {
-				// Commit the transaction.
-				auto error = db.ScopeFatalError(transaction_manager.CommitTransaction(context, transaction));
-				transaction_ref.state = error.HasError() ? TransactionState::ROLLED_BACK : TransactionState::COMMITTED;
-				commit_error.Merge(error);
+				continue;
 			}
+			// Commit the transaction.
+			ErrorData commit_error;
+			if (!interrupt_state) {
+				commit_error = transaction_manager.CommitTransaction(context, transaction);
+			} else if (!transaction_manager.TryCommitTransaction(context, transaction, *interrupt_state,
+			                                                     commit_error)) {
+				transaction_ref.state = TransactionState::COMMITTING;
+				return false;
+			}
+			commit_error = db.ScopeFatalError(std::move(commit_error));
+			transaction_ref.state =
+			    commit_error.HasError() ? TransactionState::ROLLED_BACK : TransactionState::COMMITTED;
+			error.Merge(commit_error);
 		} catch (std::exception &ex) {
-			commit_error.Merge(db.ScopeFatalError(ErrorData(ex)));
+			error.Merge(db.ScopeFatalError(ErrorData(ex)));
 			transaction_ref.state = TransactionState::ROLLED_BACK;
 		}
 	}
-	result = std::move(commit_error);
-	commit_error = ErrorData();
-	commit_cursor = optional_idx();
 	return true;
 }
 

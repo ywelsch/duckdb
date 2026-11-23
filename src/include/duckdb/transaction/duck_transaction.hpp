@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/transaction/transaction.hpp"
+#include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -25,7 +26,6 @@ class StorageLockKey;
 class StorageCommitState;
 struct UndoBufferProperties;
 struct WrittenRows;
-struct ParkedCommit;
 
 struct CommitInfo {
 	transaction_t commit_id;
@@ -52,8 +52,13 @@ public:
 	idx_t wal_sync_offset = 0;
 	//! The committed catalog version just before this commit published
 	idx_t catalog_version_before_commit = 0;
-	//! Set when the committer left the wait for durability to another committer's sync (see ParkedCommit)
-	shared_ptr<ParkedCommit> parked_commit;
+	//! While the committer waits for durability without blocking its thread: called back once the commit is durable
+	//! or its sync failed, or once no sync runs anymore. Guarded by the transaction lock
+	InterruptState sync_callback;
+	//! Set when a sync of the WAL the commit was published to failed
+	ErrorData sync_error;
+	//! Passed to RemoveTransaction by the committer that finishes a parked commit
+	bool store_after_commit = false;
 
 	atomic<idx_t> catalog_version;
 

@@ -25,10 +25,10 @@ class SecretManager;
 class SecretStorage;
 struct DatabaseModificationType;
 class InterruptState;
-class PendingCommit;
 class Transaction;
 
-enum class TransactionState { UNCOMMITTED, COMMITTED, ROLLED_BACK };
+//! COMMITTING: the commit has been published and waits for its durability (see MetaTransaction::TryCommit)
+enum class TransactionState { UNCOMMITTED, COMMITTING, COMMITTED, ROLLED_BACK };
 
 struct TransactionReference {
 	explicit TransactionReference(Transaction &transaction_p)
@@ -108,12 +108,6 @@ private:
 	identifier_map_t<reference<AttachedDatabase>> used_databases;
 	//! Secrets that only live for the duration of this transaction.
 	unique_ptr<SecretStorage> transaction_secret_storage;
-	//! The commit in progress: the databases of all_transactions left to commit, the error so far, and the
-	//! database whose commit waits for its durability
-	optional_idx commit_cursor;
-	ErrorData commit_error;
-	optional_ptr<AttachedDatabase> pending_database;
-	unique_ptr<PendingCommit> pending_commit;
 };
 
 } // namespace duckdb
