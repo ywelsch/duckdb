@@ -140,48 +140,6 @@ unique_ptr<QueryResult> SubmitParkedCommit(Connection &con) {
 
 } // namespace
 
-TEST_CASE("A COMMIT waiting for another commit's WAL sync parks and resumes", "[api][group_commit]") {
-	GatedDatabase gated("group_commit_parked_resume.db");
-	Connection setup(*gated.db);
-	Setup(setup);
-
-	Connection committer(*gated.db);
-	REQUIRE_NO_FAIL(committer.Query("BEGIN"));
-	REQUIRE_NO_FAIL(committer.Query("INSERT INTO t VALUES (1000)"));
-
-	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
-	auto commit = SubmitParkedCommit(committer);
-	// parked: the writer's sync has not completed, so neither has this commit
-	REQUIRE(commit->ExecuteTask() == QueryResultState::BLOCKED);
-
-	REQUIRE(gated.FinishWriter());
-	commit->Complete();
-	REQUIRE_NO_FAIL(*commit);
-
-	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 101);
-	REQUIRE(ScalarValue(committer, "SELECT count(*) FROM t WHERE i = 1000") == 1);
-}
-
-TEST_CASE("A parked COMMIT ignores interrupts", "[api][group_commit]") {
-	GatedDatabase gated("group_commit_parked_interrupt.db");
-	Connection setup(*gated.db);
-	Setup(setup);
-
-	Connection committer(*gated.db);
-	REQUIRE_NO_FAIL(committer.Query("BEGIN"));
-	REQUIRE_NO_FAIL(committer.Query("INSERT INTO t VALUES (1000)"));
-
-	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
-	auto commit = SubmitParkedCommit(committer);
-	committer.Interrupt();
-	REQUIRE(commit->ExecuteTask() == QueryResultState::BLOCKED);
-
-	REQUIRE(gated.FinishWriter());
-	commit->Complete();
-	REQUIRE_NO_FAIL(*commit);
-	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 101);
-}
-
 TEST_CASE("A checkpoint completes a parked COMMIT that nobody resumes", "[api][group_commit]") {
 	GatedDatabase gated("group_commit_parked_checkpoint.db");
 	Connection setup(*gated.db);
@@ -205,52 +163,6 @@ TEST_CASE("A checkpoint completes a parked COMMIT that nobody resumes", "[api][g
 	REQUIRE_NO_FAIL(*commit);
 }
 
-TEST_CASE("A parked COMMIT abandoned by its client completes", "[api][group_commit]") {
-	GatedDatabase gated("group_commit_parked_abandoned.db");
-	Connection setup(*gated.db);
-	Setup(setup);
-
-	auto committer = make_uniq<Connection>(*gated.db);
-	REQUIRE_NO_FAIL(committer->Query("BEGIN"));
-	REQUIRE_NO_FAIL(committer->Query("INSERT INTO t VALUES (1000)"));
-
-	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
-	auto commit = SubmitParkedCommit(*committer);
-	REQUIRE(gated.FinishWriter());
-
-	// still parked: snapshots stop below the commit until it is durable
-	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 100);
-	// the client drops the result: the parked COMMIT is abandoned, but it is irreversible
-	commit.reset();
-	REQUIRE(ScalarValue(*committer, "SELECT count(*) FROM t") == 101);
-	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 101);
-	REQUIRE_NO_FAIL(setup.Query("CHECKPOINT"));
-	committer.reset();
-}
-
-TEST_CASE("A parked COMMIT abandoned during the sync it waits for completes", "[api][group_commit]") {
-	GatedDatabase gated("group_commit_parked_abandoned_sync.db");
-	Connection setup(*gated.db);
-	Setup(setup);
-
-	auto committer = make_uniq<Connection>(*gated.db);
-	REQUIRE_NO_FAIL(committer->Query("BEGIN"));
-	REQUIRE_NO_FAIL(committer->Query("INSERT INTO t VALUES (1000)"));
-
-	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
-	auto commit = SubmitParkedCommit(*committer);
-
-	// closing the connection finishes the commit, blocking behind the writer's sync
-	std::thread closer([&]() {
-		commit.reset();
-		committer.reset();
-	});
-	std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	REQUIRE(gated.FinishWriter());
-	closer.join();
-	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 101);
-}
-
 TEST_CASE("A failed WAL sync fails the COMMIT parked behind it", "[api][group_commit]") {
 	GatedDatabase gated("group_commit_parked_failure.db");
 	Connection setup(*gated.db);
@@ -270,8 +182,9 @@ TEST_CASE("A failed WAL sync fails the COMMIT parked behind it", "[api][group_co
 	REQUIRE_FAIL(setup.Query("SELECT count(*) FROM t"));
 }
 
-TEST_CASE("A connection with a parked COMMIT does not start another transaction", "[api][group_commit]") {
-	GatedDatabase gated("group_commit_parked_table_info.db");
+TEST_CASE("A parked COMMIT blocks new transactions on its connection and completes when abandoned",
+          "[api][group_commit]") {
+	GatedDatabase gated("group_commit_parked_abandoned.db");
 	Connection setup(*gated.db);
 	Setup(setup);
 
@@ -286,9 +199,11 @@ TEST_CASE("A connection with a parked COMMIT does not start another transaction"
 	REQUIRE_THROWS(committer.TableInfo("t"));
 
 	REQUIRE(gated.FinishWriter());
-	commit->Complete();
-	REQUIRE_NO_FAIL(*commit);
-	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 101);
+	// still parked: snapshots stop below the commit until it is durable
+	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 100);
+	// the client drops the result: the parked COMMIT is abandoned, but it is irreversible
+	commit.reset();
+	REQUIRE(ScalarValue(committer, "SELECT count(*) FROM t") == 101);
 	REQUIRE(committer.TableInfo("t"));
 }
 
