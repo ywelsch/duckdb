@@ -309,9 +309,10 @@ void LocalTableStorage::Rollback() {
 		}
 		collection->collection->CommitDropTable(drop_state);
 	}
-	optimistic_collections.clear();
 	row_groups->collection->CommitDropTable(drop_state);
+	// the drop state refers to the segments of the collections
 	drop_state.FinalizeCommit();
+	optimistic_collections.clear();
 }
 
 //===--------------------------------------------------------------------===//

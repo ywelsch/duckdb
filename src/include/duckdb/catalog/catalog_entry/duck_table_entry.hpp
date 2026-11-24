@@ -49,7 +49,6 @@ public:
 
 	void SetAsRoot() override;
 
-	void CommitAlter(string &column_name, CommitDropState &drop_state);
 	void CommitDrop(CommitDropState &drop_state);
 
 	//! Returns the backing index OIDs of UNIQUE constraints that are not in prev_table.

@@ -279,6 +279,10 @@ struct CheckpointBlockIdDropper : public BlockIdVisitor {
 	void Visit(block_id_t block_id) override {
 		manager.MarkBlockAsModified(block_id);
 	}
+	bool VisitSegment(const ColumnSegment &segment) override {
+		segment.DropFromImage(manager);
+		return true;
+	}
 
 	BlockManager &manager;
 };
@@ -405,6 +409,11 @@ struct CheckpointBlockIdMarker : public BlockIdVisitor {
 
 	void Visit(block_id_t block_id) override {
 		manager.MarkBlockAsCheckpointed(block_id);
+	}
+	bool VisitSegment(const ColumnSegment &segment) override {
+		// a segment that a checkpoint of another table version dropped is in this image again
+		segment.ResurrectInImage(manager);
+		return false;
 	}
 
 	BlockManager &manager;

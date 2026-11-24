@@ -146,6 +146,10 @@ public:
 	}
 
 	void VisitBlockIds(BlockIdVisitor &visitor) const;
+	//! The segment leaves the image: its blocks are freed on disk but not reused while the segment lives
+	void DropFromImage(BlockManager &manager) const;
+	//! The segment is written into an image again after it left one
+	void ResurrectInImage(BlockManager &manager) const;
 
 	const BaseStatistics &GetStats() const {
 		return stats.statistics;
@@ -192,6 +196,11 @@ private:
 	unique_ptr<CompressedSegmentState> segment_state;
 	//! The statistics for the segment
 	SegmentStatistics stats;
+	//! Guards the fields below
+	mutable mutex image_lock;
+	//! The blocks this segment reserved when it left the image, released when it is destroyed
+	mutable vector<block_id_t> reserved_blocks;
+	mutable optional_ptr<BlockManager> reserved_manager;
 };
 
 } // namespace duckdb

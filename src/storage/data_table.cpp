@@ -1707,6 +1707,13 @@ idx_t DataTable::GetNextRowId() const {
 	return row_groups->GetNextRowId();
 }
 
+void DataTable::CommitReplace(DataTable &new_version, CommitDropState &drop_state) {
+	if (row_groups == new_version.row_groups) {
+		return;
+	}
+	row_groups->CommitReplace(*new_version.row_groups, drop_state);
+}
+
 void DataTable::CommitDropTable(CommitDropState &drop_state) {
 	row_groups->CommitDropTable(drop_state);
 }

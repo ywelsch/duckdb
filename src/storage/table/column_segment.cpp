@@ -123,6 +123,53 @@ ColumnSegment::ColumnSegment(ColumnSegment &other)
 }
 
 ColumnSegment::~ColumnSegment() {
+	if (!reserved_manager) {
+		return;
+	}
+	for (auto block_id : reserved_blocks) {
+		reserved_manager->ReleaseSegmentBlock(block_id);
+	}
+}
+
+namespace {
+
+struct SegmentBlockCollector : public BlockIdVisitor {
+	void Visit(block_id_t block_id) override {
+		block_ids.push_back(block_id);
+	}
+	vector<block_id_t> block_ids;
+};
+
+} // namespace
+
+void ColumnSegment::DropFromImage(BlockManager &manager) const {
+	lock_guard<mutex> guard(image_lock);
+	if (reserved_manager) {
+		// left the image already (e.g. a checkpoint of another table version that shares it)
+		return;
+	}
+	SegmentBlockCollector collector;
+	VisitBlockIds(collector);
+	if (collector.block_ids.empty()) {
+		return;
+	}
+	for (auto block_id : collector.block_ids) {
+		manager.DropSegmentBlock(block_id);
+	}
+	reserved_blocks = std::move(collector.block_ids);
+	reserved_manager = &manager;
+}
+
+void ColumnSegment::ResurrectInImage(BlockManager &manager) const {
+	lock_guard<mutex> guard(image_lock);
+	if (!reserved_manager) {
+		return;
+	}
+	for (auto block_id : reserved_blocks) {
+		manager.ResurrectSegmentBlock(block_id);
+	}
+	reserved_blocks.clear();
+	reserved_manager = nullptr;
 }
 
 //===--------------------------------------------------------------------===//
@@ -303,6 +350,9 @@ DataPointer ColumnSegment::GetDataPointer(idx_t row_start) {
 // Drop Segment
 //===--------------------------------------------------------------------===//
 void ColumnSegment::VisitBlockIds(BlockIdVisitor &visitor) const {
+	if (visitor.VisitSegment(*this)) {
+		return;
+	}
 	if (block_id != INVALID_BLOCK) {
 		visitor.Visit(block_id);
 	}

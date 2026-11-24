@@ -76,6 +76,8 @@ private:
 	optional_idx last_seen_checkpoint;
 	//! The amount of row groups the checkpoint is processing
 	optional_idx checkpoint_row_group_count;
+	//! Lock for appending to the table, shared by its versions: SET NOT NULL shares the row groups
+	mutex append_lock;
 };
 
 } // namespace duckdb

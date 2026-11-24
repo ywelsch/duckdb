@@ -22,6 +22,7 @@
 #include "duckdb/storage/checkpoint/checkpoint_options.hpp"
 
 namespace duckdb {
+struct BlockIdVisitor;
 class AsyncTask;
 class AttachedDatabase;
 class BlockManager;
@@ -177,6 +178,8 @@ public:
 	                               ExpressionExecutor &executor, ColumnStatistics &new_column_stats);
 	unique_ptr<RowGroup> RemoveColumn(RowGroupCollection &collection, idx_t removed_column);
 
+	//! Visits the blocks of every column, loading the columns
+	void VisitBlockIds(BlockIdVisitor &visitor);
 	//! Accumulates this row group's on-disk blocks into the drop state.
 	void CommitDrop(CommitDropState &drop_state);
 	//! Accumulates the given column's on-disk blocks into the drop state.
@@ -340,6 +343,10 @@ private:
 
 	bool HasUnloadedDeletes() const;
 	unique_ptr<RowGroup> CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count);
+	//! Loads what an ALTER copy of this row group shares
+	void PrepareAlterCopy();
+	//! Drops the metadata pointers copied from another row group
+	void ForgetMetadata();
 
 private:
 	mutable mutex row_group_lock;

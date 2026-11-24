@@ -100,6 +100,9 @@ public:
 	void MarkBlockAsUsed(block_id_t block_id) override;
 	//! Mark a block as modified (re-writeable after a checkpoint)
 	void MarkBlockAsModified(block_id_t block_id) override;
+	void DropSegmentBlock(block_id_t block_id) override;
+	void ReleaseSegmentBlock(block_id_t block_id) override;
+	void ResurrectSegmentBlock(block_id_t block_id) override;
 	//! Increase the reference count of a block. The block should hold at least one reference
 	void IncreaseBlockReferenceCount(block_id_t block_id) override;
 	//! UnregisterBlock, only accepts non-temporary block ids
@@ -201,6 +204,7 @@ private:
 	block_id_t GetFreeBlockIdInternal(FreeBlockType type);
 	//! Adds a free block to the free_list, returns true if it was added to the regular free_list
 	bool AddFreeBlock(unique_lock<mutex> &lock, block_id_t block_id);
+	void MarkBlockAsModifiedInternal(unique_lock<mutex> &lock, block_id_t block_id);
 	//! Move the block from free_blocks_in_use to the free list, if present
 	void ReleaseFreeBlockInUse(unique_lock<mutex> &lock, block_id_t id);
 	//! Returns true, if the block is in the free list. Takes the lock (verification only).
@@ -227,6 +231,8 @@ private:
 	set<block_id_t> free_list;
 	//! The list of blocks that have been freed, but cannot yet be re-used because they are still in-use
 	set<block_id_t> free_blocks_in_use;
+	//! For each block, the number of live segments that left the image but still point at it
+	unordered_map<block_id_t, idx_t> segment_reservations;
 	//! Blocks in use that no written header includes yet, by commit id (MAX_TRANSACTION_ID while uncommitted)
 	unordered_map<block_id_t, transaction_t> newly_used_blocks;
 	//! The list of multi-use blocks (i.e. blocks that have >1 reference in the file)

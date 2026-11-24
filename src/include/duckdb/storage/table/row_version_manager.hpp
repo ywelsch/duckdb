@@ -58,6 +58,8 @@ public:
 	static shared_ptr<RowVersionManager> Deserialize(MetaBlockPointer delete_pointer, MetadataManager &manager);
 
 	bool HasUnserializedChanges(VisibilityBound bound);
+	//! The next checkpoint writes the version info again instead of reusing what it wrote before
+	void ForceCheckpoint();
 	bool HasDeletes();
 	bool HasUncommittedChanges();
 	vector<MetaBlockPointer> GetStoragePointers();

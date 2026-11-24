@@ -243,6 +243,8 @@ public:
 	void PublishCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats);
 	//! Accumulates the table's on-disk blocks for reclamation into the drop state.
 	void CommitDropTable(CommitDropState &drop_state);
+	//! Registers the segments of this replaced version that new_version does not share
+	void CommitReplace(DataTable &new_version, CommitDropState &drop_state);
 	//! Accumulates the column's on-disk blocks for reclamation into the drop state.
 	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state);
 
@@ -344,7 +346,7 @@ private:
 	//! The set of physical columns stored by this DataTable
 	vector<ColumnDefinition> column_definitions;
 	//! Lock for appending entries to the table
-	mutex append_lock;
+	mutex &append_lock {info->append_lock};
 	//! The row groups of the table
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table

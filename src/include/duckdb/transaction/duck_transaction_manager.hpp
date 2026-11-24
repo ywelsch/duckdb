@@ -72,6 +72,8 @@ public:
 	void ResetActiveCheckpoint(bool checkpoint_succeeded);
 	//! Hands dropped tables over to the running checkpoint, which frees them. False if none runs: the commit does
 	bool DeferDroppedTables(const vector<shared_ptr<DataTable>> &tables);
+	//! Hands table versions an ALTER replaced over to the running checkpoint. False if none runs: the commit does
+	bool DeferReplacedStorage(const vector<pair<shared_ptr<DataTable>, shared_ptr<DataTable>>> &versions);
 	//! The next start time, and the earliest of the active transactions: the same if none, 0 if a cleanup waits
 	void GetStartTimes(transaction_t &next_start, transaction_t &lowest_active_start);
 
@@ -164,6 +166,7 @@ private:
 	mutex deferred_tables_lock;
 	//! The dropped tables that the running checkpoint frees once it has written its header
 	vector<shared_ptr<DataTable>> deferred_tables;
+	vector<pair<shared_ptr<DataTable>, shared_ptr<DataTable>>> deferred_replaced;
 	//! The lowest start time of the transactions that stayed active when the last one ended, checkpoints aside
 	atomic<transaction_t> lowest_remaining_start;
 	//! The last commit timestamp

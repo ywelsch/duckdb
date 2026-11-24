@@ -992,6 +992,66 @@ void SingleFileBlockManager::MarkBlockAsUsed(block_id_t block_id) {
 
 void SingleFileBlockManager::MarkBlockAsModified(block_id_t block_id) {
 	unique_lock<mutex> lock(single_file_block_lock);
+	MarkBlockAsModifiedInternal(lock, block_id);
+}
+
+void SingleFileBlockManager::DropSegmentBlock(block_id_t block_id) {
+	unique_lock<mutex> lock(single_file_block_lock);
+	// before the free below: a reserved block is listed as free but not reused
+	segment_reservations[block_id]++;
+	MarkBlockAsModifiedInternal(lock, block_id);
+}
+
+void SingleFileBlockManager::ReleaseSegmentBlock(block_id_t block_id) {
+	unique_lock<mutex> lock(single_file_block_lock);
+	auto entry = segment_reservations.find(block_id);
+	if (entry == segment_reservations.end()) {
+		throw InternalException("ReleaseSegmentBlock called with block id %d that is not reserved", block_id);
+	}
+	if (--entry->second > 0) {
+		return;
+	}
+	segment_reservations.erase(entry);
+	if (free_blocks_in_use.find(block_id) != free_blocks_in_use.end() && !TryGetBlock(block_id)) {
+		ReleaseFreeBlockInUse(lock, block_id);
+	}
+}
+
+void SingleFileBlockManager::ResurrectSegmentBlock(block_id_t block_id) {
+	unique_lock<mutex> lock(single_file_block_lock);
+	auto entry = segment_reservations.find(block_id);
+	if (entry == segment_reservations.end()) {
+		throw InternalException("ResurrectSegmentBlock called with block id %d that is not reserved", block_id);
+	}
+	if (--entry->second == 0) {
+		segment_reservations.erase(entry);
+	}
+	// the block is in the image again: undo the free, or add a reference to a block other segments still use
+	if (modified_blocks.erase(block_id) > 0) {
+		return;
+	}
+	if (free_blocks_pending_reuse.erase(block_id) > 0) {
+		for (auto &batch : pending_reuse_batches) {
+			auto &blocks = batch.second.blocks;
+			for (idx_t i = 0; i < blocks.size(); i++) {
+				if (blocks[i] == block_id) {
+					blocks.erase_at(i);
+					break;
+				}
+			}
+		}
+		return;
+	}
+	if (free_blocks_in_use.erase(block_id) > 0) {
+		return;
+	}
+	if (free_list.find(block_id) != free_list.end()) {
+		throw InternalException("ResurrectSegmentBlock called with block id %d that was reused", block_id);
+	}
+	IncreaseBlockReferenceCountInternal(block_id);
+}
+
+void SingleFileBlockManager::MarkBlockAsModifiedInternal(unique_lock<mutex> &lock, block_id_t block_id) {
 	D_ASSERT(block_id >= 0);
 	D_ASSERT(block_id < max_block);
 
@@ -1350,6 +1410,11 @@ bool SingleFileBlockManager::AddFreeBlock(unique_lock<mutex> &lock, block_id_t b
 	if (!lock.owns_lock()) {
 		throw InternalException("AddFreeBlock must be called while holding the lock");
 	}
+	if (segment_reservations.find(block_id) != segment_reservations.end()) {
+		// a live segment still points at the block: free on disk, not reused until ReleaseSegmentBlock
+		free_blocks_in_use.insert(block_id);
+		return false;
+	}
 	shared_ptr<BlockHandle> block = TryGetBlock(block_id);
 	if (!block) {
 		// the block does not exist
@@ -1525,6 +1590,10 @@ void SingleFileBlockManager::FileSync() {
 void SingleFileBlockManager::ReleaseFreeBlockInUse(unique_lock<mutex> &lock, block_id_t id) {
 	if (!lock.owns_lock()) {
 		throw InternalException("ReleaseFreeBlockInUse must be called while holding the lock");
+	}
+	if (segment_reservations.find(id) != segment_reservations.end()) {
+		// a live segment that left the image still points at the block
+		return;
 	}
 	// check if the block is part of the newly free list
 	auto entry = free_blocks_in_use.find(id);

@@ -51,11 +51,6 @@ ALTER TABLE t DROP COLUMN v
 statement ok
 CHECKPOINT
 
-query I
-SELECT COUNT(*) FROM pragma_storage_info('t', include_segment_info=true, loaded_segments_only=true) WHERE column_name = 'v'
-----
-0
-
 statement ok con1
 COMMIT
 

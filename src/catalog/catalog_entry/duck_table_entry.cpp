@@ -1461,30 +1461,6 @@ void DuckTableEntry::SetAsRoot() {
 	storage->SetTableName(name);
 }
 
-void DuckTableEntry::CommitAlter(string &column_name, CommitDropState &drop_state) {
-	D_ASSERT(!column_name.empty());
-	optional_idx logical_column_idx;
-	idx_t column_position = 0;
-	for (auto &col : columns.Logical()) {
-		if (col.Name() == column_name) {
-			// No need to alter storage, removed column is generated column
-			if (col.Generated()) {
-				return;
-			}
-			logical_column_idx = column_position;
-			break;
-		}
-		column_position++;
-	}
-
-	if (!logical_column_idx.IsValid()) {
-		return;
-	}
-	auto logical_column_index = LogicalIndex(logical_column_idx.GetIndex());
-	auto column_index = columns.LogicalToPhysical(logical_column_index).index;
-	storage->CommitDropColumn(column_index, drop_state);
-}
-
 void DuckTableEntry::CommitDrop(CommitDropState &drop_state) {
 	drop_state.DropTable(storage);
 }

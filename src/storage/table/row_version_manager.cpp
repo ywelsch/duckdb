@@ -349,6 +349,14 @@ shared_ptr<RowVersionManager> RowVersionManager::Deserialize(MetaBlockPointer de
 	return version_info;
 }
 
+void RowVersionManager::ForceCheckpoint() {
+	lock_guard<mutex> lock(version_lock);
+	oldest_uncheckpointed_delete_commit = 0;
+	if (!newest_uncheckpointed_delete_commit.IsValid()) {
+		newest_uncheckpointed_delete_commit = 0;
+	}
+}
+
 bool RowVersionManager::HasUnserializedChanges(VisibilityBound bound) {
 	lock_guard<mutex> lock(version_lock);
 	return oldest_uncheckpointed_delete_commit.IsValid() && oldest_uncheckpointed_delete_commit.GetIndex() < bound;

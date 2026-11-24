@@ -70,6 +70,16 @@ public:
 	//! Increase the reference count of a block. The block should hold at least one reference before this method is
 	//! called.
 	virtual void IncreaseBlockReferenceCount(block_id_t block_id) = 0;
+	//! A segment leaves the image: like MarkBlockAsModified, but the block is not reused while the segment lives
+	virtual void DropSegmentBlock(block_id_t block_id) {
+		MarkBlockAsModified(block_id);
+	}
+	//! A segment that left the image is destroyed: its block can be reused once nothing else holds it
+	virtual void ReleaseSegmentBlock(block_id_t block_id) {
+	}
+	//! A segment that left the image is written into an image again
+	virtual void ResurrectSegmentBlock(block_id_t block_id) {
+	}
 	//! Get the first meta block id
 	virtual idx_t GetMetaBlock() = 0;
 	//! Read the content of the block from disk
@@ -223,10 +233,16 @@ private:
 	optional_idx block_header_size;
 };
 
+class ColumnSegment;
+
 struct BlockIdVisitor {
 	virtual ~BlockIdVisitor() = default;
 
 	virtual void Visit(block_id_t block_id) = 0;
+	//! Called for each segment before its block ids, returns true if the segment was handled as a whole
+	virtual bool VisitSegment(const ColumnSegment &segment) {
+		return false;
+	}
 };
 
 } // namespace duckdb

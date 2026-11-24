@@ -17,6 +17,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
+class ColumnSegment;
 class BlockManager;
 class CatalogEntry;
 class TableIndexList;
@@ -49,8 +50,14 @@ public:
 public:
 	//! Register an on-disk block to mark as modified during FinalizeCommit.
 	void DropBlock(block_id_t block_id);
+	//! Register a segment that leaves the image, marked during FinalizeCommit
+	void DropSegment(const ColumnSegment &segment);
 	//! Register a dropped table, whose on-disk blocks are registered when the commit is finalized.
 	void DropTable(shared_ptr<DataTable> table);
+	//! Register a table version an ALTER replaced: its segments the new version lacks leave the image at the commit
+	void DropReplacedStorage(shared_ptr<DataTable> old_version, shared_ptr<DataTable> new_version);
+	//! Registers the segments of replaced versions. Marks nothing, so a failure leaves nothing freed
+	void FreeReplacedStorage(const vector<pair<shared_ptr<DataTable>, shared_ptr<DataTable>>> &versions);
 	//! Registers the on-disk blocks of dropped tables. Marks nothing, so a failure leaves nothing freed
 	void FreeTables(const vector<shared_ptr<DataTable>> &tables);
 	//! Register an index to be removed from a table's index list during FinalizeCommit. Index removal will drop in
@@ -69,6 +76,8 @@ private:
 	vector<block_id_t> dropped_block_ids;
 	vector<PendingIndexRemoval> pending_index_removals;
 	vector<shared_ptr<DataTable>> dropped_tables;
+	vector<reference<const ColumnSegment>> dropped_segments;
+	vector<pair<shared_ptr<DataTable>, shared_ptr<DataTable>>> replaced_versions;
 };
 
 struct IndexDataRemover {

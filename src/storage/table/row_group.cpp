@@ -429,6 +429,24 @@ bool RowGroup::InitializeScan(CollectionScanState &state, SegmentNode<RowGroup> 
 	return true;
 }
 
+void RowGroup::PrepareAlterCopy() {
+	GetColumns();
+	auto vinfo = GetVersionInfo();
+	if (vinfo) {
+		// a checkpoint of this version may free what the deletes point at before the copy is written
+		vinfo->ForceCheckpoint();
+	}
+}
+
+void RowGroup::ForgetMetadata() {
+	// a checkpoint of the version this was copied from may free that metadata: the copy writes its own
+	column_pointers.clear();
+	has_metadata_blocks = false;
+	extra_metadata_blocks.clear();
+	has_per_column_metadata_blocks = false;
+	per_column_metadata_blocks = PerColumnMetadataBlocks();
+}
+
 unique_ptr<RowGroup> RowGroup::CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count) {
 	auto row_group = make_uniq<RowGroup>(new_collection, this->count);
 	row_group->version_info = version_info;
@@ -484,12 +502,8 @@ unique_ptr<RowGroup> RowGroup::AlterType(RowGroupCollection &new_collection, con
 	}
 	column_data->FinalizeAppend(nullptr, append_state);
 
-	auto supports_per_column_writes = new_collection.SupportsPerColumnWrites();
-	if (!supports_per_column_writes) {
-		// ensure all columns are loaded, as checkpointing will need to load them anyway, and it's better to fail-fast
-		// in case these don't fit in memory here
-		GetColumns();
-	}
+	// the copy shares loaded segments: a checkpoint of this version keeps their blocks while the copy lives
+	PrepareAlterCopy();
 	unique_lock<mutex> lock(row_group_lock);
 	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size());
 	// copy existing columns, but swap out the one at changed_idx
@@ -514,6 +528,7 @@ unique_ptr<RowGroup> RowGroup::AlterType(RowGroupCollection &new_collection, con
 		row_group->per_column_metadata_blocks = per_column_metadata_blocks;
 		row_group->per_column_metadata_blocks.ClearColumn(changed_idx);
 	}
+	row_group->ForgetMetadata();
 	lock.unlock();
 	row_group->Verify();
 	return row_group;
@@ -548,11 +563,8 @@ unique_ptr<RowGroup> RowGroup::AddColumn(RowGroupCollection &new_collection, Col
 		added_column->FinalizeAppend(nullptr, state);
 	}
 
-	if (!new_collection.SupportsPerColumnWrites()) {
-		// ensure all columns are loaded, as checkpointing will need to load them anyway, and it's better to fail-fast
-		// in case these don't fit in memory here
-		GetColumns();
-	}
+	// the copy shares loaded segments: a checkpoint of this version keeps their blocks while the copy lives
+	PrepareAlterCopy();
 
 	unique_lock<mutex> lock(row_group_lock);
 	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size() + 1);
@@ -574,6 +586,7 @@ unique_ptr<RowGroup> RowGroup::AddColumn(RowGroupCollection &new_collection, Col
 	if (row_group->is_loaded) {
 		row_group->is_loaded[columns.size()] = true;
 	}
+	row_group->ForgetMetadata();
 	lock.unlock();
 	row_group->Verify();
 	return row_group;
@@ -584,11 +597,8 @@ unique_ptr<RowGroup> RowGroup::RemoveColumn(RowGroupCollection &new_collection, 
 
 	D_ASSERT(removed_column < columns.size());
 
-	if (!new_collection.SupportsPerColumnWrites()) {
-		// ensure all columns are loaded, as checkpointing will need to load them anyway, and it's better to fail-fast
-		// in case these don't fit in memory here
-		GetColumns();
-	}
+	// the copy shares loaded segments: a checkpoint of this version keeps their blocks while the copy lives
+	PrepareAlterCopy();
 	unique_lock<mutex> lock(row_group_lock);
 	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size() - 1);
 	// copy over all columns except for the removed one
@@ -612,9 +622,16 @@ unique_ptr<RowGroup> RowGroup::RemoveColumn(RowGroupCollection &new_collection, 
 		// metadata block entries (keyed by column index) must shift down as well
 		row_group->per_column_metadata_blocks.RemoveColumn(removed_column);
 	}
+	row_group->ForgetMetadata();
 	lock.unlock();
 	row_group->Verify();
 	return row_group;
+}
+
+void RowGroup::VisitBlockIds(BlockIdVisitor &visitor) {
+	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
+		GetColumn(column_idx).VisitBlockIds(visitor);
+	}
 }
 
 void RowGroup::CommitDrop(CommitDropState &drop_state) {
@@ -629,6 +646,10 @@ struct BlockIdDropper : public BlockIdVisitor {
 
 	void Visit(block_id_t block_id) override {
 		drop_state.DropBlock(block_id);
+	}
+	bool VisitSegment(const ColumnSegment &segment) override {
+		drop_state.DropSegment(segment);
+		return true;
 	}
 
 	CommitDropState &drop_state;

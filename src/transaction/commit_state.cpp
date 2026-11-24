@@ -24,6 +24,7 @@
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/column_segment.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
@@ -42,8 +43,22 @@ void CommitDropState::RemoveIndex(TableIndexList &indexes, idx_t index_oid) {
 	pending_index_removals.push_back(PendingIndexRemoval {indexes, index_oid});
 }
 
+void CommitDropState::DropSegment(const ColumnSegment &segment) {
+	dropped_segments.push_back(segment);
+}
+
 void CommitDropState::DropTable(shared_ptr<DataTable> table) {
 	dropped_tables.push_back(std::move(table));
+}
+
+void CommitDropState::DropReplacedStorage(shared_ptr<DataTable> old_version, shared_ptr<DataTable> new_version) {
+	replaced_versions.emplace_back(std::move(old_version), std::move(new_version));
+}
+
+void CommitDropState::FreeReplacedStorage(const vector<pair<shared_ptr<DataTable>, shared_ptr<DataTable>>> &versions) {
+	for (auto &version : versions) {
+		version.first->CommitReplace(*version.second, *this);
+	}
 }
 
 void CommitDropState::FreeTables(const vector<shared_ptr<DataTable>> &tables) {
@@ -58,14 +73,23 @@ void CommitDropState::FinalizeCommit(DuckTransactionManager &transaction_manager
 		FreeTables(dropped_tables);
 	}
 	dropped_tables.clear();
+	// so does a running checkpoint that still writes the version an ALTER replaced
+	if (!transaction_manager.DeferReplacedStorage(replaced_versions)) {
+		FreeReplacedStorage(replaced_versions);
+	}
+	replaced_versions.clear();
 	FinalizeCommit();
 }
 
 void CommitDropState::FinalizeCommit() {
 	D_ASSERT(dropped_tables.empty());
+	D_ASSERT(replaced_versions.empty());
 	if (block_manager) {
 		for (auto block_id : dropped_block_ids) {
 			block_manager->MarkBlockAsModified(block_id);
+		}
+		for (auto &segment : dropped_segments) {
+			segment.get().DropFromImage(*block_manager);
 		}
 	}
 	// assert that !block_manager -> dropped_block_ids.empty()
@@ -75,11 +99,13 @@ void CommitDropState::FinalizeCommit() {
 		removal.indexes.get().RemoveIndex(removal.index_oid);
 	}
 	dropped_block_ids.clear();
+	dropped_segments.clear();
 	pending_index_removals.clear();
 }
 
 bool CommitDropState::Empty() const {
-	return dropped_block_ids.empty() && pending_index_removals.empty() && dropped_tables.empty();
+	return dropped_block_ids.empty() && pending_index_removals.empty() && dropped_tables.empty() &&
+	       dropped_segments.empty() && replaced_versions.empty();
 }
 
 //===--------------------------------------------------------------------===//
@@ -207,13 +233,15 @@ void CommitState::CommitEntryDrop(CatalogEntry &entry, data_ptr_t dataptr, Commi
 
 			switch (parent.type) {
 			case CatalogType::TABLE_ENTRY:
-				if (!column_name.empty()) {
-					D_ASSERT(entry.type != CatalogType::RENAMED_ENTRY);
-					auto &table_entry = entry.Cast<DuckTableEntry>();
-					D_ASSERT(table_entry.IsDuckTable());
-					// write the alter table in the log
-					table_entry.CommitAlter(column_name, drop_state);
+				if (entry.type == CatalogType::TABLE_ENTRY) {
+					auto &old_storage = entry.Cast<DuckTableEntry>().GetStorage();
+					auto &new_storage = parent.Cast<DuckTableEntry>().GetStorage();
+					if (!RefersToSameObject(old_storage, new_storage)) {
+						// the dropped or retyped column, and what a checkpoint rewrote since the ALTER copied it
+						drop_state.DropReplacedStorage(old_storage.shared_from_this(), new_storage.shared_from_this());
+					}
 				}
+				(void)column_name;
 				break;
 			case CatalogType::VIEW_ENTRY:
 			case CatalogType::INDEX_ENTRY:

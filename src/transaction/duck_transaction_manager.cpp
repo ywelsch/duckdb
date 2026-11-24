@@ -121,19 +121,23 @@ void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
 
 void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
 	vector<shared_ptr<DataTable>> dropped;
+	vector<pair<shared_ptr<DataTable>, shared_ptr<DataTable>>> replaced;
 	{
 		lock_guard<mutex> guard(deferred_tables_lock);
 		active_checkpoint = 0;
 		dropped = std::move(deferred_tables);
 		deferred_tables.clear();
+		replaced = std::move(deferred_replaced);
+		deferred_replaced.clear();
 	}
-	if (!checkpoint_succeeded || dropped.empty()) {
+	if (!checkpoint_succeeded || (dropped.empty() && replaced.empty())) {
 		// a failed checkpoint invalidates the database: the WAL replays the drops when it is opened again
 		return;
 	}
 	// the checkpoint no longer writes them: the next checkpoint frees the blocks
 	CommitDropState drop_state(&db.GetStorageManager().GetBlockManager());
 	drop_state.FreeTables(dropped);
+	drop_state.FreeReplacedStorage(replaced);
 	drop_state.FinalizeCommit();
 }
 
@@ -144,6 +148,17 @@ bool DuckTransactionManager::DeferDroppedTables(const vector<shared_ptr<DataTabl
 	}
 	// the checkpoint started before the drops committed: its catalog still has the tables
 	deferred_tables.insert(deferred_tables.end(), tables.begin(), tables.end());
+	return true;
+}
+
+bool DuckTransactionManager::DeferReplacedStorage(
+    const vector<pair<shared_ptr<DataTable>, shared_ptr<DataTable>>> &versions) {
+	lock_guard<mutex> guard(deferred_tables_lock);
+	if (active_checkpoint == 0) {
+		return false;
+	}
+	// the checkpoint started before the ALTER committed: it may still write and publish the replaced version
+	deferred_replaced.insert(deferred_replaced.end(), versions.begin(), versions.end());
 	return true;
 }
 

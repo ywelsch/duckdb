@@ -2265,6 +2265,49 @@ void RowGroupCollection::CommitDropColumn(const idx_t column_index, CommitDropSt
 	}
 }
 
+namespace {
+
+struct SegmentCollector : public BlockIdVisitor {
+	void Visit(block_id_t block_id) override {
+	}
+	bool VisitSegment(const ColumnSegment &segment) override {
+		segments.insert(&segment);
+		return true;
+	}
+	unordered_set<const ColumnSegment *> segments;
+};
+
+struct UnsharedSegmentDropper : public BlockIdVisitor {
+	UnsharedSegmentDropper(const unordered_set<const ColumnSegment *> &shared, CommitDropState &drop_state)
+	    : shared(shared), drop_state(drop_state) {
+	}
+	void Visit(block_id_t block_id) override {
+	}
+	bool VisitSegment(const ColumnSegment &segment) override {
+		if (shared.find(&segment) == shared.end()) {
+			drop_state.DropSegment(segment);
+		}
+		return true;
+	}
+	const unordered_set<const ColumnSegment *> &shared;
+	CommitDropState &drop_state;
+};
+
+} // namespace
+
+void RowGroupCollection::CommitReplace(RowGroupCollection &new_collection, CommitDropState &drop_state) {
+	SegmentCollector collector;
+	auto new_row_groups = new_collection.GetRowGroups();
+	for (auto &row_group : new_row_groups->Segments()) {
+		row_group.VisitBlockIds(collector);
+	}
+	UnsharedSegmentDropper dropper(collector.segments, drop_state);
+	auto row_groups = GetRowGroups();
+	for (auto &row_group : row_groups->Segments()) {
+		row_group.VisitBlockIds(dropper);
+	}
+}
+
 void RowGroupCollection::CommitDropTable(CommitDropState &drop_state) {
 	auto row_groups = GetRowGroups();
 	for (auto &row_group : row_groups->Segments()) {
