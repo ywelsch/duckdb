@@ -1724,12 +1724,6 @@ bool RowGroup::CanReuseMetadata(RowGroupWriter &writer) const {
 		// no existing metadata on disk - cannot re-use
 		return false;
 	}
-	for (auto &pointer : column_pointers) {
-		if (!pointer.IsValid()) {
-			// a column added by an ALTER since the last checkpoint
-			return false;
-		}
-	}
 	auto &table_writer = writer.GetTableWriter();
 	if (table_writer.RequireLegacyStartRow() && table_writer.RowIdsChanged()) {
 		// row-ids changed and we are targeting an old storage version that requires "start_row" - cannot re-use
@@ -1752,7 +1746,13 @@ bool RowGroup::HasUnchangedColumns() const {
 
 RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	bool can_reuse_metadata = CanReuseMetadata(writer);
-	if (can_reuse_metadata && !HasChanges(writer.GetCheckpointOptions().visibility_bound)) {
+	bool all_columns_have_metadata = true;
+	for (auto &pointer : column_pointers) {
+		// a column added since the last checkpoint has none
+		all_columns_have_metadata = all_columns_have_metadata && pointer.IsValid();
+	}
+	if (can_reuse_metadata && all_columns_have_metadata &&
+	    !HasChanges(writer.GetCheckpointOptions().visibility_bound)) {
 		RowGroupWriteData result;
 		result.write_action = RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA;
 		if (GetCollection().SupportsPerColumnWrites()) {
@@ -1820,7 +1820,7 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	vector<idx_t> reused_columns;
 	for (idx_t column_idx = 0; column_idx < write_count; column_idx++) {
 		bool column_has_changes = true;
-		if (partial_reuse) {
+		if (partial_reuse && column_pointers[column_idx].IsValid()) {
 			if (!ColumnIsLoaded(column_idx)) {
 				column_has_changes = false;
 			} else if (!columns[column_idx]->HasAnyChanges()) {
