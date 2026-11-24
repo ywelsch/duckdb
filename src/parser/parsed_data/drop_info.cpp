@@ -18,7 +18,7 @@ DatabaseModificationType DropInfo::GetModifications() const {
 	if (type == CatalogType::TABLE_ENTRY || type == CatalogType::INDEX_ENTRY || cascade) {
 		return DatabaseModificationType::DROP_CATALOG_ENTRY;
 	}
-	// the other entries have no table storage, and a schema is only dropped without CASCADE when it is empty
+	// a schema is only dropped without CASCADE when it is empty
 	return DatabaseModificationType();
 }
 

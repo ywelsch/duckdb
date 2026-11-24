@@ -10,13 +10,20 @@ namespace duckdb {
 DatabaseModificationType CreateInfo::GetModifications() const {
 	switch (type) {
 	case CatalogType::TABLE_ENTRY:
-		// no checkpoint lock, but like INSERT ... SELECT, CREATE TABLE AS keeps checkpoints from vacuuming meanwhile
+		// the rows of CREATE TABLE AS take the vacuum lock, as those of an insert do
 		if (Cast<CreateTableInfo>().query) {
-			return DatabaseModificationType::INSERT_DATA;
+			return DatabaseModificationType::CREATE_CATALOG_ENTRY | DatabaseModificationType::INSERT_DATA;
+		}
+		return DatabaseModificationType::CREATE_CATALOG_ENTRY;
+	case CatalogType::INDEX_ENTRY:
+	case CatalogType::TRIGGER_ENTRY:
+		return DatabaseModificationType::CREATE_CATALOG_ENTRY;
+	case CatalogType::SCHEMA_ENTRY:
+		// replacing a schema drops the existing one
+		if (on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+			return DatabaseModificationType::CREATE_CATALOG_ENTRY;
 		}
 		return DatabaseModificationType();
-	case CatalogType::INDEX_ENTRY:
-		return DatabaseModificationType::CREATE_INDEX;
 	default:
 		return DatabaseModificationType();
 	}

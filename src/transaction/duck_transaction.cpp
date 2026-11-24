@@ -365,10 +365,9 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 		bool require_write_lock = false;
 		require_write_lock = require_write_lock || type.UpdateData();
 		require_write_lock = require_write_lock || type.AlterTable();
-		require_write_lock = require_write_lock || type.CreateCatalogEntry();
 		// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
+		// not CREATE_CATALOG_ENTRY or CREATE_INDEX: a checkpoint only writes its catalog, committed before it started
 		// not DROP_CATALOG_ENTRY: a checkpoint that runs when the drop commits frees the dropped storage
-		// not CREATE_INDEX: a checkpoint only writes the indexes of its catalog, committed before it started
 
 		if (require_write_lock) {
 			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
