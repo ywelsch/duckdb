@@ -176,6 +176,14 @@ public:
 	unique_ptr<RowGroup> AddColumn(RowGroupCollection &collection, ColumnDefinition &new_column,
 	                               ExpressionExecutor &executor, ColumnStatistics &new_column_stats);
 	unique_ptr<RowGroup> RemoveColumn(RowGroupCollection &collection, idx_t removed_column);
+	//! A copy of this row group with only its first column_count columns
+	unique_ptr<RowGroup> CopyColumns(RowGroupCollection &collection, idx_t column_count);
+	//! For a row group a checkpoint built and has not published: takes the columns past its own from source
+	void CarryColumns(RowGroup &source);
+	//! For a row group a checkpoint built and has not published: adds a column filled with a constant
+	void AddConstantColumn(const LogicalType &type, const Value &constant);
+	//! For a row group a checkpoint built and has not published: keeps only the first column_count columns
+	void TrimColumns(idx_t column_count);
 
 	//! Accumulates this row group's on-disk blocks into the drop state.
 	void CommitDrop(CommitDropState &drop_state);
@@ -340,6 +348,8 @@ private:
 
 	bool HasUnloadedDeletes() const;
 	unique_ptr<RowGroup> CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count);
+	//! Marks the columns past old_count as loaded and gives them an empty metadata pointer
+	void ExtendLoadedState(idx_t old_count);
 
 private:
 	mutable mutex row_group_lock;

@@ -17,6 +17,7 @@
 
 namespace duckdb {
 class CommitDropState;
+struct DataTableInfo;
 class DuckTableEntry;
 class RowGroupCollection;
 class RowVersionManager;
@@ -114,6 +115,13 @@ public:
 	unique_ptr<StorageLockKey> TryGetCheckpointLock();
 	//! Hands out the checkpoint lock if this transaction only needs it until its commit is resolved, else null
 	unique_ptr<StorageLockKey> TakeCommitScopedCheckpointLock();
+	//! Holds checkpoints back until this transaction's commit is resolved, for ALTERs that copy row groups
+	void LockCheckpointsUntilCommit();
+	//! Registers the columns past column_count that an ADD COLUMN added to row groups an older version shares
+	void AddSharedColumns(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection,
+	                      idx_t column_count);
+	//! Forgets them once the transaction committed
+	void ClearSharedColumns();
 
 	void SetIsCheckpointTransaction() {
 		is_checkpoint_transaction = true;
@@ -134,6 +142,17 @@ private:
 	unique_ptr<StorageLockKey> checkpoint_lock;
 	//! Whether checkpoint_lock is held until cleanup, not only until the commit is resolved
 	bool checkpoint_lock_until_cleanup = false;
+	struct SharedColumnAddition {
+		shared_ptr<DataTableInfo> info;
+		shared_ptr<RowGroupCollection> collection;
+		idx_t column_count;
+	};
+	//! Guards shared_columns
+	mutex shared_columns_lock;
+	//! Columns this transaction's ADD COLUMNs added to row groups that older table versions share
+	vector<SharedColumnAddition> shared_columns;
+	//! Removes them again, before the catalog restores the older version
+	void RevertSharedColumns();
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
 	//! Lock for accessing sequence_usage

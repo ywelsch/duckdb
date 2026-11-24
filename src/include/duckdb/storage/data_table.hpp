@@ -314,6 +314,8 @@ private:
 	//! Verify the new added constraints against current persistent&local data
 	void VerifyNewConstraint(ClientContext &context, LocalStorage &local_storage, DataTable &parent,
 	                         const BoundConstraint &constraint);
+	//! Throws if the parent's row groups have a column that another transaction's uncommitted ADD COLUMN added
+	static void VerifyNoUncommittedColumns(DataTable &parent);
 
 	//! Verify constraints with a chunk from the Update containing only the specified column_ids
 	void VerifyUpdateConstraints(ConstraintState &state, ClientContext &context, DataChunk &chunk,

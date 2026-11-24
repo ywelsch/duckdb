@@ -617,6 +617,82 @@ unique_ptr<RowGroup> RowGroup::RemoveColumn(RowGroupCollection &new_collection, 
 	return row_group;
 }
 
+unique_ptr<RowGroup> RowGroup::CopyColumns(RowGroupCollection &new_collection, idx_t column_count) {
+	D_ASSERT(column_count <= columns.size());
+	unique_lock<mutex> lock(row_group_lock);
+	auto row_group = CreateNewRowGroupCopy(new_collection, column_count);
+	for (idx_t i = 0; i < column_count; i++) {
+		row_group->columns[i] = columns[i];
+		if (row_group->is_loaded) {
+			row_group->is_loaded[i] = is_loaded[i].load();
+		}
+		if (!row_group->column_pointers.empty()) {
+			row_group->column_pointers[i] = column_pointers[i];
+		}
+	}
+	if (has_per_column_metadata_blocks) {
+		row_group->per_column_metadata_blocks = per_column_metadata_blocks;
+		for (idx_t i = columns.size(); i > column_count; i--) {
+			row_group->per_column_metadata_blocks.ClearColumn(i - 1);
+		}
+	}
+	return row_group;
+}
+
+void RowGroup::CarryColumns(RowGroup &source) {
+	D_ASSERT(source.count == count);
+	lock_guard<mutex> source_lock(source.row_group_lock);
+	auto old_count = columns.size();
+	for (idx_t c = old_count; c < source.columns.size(); c++) {
+		D_ASSERT(source.ColumnIsLoaded(c));
+		columns.push_back(source.columns[c]);
+	}
+	ExtendLoadedState(old_count);
+}
+
+void RowGroup::AddConstantColumn(const LogicalType &type, const Value &constant) {
+	auto old_count = columns.size();
+	auto column = ColumnData::CreateColumn(GetBlockManager(), GetTableInfo(), old_count, type);
+	if (count > 0) {
+		auto value = constant.DefaultCastAs(type);
+		ColumnAppendState state;
+		column->InitializeAppend(state);
+		for (idx_t i = 0; i < count; i += STANDARD_VECTOR_SIZE) {
+			idx_t rows = MinValue<idx_t>(count - i, STANDARD_VECTOR_SIZE);
+			Vector constant_vector(type);
+			constant_vector.Reference(value, count_t(rows));
+			column->Append(state, constant_vector, rows);
+		}
+		column->FinalizeAppend(nullptr, state);
+	}
+	columns.push_back(std::move(column));
+	ExtendLoadedState(old_count);
+}
+
+void RowGroup::ExtendLoadedState(idx_t old_count) {
+	if (is_loaded) {
+		auto new_is_loaded = unique_ptr<atomic<bool>[]>(new atomic<bool>[columns.size()]);
+		for (idx_t c = 0; c < columns.size(); c++) {
+			new_is_loaded[c] = c < old_count ? is_loaded[c].load() : true;
+		}
+		is_loaded = std::move(new_is_loaded);
+	}
+	column_pointers.resize(columns.size());
+}
+
+void RowGroup::TrimColumns(idx_t column_count) {
+	D_ASSERT(column_count <= columns.size());
+	if (has_per_column_metadata_blocks) {
+		for (idx_t c = columns.size(); c > column_count; c--) {
+			per_column_metadata_blocks.ClearColumn(c - 1);
+		}
+	}
+	columns.resize(column_count);
+	if (column_pointers.size() > column_count) {
+		column_pointers.resize(column_count);
+	}
+}
+
 void RowGroup::CommitDrop(CommitDropState &drop_state) {
 	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
 		CommitDropColumn(column_idx, drop_state);
@@ -1648,6 +1724,12 @@ bool RowGroup::CanReuseMetadata(RowGroupWriter &writer) const {
 		// no existing metadata on disk - cannot re-use
 		return false;
 	}
+	for (auto &pointer : column_pointers) {
+		if (!pointer.IsValid()) {
+			// a column added by an ALTER since the last checkpoint
+			return false;
+		}
+	}
 	auto &table_writer = writer.GetTableWriter();
 	if (table_writer.RequireLegacyStartRow() && table_writer.RowIdsChanged()) {
 		// row-ids changed and we are targeting an old storage version that requires "start_row" - cannot re-use
@@ -1728,8 +1810,15 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	RowGroupWriteInfo info(writer.GetTableWriter().GetContext(), writer.GetPartialBlockManager(), compression_types,
 	                       writer.GetCheckpointOptions());
 
+	// columns past those of the table version being written belong to an uncommitted ALTER: carried, not written
+	auto write_count = compression_types.size();
+	D_ASSERT(write_count <= GetColumnCount());
+	for (idx_t column_idx = write_count; column_idx < GetColumnCount(); column_idx++) {
+		D_ASSERT(ColumnIsLoaded(column_idx));
+		result_row_group->columns[column_idx] = columns[column_idx];
+	}
 	vector<idx_t> reused_columns;
-	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
+	for (idx_t column_idx = 0; column_idx < write_count; column_idx++) {
 		bool column_has_changes = true;
 		if (partial_reuse) {
 			if (!ColumnIsLoaded(column_idx)) {
@@ -1802,6 +1891,7 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 	row_group_pointer.tuple_count = count;
 	if (write_data.write_action == RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA) {
 		// we are re-using the previous metadata
+		D_ASSERT(writer.GetCompressionTypes().size() == GetColumnCount());
 		row_group_pointer.data_pointers = column_pointers;
 		row_group_pointer.has_metadata_blocks = has_metadata_blocks;
 		row_group_pointer.extra_metadata_blocks = extra_metadata_blocks;
@@ -1836,12 +1926,14 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 		return row_group_pointer;
 	}
 	// write path: write column metadata to disk (with optional per-column reuse)
-	D_ASSERT(write_data.states.size() == GetColumnCount());
+	// the columns of the table version being written, an uncommitted ALTER's columns after them are not written
+	auto write_count = write_data.states.size();
+	D_ASSERT(write_count <= GetColumnCount());
 
 	// merge stats
 	{
 		auto lock = global_stats.GetLock();
-		for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
+		for (idx_t column_idx = 0; column_idx < write_count; column_idx++) {
 			bool is_reused = !write_data.states[column_idx];
 			if (is_reused) {
 				if (!ColumnIsLoaded(column_idx) &&
@@ -1864,7 +1956,7 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 	// partial map of reused-column extras (carried over onto this row group by WriteToDisk).
 	PerColumnMetadataBlocks written_column_blocks;
 
-	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
+	for (idx_t column_idx = 0; column_idx < write_count; column_idx++) {
 		bool is_reused = !write_data.states[column_idx];
 		if (is_reused) {
 			// reuse existing column pointer (extras are already carried on this->per_column_metadata_blocks)
@@ -1948,6 +2040,7 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 
 	// cache metadata pointers for future checkpoint reuse
 	column_pointers = row_group_pointer.data_pointers;
+	column_pointers.resize(GetColumnCount());
 	has_metadata_blocks = row_group_pointer.has_metadata_blocks;
 	extra_metadata_blocks = row_group_pointer.extra_metadata_blocks;
 	has_per_column_metadata_blocks = row_group_pointer.has_per_column_metadata_blocks;

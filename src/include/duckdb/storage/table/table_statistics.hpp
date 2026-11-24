@@ -32,6 +32,15 @@ public:
 	void Initialize(const vector<LogicalType> &types, PersistentTableData &data);
 	void InitializeEmpty(const vector<LogicalType> &types);
 	void InitializeEmpty(const TableStatistics &other);
+	//! Empty statistics for the first column_count columns of other
+	void InitializeEmpty(const TableStatistics &other, idx_t column_count);
+	//! Adds the statistics of a column added to row groups that other table versions share
+	void AddColumn(TableStatisticsLock &lock, const LogicalType &type);
+	//! Removes the statistics of the columns past column_count
+	void RemoveColumns(TableStatisticsLock &lock, idx_t column_count);
+	idx_t ColumnCount(TableStatisticsLock &lock) const {
+		return column_stats.size();
+	}
 
 	void InitializeAddColumn(TableStatistics &parent, const LogicalType &new_column_type);
 	void InitializeRemoveColumn(TableStatistics &parent, idx_t removed_column);

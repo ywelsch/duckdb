@@ -16,6 +16,8 @@
 #include "duckdb/common/enums/column_segment_info_scan_type.hpp"
 #include "duckdb/common/enums/index_removal_type.hpp"
 #include "duckdb/common/enums/row_group_append_mode.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/types/value.hpp"
 
 namespace duckdb {
 
@@ -75,6 +77,8 @@ struct CollectionCheckpointSnapshot {
 	idx_t segment_count = 0;
 	//! The row group count recorded by the first append that saw this checkpoint, if any
 	optional_idx row_group_count;
+	//! The column types when the checkpoint started: the snapshot's row groups have these columns
+	vector<LogicalType> types;
 };
 
 //! The rewritten row groups, installed by InstallCheckpoint
@@ -85,6 +89,12 @@ struct CollectionCheckpointResult {
 	idx_t next_row_id = 0;
 	//! The live row groups past this count were appended while the checkpoint ran
 	idx_t checkpointed_row_group_count = 0;
+	//! The number of columns of the rewritten row groups
+	idx_t column_count = 0;
+	//! For each rewritten row group, the index of the live row group it replaces, invalid for merged row groups
+	vector<optional_idx> live_indexes;
+	//! For each rewritten row group, whether the checkpoint built it (else it is a row group readers can see)
+	vector<bool> built;
 };
 
 class RowGroupCollection {
@@ -171,8 +181,9 @@ public:
 	                  const vector<column_t> &column_path, DataChunk &updates);
 
 	CollectionCheckpointSnapshot SnapshotForCheckpoint(TableDataWriter &writer) const;
+	//! Writes the first column_count columns, those of the table version being checkpointed
 	CollectionCheckpointResult Checkpoint(TableDataWriter &writer, TableStatistics &global_stats,
-	                                      const CollectionCheckpointSnapshot &snapshot);
+	                                      const CollectionCheckpointSnapshot &snapshot, idx_t column_count);
 	//! Takes over the row groups appended meanwhile. Runs under the table's append lock
 	void InstallCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats);
 
@@ -211,6 +222,11 @@ public:
 
 	shared_ptr<RowGroupCollection> AddColumn(ClientContext &context, ColumnDefinition &new_column,
 	                                         ExpressionExecutor &default_executor);
+	//! Adds a column holding a constant to this collection, which the older table version keeps using: the row
+	//! groups are replaced, not changed. Runs under the table's append lock
+	void AddSharedColumn(ColumnDefinition &new_column, ExpressionExecutor &default_executor, Value constant);
+	//! Removes the shared columns past column_count again. Runs under the table's append lock
+	void RemoveSharedColumns(idx_t column_count);
 	shared_ptr<RowGroupCollection> RemoveColumn(idx_t col_idx);
 	shared_ptr<RowGroupCollection> AlterType(ClientContext &context, idx_t changed_idx, const LogicalType &target_type,
 	                                         vector<StorageIndex> bound_columns, Expression &cast_expr,
@@ -260,6 +276,9 @@ private:
 	                                                       idx_t count) const;
 
 	void SetRowGroups(shared_ptr<RowGroupSegmentTree> row_groups);
+	void SetTypes(vector<LogicalType> new_types);
+	//! Gives the row groups a checkpoint wrote the columns of the live ones, which an ALTER changed meanwhile
+	shared_ptr<RowGroupSegmentTree> AlignCheckpointColumns(CollectionCheckpointResult &result);
 
 private:
 	//! BlockManager
@@ -273,8 +292,14 @@ private:
 	atomic<idx_t> next_row_id;
 	//! The data table info
 	shared_ptr<DataTableInfo> info;
-	//! The column types of the row group collection
-	vector<LogicalType> types;
+	//! Guards type_versions
+	mutex types_lock;
+	//! Every version of the column types: a reader keeps using the version it read
+	vector<shared_ptr<const vector<LogicalType>>> type_versions;
+	//! The current column types of the row group collection
+	atomic<const vector<LogicalType> *> current_types;
+	//! The constant of each shared column, to fill it for row groups a running checkpoint merged
+	unordered_map<idx_t, Value> shared_column_constants;
 	//! Lock held when accessing or modifying the owned_row_groups pointer
 	mutable mutex row_group_pointer_lock;
 	//! The owning pointer of the segment tree

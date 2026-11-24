@@ -107,8 +107,18 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 
 	// prevent any new tuples from being added to the parent
 	lock_guard<mutex> parent_lock(parent.append_lock);
+	VerifyNoUncommittedColumns(parent);
 
-	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
+	if (default_value.IsFoldable()) {
+		// a constant column: this version shares the row groups, which checkpoints of the parent keep rewriting
+		auto constant = ExpressionExecutor::EvaluateScalar(context, default_value);
+		this->row_groups = parent.row_groups;
+		auto column_count = row_groups->GetTypes().size();
+		row_groups->AddSharedColumn(new_column, default_executor, std::move(constant));
+		DuckTransaction::Get(context, db).AddSharedColumns(info, row_groups, column_count);
+	} else {
+		this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
+	}
 
 	// also add this column to client local storage
 	local_storage.AddColumn(context, parent, *this, new_column, default_executor);
@@ -122,6 +132,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 	// prevent any new tuples from being added to the parent
 	auto &local_storage = LocalStorage::Get(context, db);
 	lock_guard<mutex> parent_lock(parent.append_lock);
+	VerifyNoUncommittedColumns(parent);
 
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
@@ -173,6 +184,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, BoundConstraint 
 
 	auto &local_storage = LocalStorage::Get(context, db);
 	lock_guard<mutex> parent_lock(parent.append_lock);
+	VerifyNoUncommittedColumns(parent);
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -198,6 +210,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 	auto &local_storage = LocalStorage::Get(transaction);
 	// prevent any tuples from being added to the parent
 	lock_guard<mutex> parent_lock(parent.append_lock);
+	VerifyNoUncommittedColumns(parent);
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
@@ -240,6 +253,13 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 		// nothing reached the catalog, so no undo entry will restore the parent
 		parent.version = previous_version;
 		throw;
+	}
+}
+
+void DataTable::VerifyNoUncommittedColumns(DataTable &parent) {
+	if (parent.row_groups->GetTypes().size() != parent.column_definitions.size()) {
+		// another transaction's ADD COLUMN added a column to the row groups: its ALTER is not committed
+		throw TransactionException("Catalog write-write conflict on alter with %s", parent.GetTableName());
 	}
 }
 
@@ -1655,7 +1675,7 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	}
 
 	// checkpoint each individual row group
-	auto result = row_groups->Checkpoint(writer, global_stats, snapshot);
+	auto result = row_groups->Checkpoint(writer, global_stats, snapshot, column_definitions.size());
 	auto publication =
 	    make_uniq<PendingRowGroupCollectionPublication>(shared_from_this(), std::move(result), std::move(global_stats));
 	const auto &checkpoint_stats = publication->GetStatistics();
@@ -1743,9 +1763,26 @@ idx_t DataTable::GetRowGroupCountWithLocalStorage(ClientContext &context) {
 //===--------------------------------------------------------------------===//
 // Column Segment Info
 //===--------------------------------------------------------------------===//
+static void RemoveOtherVersionColumns(vector<ColumnSegmentInfo> &result, idx_t start, idx_t column_count) {
+	// the row groups can have columns of an uncommitted ADD COLUMN that this version does not have
+	idx_t keep = start;
+	for (idx_t i = start; i < result.size(); i++) {
+		if (result[i].column_id >= column_count) {
+			continue;
+		}
+		if (keep != i) {
+			result[keep] = std::move(result[i]);
+		}
+		keep++;
+	}
+	result.erase(result.begin() + NumericCast<int64_t>(keep), result.end());
+}
+
 vector<ColumnSegmentInfo> DataTable::GetColumnSegmentInfo(const QueryContext &context,
                                                           const ColumnSegmentInfoScanOptions &options) {
-	return row_groups->GetColumnSegmentInfo(context, options);
+	auto result = row_groups->GetColumnSegmentInfo(context, options);
+	RemoveOtherVersionColumns(result, 0, column_definitions.size());
+	return result;
 }
 
 void DataTable::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &state) {
@@ -1754,7 +1791,10 @@ void DataTable::InitializeColumnSegmentInfoScan(ColumnSegmentInfoScanState &stat
 
 bool DataTable::ScanColumnSegmentInfo(const QueryContext &context, ColumnSegmentInfoScanState &state,
                                       vector<ColumnSegmentInfo> &result) {
-	return row_groups->ScanColumnSegmentInfo(context, state, result);
+	auto start = result.size();
+	auto has_more = row_groups->ScanColumnSegmentInfo(context, state, result);
+	RemoveOtherVersionColumns(result, start, column_definitions.size());
+	return has_more;
 }
 
 //===--------------------------------------------------------------------===//

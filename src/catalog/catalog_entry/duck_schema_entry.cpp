@@ -315,6 +315,26 @@ optional_ptr<CatalogEntry> DuckSchemaEntry::CreatePragmaFunction(CatalogTransact
 	return AddEntry(transaction, std::move(pragma_function), info.on_conflict);
 }
 
+//! Whether the ALTER copies the row groups of the table, which a checkpoint of the older version can rewrite
+static bool AlterCopiesRowGroups(AlterInfo &info) {
+	if (info.type != AlterType::ALTER_TABLE || !info.GetModifications().AlterTable()) {
+		return false;
+	}
+	auto &table_info = info.Cast<AlterTableInfo>();
+	switch (table_info.alter_table_type) {
+	case AlterTableType::SET_NOT_NULL:
+		return false;
+	case AlterTableType::ADD_COLUMN: {
+		// a constant column is added to row groups the versions share
+		auto &column = table_info.Cast<AddColumnInfo>().new_column;
+		return !column.Generated() && column.HasDefaultValue() &&
+		       column.DefaultValue().GetExpressionClass() != ExpressionClass::CONSTANT;
+	}
+	default:
+		return true;
+	}
+}
+
 void DuckSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	CatalogType type = info.GetCatalogType();
 
@@ -324,6 +344,9 @@ void DuckSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			throw CatalogException("Couldn't change ownership!");
 		}
 	} else {
+		if (transaction.transaction && AlterCopiesRowGroups(info)) {
+			transaction.transaction->Cast<DuckTransaction>().LockCheckpointsUntilCommit();
+		}
 		auto &name = info.GetQualifiedName().Name();
 		if (!set.AlterEntry(transaction, name, info)) {
 			throw CatalogException::MissingEntry(type, name, string());

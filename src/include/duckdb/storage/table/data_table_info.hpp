@@ -50,6 +50,9 @@ public:
 	bool AppendRequiresNewRowGroup(RowGroupCollection &collection, optional_idx checkpoint_id);
 	optional_idx CheckpointRowGroupCount(const CheckpointOptions &options) const;
 	void VerifyIndexBuffers() const;
+	mutex &GetAppendLock() {
+		return append_lock;
+	}
 
 	Identifier GetSchemaName();
 	//! The full (possibly nested) schema path of the table

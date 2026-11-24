@@ -564,6 +564,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 	// kept until the commit is durable: a checkpoint that starts earlier would write the state from before it
 	commit_scoped_checkpoint_lock = transaction.TakeCommitScopedCheckpointLock();
+	if (!error.HasError()) {
+		transaction.ClearSharedColumns();
+	}
 
 	// commit successful: remove the transaction id from the list of active transactions
 	// potentially resulting in garbage collection

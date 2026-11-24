@@ -25,6 +25,43 @@ void TableStatistics::Initialize(const vector<LogicalType> &types, PersistentTab
 	} // LCOV_EXCL_STOP
 }
 
+void TableStatistics::InitializeEmpty(const TableStatistics &other, idx_t column_count) {
+	D_ASSERT(Empty());
+	lock_guard<mutex> l(*other.stats_lock);
+	D_ASSERT(column_count <= other.column_stats.size());
+	stats_lock = make_shared_ptr<mutex>();
+	// a sample of more columns than are written is not kept
+	if (other.table_sample && column_count == other.column_stats.size()) {
+		table_sample = other.table_sample->Cast<ReservoirSample>().Copy();
+	} else {
+		table_sample = make_uniq<ReservoirSample>(static_cast<idx_t>(FIXED_SAMPLE_SIZE));
+	}
+	for (idx_t i = 0; i < column_count; i++) {
+		auto &stats = other.column_stats[i];
+		auto new_column_stats = ColumnStatistics::CreateEmptyStats(stats->Statistics().GetType());
+		if (stats->HasDistinctStats()) {
+			new_column_stats->SetDistinct(stats->DistinctStats().Copy());
+			new_column_stats->Statistics().SetDistinctCount(new_column_stats->DistinctStats().GetCount());
+		}
+		column_stats.push_back(new_column_stats);
+	}
+}
+
+void TableStatistics::AddColumn(TableStatisticsLock &lock, const LogicalType &type) {
+	column_stats.push_back(ColumnStatistics::CreateEmptyStats(type));
+	if (table_sample) {
+		table_sample->Destroy();
+	}
+}
+
+void TableStatistics::RemoveColumns(TableStatisticsLock &lock, idx_t column_count) {
+	D_ASSERT(column_count <= column_stats.size());
+	column_stats.resize(column_count);
+	if (table_sample) {
+		table_sample->Destroy();
+	}
+}
+
 void TableStatistics::InitializeEmpty(const TableStatistics &other) {
 	D_ASSERT(Empty());
 	D_ASSERT(!table_sample);

@@ -150,11 +150,12 @@ RowGroupCollection::RowGroupCollection(shared_ptr<DataTableInfo> info_p, BlockMa
                                        vector<LogicalType> types_p, idx_t row_start, idx_t total_rows_p,
                                        idx_t row_group_size_p)
     : block_manager(block_manager), row_group_size(row_group_size_p), total_rows(total_rows_p),
-      next_row_id(total_rows_p), info(std::move(info_p)), types(std::move(types_p)),
+      next_row_id(total_rows_p), info(std::move(info_p)), current_types(nullptr),
       owned_row_groups(make_shared_ptr<RowGroupSegmentTree>(*this, row_start)), allocation_size(0),
       row_group_append_mode(RowGroupAppendMode::APPEND_TO_EXISTING) {
+	SetTypes(std::move(types_p));
 	// If the table contains shredded types (variant / geometry) then we can't append to an existing row group
-	for (auto &type : types) {
+	for (auto &type : GetTypes()) {
 		if (TypeVisitor::Contains(type, LogicalTypeId::VARIANT) ||
 		    TypeVisitor::Contains(type, LogicalTypeId::GEOMETRY) ||
 		    TypeVisitor::Contains(type, LogicalTypeId::GEOGRAPHY)) {
@@ -184,7 +185,13 @@ idx_t RowGroupCollection::GetRowGroupCountWithoutLoading() const {
 }
 
 const vector<LogicalType> &RowGroupCollection::GetTypes() const {
-	return types;
+	return *current_types.load();
+}
+
+void RowGroupCollection::SetTypes(vector<LogicalType> new_types) {
+	lock_guard<mutex> guard(types_lock);
+	type_versions.push_back(make_shared_ptr<const vector<LogicalType>>(std::move(new_types)));
+	current_types = type_versions.back().get();
 }
 
 Allocator &RowGroupCollection::GetAllocator() const {
@@ -225,7 +232,7 @@ void RowGroupCollection::Initialize(PersistentTableData &data) {
 	metadata_pointer = data.base_table_pointer;
 	metadata_pointers = data.read_metadata_pointers;
 	owned_row_groups->Initialize(data, metadata_pointers);
-	stats.Initialize(types, data);
+	stats.Initialize(GetTypes(), data);
 }
 
 void RowGroupCollection::FinalizeCheckpoint(MetaBlockPointer pointer,
@@ -235,7 +242,7 @@ void RowGroupCollection::FinalizeCheckpoint(MetaBlockPointer pointer,
 }
 
 void RowGroupCollection::Initialize(PersistentCollectionData &data) {
-	stats.InitializeEmpty(types);
+	stats.InitializeEmpty(GetTypes());
 	auto l = owned_row_groups->Lock();
 	for (auto &row_group_data : data.row_group_data) {
 		D_ASSERT(row_group_data.start == owned_row_groups->GetBaseRowId() + total_rows.load());
@@ -259,7 +266,7 @@ void RowGroupCollection::SetRowGroupAppendMode(RowGroupAppendMode mode) {
 }
 
 void RowGroupCollection::InitializeEmpty() {
-	stats.InitializeEmpty(types);
+	stats.InitializeEmpty(GetTypes());
 }
 
 ColumnDataType GetColumnDataType(idx_t row_start) {
@@ -274,7 +281,7 @@ ColumnDataType GetColumnDataType(idx_t row_start) {
 
 void RowGroupCollection::AppendRowGroup(SegmentLock &l, idx_t start_row) {
 	auto new_row_group = make_uniq<RowGroup>(*this, 0U);
-	new_row_group->InitializeEmpty(types, GetColumnDataType(start_row));
+	new_row_group->InitializeEmpty(GetTypes(), GetColumnDataType(start_row));
 	owned_row_groups->AppendSegment(l, std::move(new_row_group), start_row);
 	row_group_append_mode = RowGroupAppendMode::APPEND_TO_EXISTING;
 }
@@ -527,8 +534,8 @@ DataChunk &RowGroupIterationHelper::RowGroupIterator::operator*() const {
 
 RowGroupIterationHelper RowGroupCollection::Chunks(DuckTransaction &transaction) {
 	vector<StorageIndex> column_ids;
-	column_ids.reserve(types.size());
-	for (idx_t i = 0; i < types.size(); i++) {
+	column_ids.reserve(GetTypes().size());
+	for (idx_t i = 0; i < GetTypes().size(); i++) {
 		column_ids.emplace_back(i);
 	}
 	return Chunks(transaction, column_ids);
@@ -692,7 +699,7 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 
 	// initialize thread-local stats so we have less lock contention when updating distinct statistics
 	state.stats = TableStatistics();
-	state.stats.InitializeEmpty(types);
+	state.stats.InitializeEmpty(GetTypes());
 }
 
 void RowGroupCollection::InitializeAppend(TableAppendState &state) {
@@ -702,7 +709,7 @@ void RowGroupCollection::InitializeAppend(TableAppendState &state) {
 
 optional_idx RowGroupCollection::Append(DataChunk &chunk, TableAppendState &state) {
 	const idx_t row_group_size = GetRowGroupSize();
-	D_ASSERT(chunk.ColumnCount() == types.size());
+	D_ASSERT(chunk.ColumnCount() == GetTypes().size());
 	chunk.Verify(GetDatabase());
 
 	optional_idx flushed_row_group_idx;
@@ -754,7 +761,7 @@ optional_idx RowGroupCollection::Append(DataChunk &chunk, TableAppendState &stat
 
 	auto local_stats_lock = state.stats.GetLock();
 
-	for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
+	for (idx_t col_idx = 0; col_idx < GetTypes().size(); col_idx++) {
 		auto &column_stats = state.stats.GetStats(*local_stats_lock, col_idx);
 		column_stats.UpdateDistinctStatistics(chunk.data[col_idx], chunk.size(), state.hashes);
 	}
@@ -786,7 +793,7 @@ void RowGroupCollection::FinalizeAppend(TransactionData transaction, TableAppend
 
 	auto local_stats_lock = state.stats.GetLock();
 	auto global_stats_lock = stats.GetLock();
-	for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
+	for (idx_t col_idx = 0; col_idx < GetTypes().size(); col_idx++) {
 		auto &global_stats = stats.GetStats(*global_stats_lock, col_idx);
 		auto &local_stats = state.stats.GetStats(*local_stats_lock, col_idx);
 		global_stats.Merge(local_stats);
@@ -905,7 +912,7 @@ bool RowGroupCollection::IsPersistent() const {
 
 void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<DataTable> table,
                                       optional_ptr<StorageCommitState> commit_state) {
-	D_ASSERT(data.types == types);
+	D_ASSERT(data.GetTypes() == GetTypes());
 	auto source_row_groups = data.GetRowGroups();
 	auto segments = source_row_groups->MoveSegments();
 	auto row_groups = GetRowGroups();
@@ -952,7 +959,7 @@ void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<Dat
 		if (commit_state && merged_count < optimistically_written_count) {
 			// serialize the block pointers of this row group
 			auto persistent_data = row_group->SerializeRowGroupInfo(target_row_start);
-			persistent_data.types = types;
+			persistent_data.types = GetTypes();
 			row_group_data->row_group_data.push_back(std::move(persistent_data));
 		}
 		merged_count += row_group_count;
@@ -1086,7 +1093,7 @@ void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableInd
 	vector<LogicalType> column_types;
 	column_types.reserve(column_ids.size());
 	for (auto &col : column_ids) {
-		column_types.push_back(types[col.GetPrimaryIndex()]);
+		column_types.push_back(GetTypes()[col.GetPrimaryIndex()]);
 	}
 
 	DataChunk fetch_chunk;
@@ -1100,8 +1107,8 @@ void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableInd
 	// Used for index value removal.
 	// Contains all columns but only initializes indexed ones.
 	DataChunk result_chunk;
-	auto fetched_columns = vector<bool>(types.size(), false);
-	result_chunk.Initialize(GetAllocator(), types, fetched_columns);
+	auto fetched_columns = vector<bool>(GetTypes().size(), false);
+	result_chunk.Initialize(GetAllocator(), GetTypes(), fetched_columns);
 	// Now set all to-be-fetched columns.
 	for (auto &col : indexed_column_id_set) {
 		fetched_columns[col] = true;
@@ -1109,12 +1116,12 @@ void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableInd
 
 	// Reference the necessary columns of the fetch_chunk.
 	idx_t fetch_idx = 0;
-	for (idx_t j = 0; j < types.size(); j++) {
+	for (idx_t j = 0; j < GetTypes().size(); j++) {
 		if (fetched_columns[j]) {
 			result_chunk.data[j].Reference(fetch_chunk.data[fetch_idx++]);
 			continue;
 		}
-		result_chunk.data[j].Reference(Value(types[j]), count_t(fetch_chunk.size()));
+		result_chunk.data[j].Reference(Value(GetTypes()[j]), count_t(fetch_chunk.size()));
 	}
 
 	indexes.RemoveFromIndexes(result_chunk, row_identifiers, removal_type, active_checkpoint);
@@ -1181,6 +1188,8 @@ struct CollectionCheckpointState {
 	VacuumState vacuum_state;
 	TableStatistics &global_stats;
 	RowGroupSegmentTree &row_groups;
+	//! The column types of the row groups being checkpointed
+	vector<LogicalType> types;
 
 	idx_t SegmentCount() const {
 		return writers.size();
@@ -1200,6 +1209,9 @@ struct CollectionCheckpointState {
 		dropped_segments[index] = true;
 	}
 
+	bool SegmentIsOverridden(idx_t index) const {
+		return overridden_segments[index] != nullptr;
+	}
 	bool SegmentIsDropped(idx_t index) const {
 		return !overridden_segments[index] && dropped_segments[index];
 	}
@@ -1381,7 +1393,7 @@ public:
 
 		auto &collection = checkpoint_state.collection;
 		const idx_t row_group_size = collection.GetRowGroupSize();
-		auto &types = collection.GetTypes();
+		auto &types = checkpoint_state.types;
 		unique_ptr<VacuumIndexRemapper> remapper;
 		if (vacuum_state.index_strategy == VacuumIndexStrategy::REMAP && !vacuum_state.remap_indexes.empty()) {
 			remapper = make_uniq<VacuumIndexRemapper>(vacuum_state.remap_indexes, collection);
@@ -1784,12 +1796,14 @@ CollectionCheckpointSnapshot RowGroupCollection::SnapshotForCheckpoint(TableData
 	snapshot.row_groups = GetRowGroups();
 	snapshot.segment_count = snapshot.row_groups->GetSegmentCount();
 	snapshot.row_group_count = info->CheckpointRowGroupCount(writer.GetCheckpointOptions());
+	snapshot.types = GetTypes();
 	writer.SetRowGroupCount(snapshot.row_group_count);
 	return snapshot;
 }
 
 CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &global_stats,
-                                                          const CollectionCheckpointSnapshot &snapshot) {
+                                                          const CollectionCheckpointSnapshot &snapshot,
+                                                          idx_t column_count) {
 	auto &row_groups = snapshot.row_groups;
 	// row groups past this count were appended after the checkpoint started and are taken over at install time
 	idx_t checkpointed_row_group_count = snapshot.segment_count;
@@ -1799,6 +1813,8 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 		    MinValue<idx_t>(checkpointed_row_group_count, snapshot.row_group_count.GetIndex());
 	}
 	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups, checkpointed_row_group_count);
+	checkpoint_state.types = snapshot.types;
+	D_ASSERT(column_count <= snapshot.types.size());
 
 	auto &vacuum_state = checkpoint_state.vacuum_state;
 	InitializeVacuumState(checkpoint_state, vacuum_state, writer.GetRowGroupCount());
@@ -1898,7 +1914,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 
 	// not all segments have stayed the same - we need to make a new segment tree with the new set of segments
 	// initialize new empty stats - before locking the new segment tree, as this takes the stats lock
-	global_stats.InitializeEmpty(stats);
+	global_stats.InitializeEmpty(stats, column_count);
 
 	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, row_groups->GetBaseRowId());
 	auto l = new_row_groups->Lock();
@@ -1908,6 +1924,8 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	auto base_row_id = row_groups->GetBaseRowId();
 	auto can_persist_rowid_gaps = writer.CanPersistRowIdGaps();
 	unordered_set<idx_t> columns_with_incomplete_stats;
+	vector<optional_idx> live_indexes;
+	vector<bool> built;
 	for (idx_t segment_idx = 0; segment_idx < checkpointed_row_group_count; segment_idx++) {
 		auto entry = checkpoint_state.GetSegment(segment_idx);
 		if (!entry) {
@@ -1930,11 +1948,14 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 			// row group was not checkpointed - this can happen if compressing is disabled for in-memory tables
 			D_ASSERT(row_start == source_row_start);
 			new_row_groups->AppendSegment(l, entry->ReferenceNode(), row_start);
+			auto overridden = checkpoint_state.SegmentIsOverridden(segment_idx);
+			live_indexes.push_back(overridden ? optional_idx() : optional_idx(segment_idx));
+			built.push_back(overridden);
 			new_total_rows += existing_row_group.count;
 			new_next_row_id = MaxValue<idx_t>(new_next_row_id, row_start + existing_row_group.count - base_row_id);
 
 			auto lock = global_stats.GetLock();
-			for (idx_t column_idx = 0; column_idx < existing_row_group.GetColumnCount(); column_idx++) {
+			for (idx_t column_idx = 0; column_idx < column_count; column_idx++) {
 				global_stats.GetStats(*lock, column_idx)
 				    .Statistics()
 				    .Merge(*existing_row_group.GetStatistics(column_idx));
@@ -1958,6 +1979,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 			}
 		}
 		auto new_row_group = std::move(row_group_write_data.result_row_group);
+		built.push_back(new_row_group != nullptr);
 		if (!new_row_group) {
 			// row group was unchanged - emit previous row group
 			new_row_group = entry->ReferenceNode();
@@ -1981,6 +2003,8 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 		new_total_rows += row_group.count;
 		new_next_row_id = MaxValue<idx_t>(new_next_row_id, row_start + row_group.count - base_row_id);
 		new_row_groups->AppendSegment(l, std::move(new_row_group), row_start);
+		live_indexes.push_back(checkpoint_state.SegmentIsOverridden(segment_idx) ? optional_idx()
+		                                                                         : optional_idx(segment_idx));
 
 		if (debug_verify_blocks) {
 			if (!pointer_copy.has_metadata_blocks && !pointer_copy.has_per_column_metadata_blocks) {
@@ -2005,8 +2029,8 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 				auto &mm = row_group.GetCollection().GetMetadataManager();
 				vector<idx_t> columns;
 				vector<vector<idx_t>> deserialized_extras;
-				deserialized_extras.reserve(column_start_ptrs.size());
-				for (idx_t i = 0; i < column_start_ptrs.size(); i++) {
+				deserialized_extras.reserve(pointer_copy.data_pointers.size());
+				for (idx_t i = 0; i < pointer_copy.data_pointers.size(); i++) {
 					columns.emplace_back(i);
 					deserialized_extras.emplace_back();
 					vector<MetaBlockPointer> col_read_pointers;
@@ -2065,7 +2089,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 			const auto &column_start_pointers = row_group.GetColumnStartPointers();
 			auto &column_types = row_group.GetCollection().GetTypes();
 			auto &metadata_manager = row_group.GetCollection().GetMetadataManager();
-			for (idx_t i = 0; i < column_start_pointers.size(); i++) {
+			for (idx_t i = 0; i < pointer_copy.data_pointers.size(); i++) {
 				MetadataReader reader(metadata_manager, column_start_pointers[i], &all_full_read_blocks);
 				ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), i, reader, column_types[i]);
 			}
@@ -2167,13 +2191,99 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	result.total_rows = new_total_rows;
 	result.next_row_id = new_next_row_id;
 	result.checkpointed_row_group_count = checkpointed_row_group_count;
+	result.column_count = snapshot.types.size();
+	result.live_indexes = std::move(live_indexes);
+	result.built = std::move(built);
 	return result;
+}
+
+shared_ptr<RowGroupSegmentTree> RowGroupCollection::AlignCheckpointColumns(CollectionCheckpointResult &result) {
+	auto &live_types = GetTypes();
+	auto live_row_groups = GetRowGroups();
+	auto aligned = make_shared_ptr<RowGroupSegmentTree>(*this, result.row_groups->GetBaseRowId());
+	auto aligned_lock = aligned->Lock();
+	auto result_lock = result.row_groups->Lock();
+	auto live_lock = live_row_groups->Lock();
+	auto result_count = result.row_groups->GetSegmentCount(result_lock);
+	D_ASSERT(result_count == result.live_indexes.size() && result_count == result.built.size());
+	for (idx_t i = 0; i < result_count; i++) {
+		auto entry = result.row_groups->GetSegmentByIndex(result_lock, UnsafeNumericCast<int64_t>(i));
+		auto row_group = entry->ReferenceNode();
+		auto live_index = result.live_indexes[i];
+		if (!result.built[i]) {
+			// readers can see this row group: take the live one at its place, which has the live columns
+			D_ASSERT(live_index.IsValid());
+			auto live =
+			    live_row_groups->GetSegmentByIndex(live_lock, UnsafeNumericCast<int64_t>(live_index.GetIndex()));
+			row_group = live->ReferenceNode();
+		} else if (result.column_count > live_types.size()) {
+			row_group->TrimColumns(live_types.size());
+		} else if (live_index.IsValid()) {
+			auto live =
+			    live_row_groups->GetSegmentByIndex(live_lock, UnsafeNumericCast<int64_t>(live_index.GetIndex()));
+			row_group->CarryColumns(live->GetNode());
+		} else {
+			// a merged row group: the shared columns hold a constant
+			for (idx_t c = result.column_count; c < live_types.size(); c++) {
+				row_group->AddConstantColumn(live_types[c], shared_column_constants.at(c));
+			}
+		}
+		aligned->AppendSegment(aligned_lock, std::move(row_group), entry->GetRowStart());
+	}
+	result.column_count = live_types.size();
+	return aligned;
+}
+
+void RowGroupCollection::AddSharedColumn(ColumnDefinition &new_column, ExpressionExecutor &default_executor,
+                                         Value constant) {
+	auto new_column_idx = GetTypes().size();
+	auto row_groups = GetRowGroups();
+	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, row_groups->GetBaseRowId());
+	{
+		auto lock = stats.GetLock();
+		stats.AddColumn(*lock, new_column.GetType());
+		auto &new_column_stats = stats.GetStats(*lock, new_column_idx);
+		for (auto &node : row_groups->SegmentNodes()) {
+			auto new_row_group = node.GetNode().AddColumn(*this, new_column, default_executor, new_column_stats);
+			new_row_group->MergeIntoStatistics(new_column_idx, new_column_stats.Statistics());
+			new_row_groups->AppendSegment(std::move(new_row_group), node.GetRowStart());
+		}
+	}
+	shared_column_constants[new_column_idx] = std::move(constant);
+	auto new_types = GetTypes();
+	new_types.push_back(new_column.GetType());
+	SetRowGroups(std::move(new_row_groups));
+	SetTypes(std::move(new_types));
+}
+
+void RowGroupCollection::RemoveSharedColumns(idx_t column_count) {
+	auto row_groups = GetRowGroups();
+	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, row_groups->GetBaseRowId());
+	for (auto &node : row_groups->SegmentNodes()) {
+		new_row_groups->AppendSegment(node.GetNode().CopyColumns(*this, column_count), node.GetRowStart());
+	}
+	{
+		auto lock = stats.GetLock();
+		stats.RemoveColumns(*lock, column_count);
+	}
+	auto new_types = GetTypes();
+	for (idx_t c = column_count; c < new_types.size(); c++) {
+		shared_column_constants.erase(c);
+	}
+	new_types.resize(column_count);
+	SetRowGroups(std::move(new_row_groups));
+	SetTypes(std::move(new_types));
 }
 
 void RowGroupCollection::InstallCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats) {
 	if (!result.row_groups) {
 		// the table was unchanged: the live statistics already describe it
 		return;
+	}
+	auto &live_types = GetTypes();
+	if (result.column_count != live_types.size()) {
+		// an ALTER added or removed shared columns since the checkpoint started
+		result.row_groups = AlignCheckpointColumns(result);
 	}
 	auto &new_row_groups = result.row_groups;
 	vector<reference<RowGroup>> appended_row_groups;
@@ -2201,16 +2311,18 @@ void RowGroupCollection::InstallCheckpoint(CollectionCheckpointResult result, Ta
 	{
 		// the live statistics become those of the checkpoint plus those of the row groups appended meanwhile
 		// the two statistics locks are never nested: ALTER takes the live one before a tree lock
+		// the checkpoint has statistics for the columns it wrote, the live ones are kept for the shared columns
 		vector<BaseStatistics> checkpoint_column_stats;
 		{
 			auto checkpoint_lock = checkpoint_stats.GetLock();
-			for (idx_t column_idx = 0; column_idx < types.size(); column_idx++) {
+			auto stats_count = MinValue<idx_t>(checkpoint_stats.ColumnCount(*checkpoint_lock), live_types.size());
+			for (idx_t column_idx = 0; column_idx < stats_count; column_idx++) {
 				checkpoint_column_stats.push_back(
 				    checkpoint_stats.GetStats(*checkpoint_lock, column_idx).Statistics().Copy());
 			}
 		}
 		auto lock = stats.GetLock();
-		for (idx_t column_idx = 0; column_idx < types.size(); column_idx++) {
+		for (idx_t column_idx = 0; column_idx < checkpoint_column_stats.size(); column_idx++) {
 			auto &column_stats = stats.GetStats(*lock, column_idx).Statistics();
 			column_stats = std::move(checkpoint_column_stats[column_idx]);
 			for (auto &row_group : appended_row_groups) {
@@ -2348,8 +2460,8 @@ bool RowGroupCollection::SupportsPerColumnWrites() {
 //===--------------------------------------------------------------------===//
 shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &context, ColumnDefinition &new_column,
                                                              ExpressionExecutor &default_executor) {
-	idx_t new_column_idx = types.size();
-	auto new_types = types;
+	idx_t new_column_idx = GetTypes().size();
+	auto new_types = GetTypes();
 	auto row_groups = GetRowGroups();
 	new_types.push_back(new_column.GetType());
 	auto result = make_shared_ptr<RowGroupCollection>(info, block_manager, std::move(new_types),
@@ -2376,8 +2488,8 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AddColumn(ClientContext &cont
 }
 
 shared_ptr<RowGroupCollection> RowGroupCollection::RemoveColumn(idx_t col_idx) {
-	D_ASSERT(col_idx < types.size());
-	auto new_types = types;
+	D_ASSERT(col_idx < GetTypes().size());
+	auto new_types = GetTypes();
 	auto row_groups = GetRowGroups();
 	new_types.erase_at(col_idx);
 
@@ -2402,8 +2514,8 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
                                                              const LogicalType &target_type,
                                                              vector<StorageIndex> bound_columns, Expression &cast_expr,
                                                              TransactionData transaction) {
-	D_ASSERT(changed_idx < types.size());
-	auto new_types = types;
+	D_ASSERT(changed_idx < GetTypes().size());
+	auto new_types = GetTypes();
 	auto row_groups = GetRowGroups();
 	new_types[changed_idx] = target_type;
 
@@ -2417,7 +2529,7 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 		if (bound_columns[i].IsRowIdColumn()) {
 			scan_types.emplace_back(LogicalType::ROW_TYPE);
 		} else {
-			scan_types.push_back(types[bound_columns[i].GetPrimaryIndex()]);
+			scan_types.push_back(GetTypes()[bound_columns[i].GetPrimaryIndex()]);
 		}
 	}
 	DataChunk scan_chunk;
@@ -2457,9 +2569,9 @@ void RowGroupCollection::VerifyNewConstraint(const QueryContext &context, DuckTr
 	auto &not_null_constraint = constraint.Cast<BoundNotNullConstraint>();
 	vector<LogicalType> scan_types;
 	auto physical_index = not_null_constraint.index.index;
-	D_ASSERT(physical_index < types.size());
+	D_ASSERT(physical_index < GetTypes().size());
 
-	scan_types.push_back(types[physical_index]);
+	scan_types.push_back(GetTypes()[physical_index]);
 	DataChunk scan_chunk;
 	scan_chunk.Initialize(GetAllocator(), scan_types);
 

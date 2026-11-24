@@ -26,6 +26,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 
 namespace duckdb {
@@ -341,6 +342,7 @@ ErrorData DuckTransaction::Commit(ClientContext &context, AttachedDatabase &db, 
 
 ErrorData DuckTransaction::Rollback() {
 	try {
+		RevertSharedColumns();
 		storage->Rollback();
 		undo_buffer.Rollback();
 		return ErrorData();
@@ -386,6 +388,34 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
 		}
 	}
+}
+
+void DuckTransaction::LockCheckpointsUntilCommit() {
+	lock_guard<mutex> guard(lock_keys_lock);
+	if (!checkpoint_lock) {
+		checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
+	}
+}
+
+void DuckTransaction::AddSharedColumns(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection,
+                                       idx_t column_count) {
+	lock_guard<mutex> guard(shared_columns_lock);
+	shared_columns.push_back(SharedColumnAddition {std::move(info), std::move(collection), column_count});
+}
+
+void DuckTransaction::ClearSharedColumns() {
+	lock_guard<mutex> guard(shared_columns_lock);
+	shared_columns.clear();
+}
+
+void DuckTransaction::RevertSharedColumns() {
+	lock_guard<mutex> guard(shared_columns_lock);
+	for (idx_t i = shared_columns.size(); i > 0; i--) {
+		auto &addition = shared_columns[i - 1];
+		lock_guard<mutex> append_guard(addition.info->GetAppendLock());
+		addition.collection->RemoveSharedColumns(addition.column_count);
+	}
+	shared_columns.clear();
 }
 
 unique_ptr<StorageLockKey> DuckTransaction::TakeCommitScopedCheckpointLock() {

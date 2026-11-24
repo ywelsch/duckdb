@@ -1,0 +1,220 @@
+# name: test/sql/storage/alter_add_column_shared_row_groups.test
+# description: ADD COLUMN with a constant shares the row groups with the older version while checkpoints rewrite them
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_add_column_shared_row_groups.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE a AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE b AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE c AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE m AS SELECT i, i::VARCHAR AS s FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+# rows appended to the persistent row groups: the next checkpoint rewrites their columns
+statement ok
+INSERT INTO a SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO b SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO c SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+DELETE FROM m WHERE i < 300000 AND i % 10 <> 0
+
+# a snapshot from before the ALTERs
+statement ok con3
+BEGIN
+
+query I con3
+SELECT COUNT(*) FROM a
+----
+1100
+
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE a ADD COLUMN k INTEGER DEFAULT 1
+
+# two shared columns in one transaction
+statement ok con1
+ALTER TABLE c ADD COLUMN k1 INTEGER DEFAULT 10
+
+statement ok con1
+ALTER TABLE c ADD COLUMN k2 VARCHAR
+
+statement ok con2
+BEGIN
+
+statement ok con2
+ALTER TABLE b ADD COLUMN k INTEGER DEFAULT 2
+
+statement ok con4
+BEGIN
+
+statement ok con4
+ALTER TABLE m ADD COLUMN k INTEGER DEFAULT 3
+
+# the open ALTERs do not hold the checkpoint back, and the older version keeps its columns
+statement ok
+CHECKPOINT
+
+statement error
+SELECT k FROM a
+----
+not found
+
+query II
+SELECT COUNT(*), SUM(i) FROM a
+----
+1100	604450
+
+# the ALTER's own writes after the checkpoint, on the row group it rewrote
+statement ok con1
+UPDATE a SET k = 5 WHERE i >= 1000 AND i < 1010
+
+statement ok con1
+DELETE FROM a WHERE i >= 1090
+
+statement ok con1
+INSERT INTO a VALUES (5000, 'x', 7)
+
+statement ok con1
+COMMIT
+
+statement ok con2
+ROLLBACK
+
+statement ok con4
+COMMIT
+
+query III con3
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM a
+----
+1100	604450	1100
+
+statement error con3
+SELECT k FROM a
+----
+not found
+
+statement ok con3
+COMMIT
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM a
+----
+1091	598505	1090	1137
+
+statement error
+SELECT k FROM b
+----
+not found
+
+statement ok
+INSERT INTO b VALUES (5000, 'x')
+
+query IIII
+SELECT COUNT(*), SUM(k1), COUNT(k2), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM c
+----
+1100	11000	0	1100
+
+query III
+SELECT COUNT(*), SUM(i), SUM(k) FROM m
+----
+130000	39499800000	390000
+
+statement ok
+INSERT INTO a SELECT i, repeat(md5(i::VARCHAR), 160), 2 FROM range(6000, 6100) t(i)
+
+# a second transaction's ALTER of a table with an uncommitted shared column conflicts
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE b ADD COLUMN x INTEGER DEFAULT 8
+
+statement ok con2
+BEGIN
+
+statement error con2
+ALTER TABLE b ADD COLUMN y INTEGER DEFAULT 9
+----
+conflict
+
+statement error
+ALTER TABLE b DROP COLUMN s
+----
+conflict
+
+statement ok con1
+COMMIT
+
+statement ok
+INSERT INTO b VALUES (6000, 'y', 1)
+
+statement ok con2
+ROLLBACK
+
+query II
+SELECT COUNT(*), SUM(x) FROM b
+----
+1102	8809
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM a
+----
+1191	1203455	1190	1337
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM b
+----
+1102	615450	8809
+
+statement error
+SELECT k FROM b
+----
+not found
+
+query III
+SELECT COUNT(*), SUM(k1), COUNT(k2) FROM c
+----
+1100	11000	0
+
+query III
+SELECT COUNT(*), SUM(i), SUM(k) FROM m
+----
+130000	39499800000	390000
+
+statement ok
+CHECKPOINT
