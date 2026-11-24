@@ -23,6 +23,25 @@ CREATE TABLE retyped AS SELECT i, repeat(md5((i + 1)::VARCHAR), 160) AS s FROM r
 statement ok
 CREATE TABLE added AS SELECT i, repeat(md5((i + 2)::VARCHAR), 160) AS s FROM range(2000) t(i)
 
+statement ok
+CREATE TABLE keyed (i INTEGER PRIMARY KEY, s VARCHAR)
+
+statement ok
+INSERT INTO keyed SELECT i, repeat(md5((i + 3)::VARCHAR), 160) FROM range(2000) t(i)
+
+# deletes on disk, loaded only when the table is read
+statement ok
+DELETE FROM dropped WHERE i % 3 = 0
+
+statement ok
+DELETE FROM retyped WHERE i % 3 = 0
+
+statement ok
+DELETE FROM added WHERE i % 3 = 0
+
+statement ok
+DELETE FROM keyed WHERE i % 5 = 0
+
 loop k 0 3
 
 statement ok
@@ -33,7 +52,7 @@ endloop
 statement ok
 CHECKPOINT
 
-# the columns are loaded from disk only when read
+# the columns and deletes are loaded from disk only when read
 restart
 
 statement ok
@@ -45,13 +64,14 @@ SET force_compression='uncompressed'
 statement ok
 SET debug_verify_blocks=true
 
+# a snapshot from before the ALTERs that has not read the altered tables yet
 statement ok con1
 BEGIN
 
-query III con1
-SELECT (SELECT SUM(i) FROM dropped), (SELECT SUM(i) FROM retyped), (SELECT SUM(i) FROM added)
+query I con1
+SELECT COUNT(*) FROM filler0
 ----
-1999000	1999000	1999000
+0
 
 statement ok con2
 ALTER TABLE dropped DROP COLUMN s
@@ -61,6 +81,12 @@ ALTER TABLE retyped ALTER s TYPE BLOB
 
 statement ok con2
 ALTER TABLE added ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok con2
+ALTER TABLE keyed ADD COLUMN k INTEGER DEFAULT 2
+
+statement ok con2
+ALTER TABLE keyed DROP COLUMN s
 
 statement ok con2
 CHECKPOINT
@@ -81,20 +107,35 @@ SELECT free_blocks FROM pragma_database_size()
 ----
 0
 
-query III con1
-SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), typeof(ANY_VALUE(s)) FROM dropped
+query IIII con1
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), typeof(ANY_VALUE(s)) FROM dropped
 ----
-2000	2000	VARCHAR
+1333	1332667	1333	VARCHAR
+
+query IIII con1
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)), typeof(ANY_VALUE(s)) FROM retyped
+----
+1333	1332667	1333	VARCHAR
 
 query III con1
-SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)), typeof(ANY_VALUE(s)) FROM retyped
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5((i + 2)::VARCHAR), 160)) FROM added
 ----
-2000	2000	VARCHAR
+1333	1332667	1333
 
 query II con1
-SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 2)::VARCHAR), 160)) FROM added
+SELECT i, s = repeat(md5((i + 3)::VARCHAR), 160) FROM keyed WHERE i = 1234
 ----
-2000	2000
+1234	true
+
+query I con1
+SELECT COUNT(*) FROM keyed WHERE i = 1235
+----
+0
+
+query III con1
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5((i + 3)::VARCHAR), 160)) FROM keyed
+----
+1600	1600000	1600
 
 statement error con1
 SELECT k FROM added
@@ -123,17 +164,35 @@ SET debug_verify_blocks=true
 query II
 SELECT COUNT(*), SUM(i) FROM dropped
 ----
-2000	1999000
+1333	1332667
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)::BLOB), typeof(ANY_VALUE(s)) FROM retyped
+----
+1333	1332667	1333	BLOB
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5((i + 2)::VARCHAR), 160)), SUM(k) FROM added
+----
+1333	1332667	1333	1333
+
+query II
+SELECT i, k FROM keyed WHERE i = 1234
+----
+1234	2
 
 query III
-SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)::BLOB), typeof(ANY_VALUE(s)) FROM retyped
+SELECT COUNT(*), SUM(i), SUM(k) FROM keyed
 ----
-2000	2000	BLOB
+1600	1600000	3200
 
-query III
-SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 2)::VARCHAR), 160)), SUM(k) FROM added
+statement error
+INSERT INTO keyed VALUES (1234, 0)
 ----
-2000	2000	2000
+Duplicate key
+
+statement ok
+INSERT INTO keyed VALUES (1235, 0)
 
 query II
 SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM filler0
