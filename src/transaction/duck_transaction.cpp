@@ -399,9 +399,7 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	if (acquired_checkpoint_lock) {
 		// no checkpoint runs from here on: copies of earlier ALTERs take what one rewrote before they are modified
 		lock_guard<mutex> guard(altered_collections_lock);
-		for (auto &collection : altered_collections) {
-			collection->RebaseAlter();
-		}
+		RebaseAlteredCollections();
 	}
 }
 
@@ -418,6 +416,26 @@ void DuckTransaction::AddAlteredCollection(shared_ptr<DataTableInfo> info, share
 	altered_collections.push_back(std::move(collection));
 }
 
+void DuckTransaction::AddAlterParent(shared_ptr<DataTable> parent) {
+	lock_guard<mutex> guard(altered_collections_lock);
+	alter_parents.push_back(std::move(parent));
+}
+
+void DuckTransaction::RebaseAlteredCollections() {
+	for (auto &collection : altered_collections) {
+		if (collection->RebaseAlter()) {
+			continue;
+		}
+		for (auto &parent : alter_parents) {
+			if (parent->IsMainTable()) {
+				// a concurrent insert reverted its rows from a table this transaction altered: the commit fails on that
+				return;
+			}
+		}
+		throw InternalException("The row groups an ALTER copied no longer line up with those of the table");
+	}
+}
+
 void DuckTransaction::LockForAlterCommit() {
 	{
 		lock_guard<mutex> guard(lock_keys_lock);
@@ -430,9 +448,7 @@ void DuckTransaction::LockForAlterCommit() {
 		}
 	}
 	lock_guard<mutex> guard(altered_collections_lock);
-	for (auto &collection : altered_collections) {
-		collection->RebaseAlter();
-	}
+	RebaseAlteredCollections();
 }
 
 void DuckTransaction::FinishAlteredCollections() noexcept {
@@ -445,6 +461,7 @@ void DuckTransaction::FinishAlteredCollections() noexcept {
 	}
 	altered_collections.clear();
 	altered_tables.clear();
+	alter_parents.clear();
 }
 
 unique_ptr<StorageLockKey> DuckTransaction::TakeCommitScopedCheckpointLock() {

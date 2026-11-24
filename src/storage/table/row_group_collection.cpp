@@ -1,5 +1,4 @@
 #include "duckdb/storage/table/row_group_collection.hpp"
-#include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 
@@ -2498,34 +2497,34 @@ vector<RowGroupEntry> GetRowGroupEntries(RowGroupSegmentTree &row_groups) {
 
 } // namespace
 
-void RowGroupCollection::RebaseAlter() {
+bool RowGroupCollection::RebaseAlter() {
 	lock_guard<mutex> guard(alter_source_lock);
 	if (!alter_source) {
-		return;
+		return true;
 	}
 	auto &source = *alter_source;
 	auto current_row_groups = source.root->GetRowGroups();
 	if (current_row_groups == source.row_groups) {
 		// no checkpoint replaced the row groups of the committed table since they were copied
-		return;
+		return true;
 	}
 	auto own_row_groups = GetRowGroups();
 	auto own = GetRowGroupEntries(*own_row_groups);
 	auto copied = GetRowGroupEntries(*source.row_groups);
 	auto current = GetRowGroupEntries(*current_row_groups);
 	if (own.size() != copied.size() || current.size() != copied.size()) {
-		throw TransactionException("Cannot commit the ALTER of table %s: a checkpoint changed its row groups",
-		                           info->GetTableName());
+		return false;
+	}
+	for (idx_t i = 0; i < own.size(); i++) {
+		if (own[i].row_start != copied[i].row_start || current[i].row_start != copied[i].row_start ||
+		    current[i].row_group->count != copied[i].row_group->count) {
+			return false;
+		}
 	}
 	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, own_row_groups->GetBaseRowId());
 	{
 		auto l = new_row_groups->Lock();
 		for (idx_t i = 0; i < own.size(); i++) {
-			if (own[i].row_start != copied[i].row_start || current[i].row_start != copied[i].row_start ||
-			    current[i].row_group->count != copied[i].row_group->count) {
-				throw TransactionException("Cannot commit the ALTER of table %s: a checkpoint changed its row groups",
-				                           info->GetTableName());
-			}
 			if (current[i].row_group == copied[i].row_group) {
 				// not rewritten by a checkpoint
 				new_row_groups->AppendSegment(l, own[i].row_group, own[i].row_start);
@@ -2538,6 +2537,7 @@ void RowGroupCollection::RebaseAlter() {
 	}
 	SetRowGroups(std::move(new_row_groups));
 	source.row_groups = std::move(current_row_groups);
+	return true;
 }
 
 void RowGroupCollection::ClearAlterSource() {

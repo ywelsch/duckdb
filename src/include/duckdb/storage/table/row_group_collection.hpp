@@ -268,8 +268,9 @@ public:
 	//! Records that an uncommitted ALTER built this collection from parent, parent_columns[i] is column i's source
 	void SetAlterSource(const shared_ptr<RowGroupCollection> &parent, shared_ptr<RowGroupSegmentTree> parent_row_groups,
 	                    const vector<optional_idx> &parent_columns);
-	//! Takes the shared columns from the root's current row groups if a checkpoint replaced them since the copy
-	void RebaseAlter();
+	//! Takes the shared columns from the root's current row groups if a checkpoint replaced them since the copy,
+	//! returns false (and changes nothing) if those no longer line up with the copy
+	bool RebaseAlter();
 	void ClearAlterSource();
 
 private:

@@ -39,6 +39,7 @@
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_window_function_info.hpp"
 
@@ -324,6 +325,11 @@ void DuckSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			throw CatalogException("Couldn't change ownership!");
 		}
 	} else {
+		unique_ptr<StorageLockKey> checkpoint_lock;
+		if (transaction.transaction && info.GetModifications().AlterTable()) {
+			// the ALTER may copy the row groups of the table: no checkpoint replaces them while it does
+			checkpoint_lock = transaction.transaction->Cast<DuckTransaction>().GetCheckpointLockForStatement();
+		}
 		auto &name = info.GetQualifiedName().Name();
 		if (!set.AlterEntry(transaction, name, info)) {
 			throw CatalogException::MissingEntry(type, name, string());

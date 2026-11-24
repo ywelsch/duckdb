@@ -17,6 +17,7 @@
 
 namespace duckdb {
 class CommitDropState;
+class DataTable;
 struct DataTableInfo;
 class DuckTableEntry;
 class RowGroupCollection;
@@ -118,6 +119,8 @@ public:
 
 	//! Registers the row groups an ALTER of this transaction copied from the table of info
 	void AddAlteredCollection(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection);
+	//! Registers a table version that a storage ALTER of this transaction replaced
+	void AddAlterParent(shared_ptr<DataTable> parent);
 	//! Waits for a running checkpoint if a storage ALTER needs the checkpoint lock to commit, then rebases the copies
 	void LockForAlterCommit();
 	//! Releases the copies once the commit or rollback is resolved
@@ -150,8 +153,13 @@ private:
 	vector<shared_ptr<RowGroupCollection>> altered_collections;
 	//! The tables whose row groups were copied, each counted once in its pending ALTERs
 	vector<shared_ptr<DataTableInfo>> altered_tables;
+	//! The table versions that storage ALTERs of this transaction replaced
+	vector<shared_ptr<DataTable>> alter_parents;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
+
+	//! Rebases the copies of this transaction's ALTERs, with altered_collections_lock held
+	void RebaseAlteredCollections();
 	//! Lock for accessing sequence_usage
 	mutex sequence_lock;
 	//! Map of all sequences that were used during the transaction and the value they had in this transaction
