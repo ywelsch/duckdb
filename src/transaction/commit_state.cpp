@@ -404,6 +404,9 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info)
 
 		// Set the timestamp of the catalog entry to the given commit_id, marking it as committed
 		CatalogSet::UpdateTimestamp(old_entry.Parent(), commit_id);
+		if (new_entry.type == CatalogType::INDEX_ENTRY && old_entry.type != CatalogType::INDEX_ENTRY) {
+			new_entry.Cast<DuckIndexEntry>().GetIndexEntry()->SetCommitted(true);
+		}
 
 		// drop any blocks associated with the catalog entry if possible (e.g. in case of a DROP or ALTER)
 		CommitEntryDrop(old_entry, data + sizeof(CatalogEntry *), info);
@@ -478,6 +481,10 @@ void CommitState::RevertCommit(UndoFlags type, data_ptr_t data) {
 		auto catalog_entry = Load<CatalogEntry *>(data);
 		D_ASSERT(catalog_entry->HasParent());
 		CatalogSet::UpdateTimestamp(catalog_entry->Parent(), transaction_id);
+		auto &parent = catalog_entry->Parent();
+		if (parent.type == CatalogType::INDEX_ENTRY && catalog_entry->type != CatalogType::INDEX_ENTRY) {
+			parent.Cast<DuckIndexEntry>().GetIndexEntry()->SetCommitted(false);
+		}
 		if (catalog_entry->name != catalog_entry->Parent().name) {
 			CatalogSet::UpdateTimestamp(*catalog_entry, transaction_id);
 		}

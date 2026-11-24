@@ -149,6 +149,8 @@ public:
 	void Retire();
 	//! Gives up the on-disk blocks of the physical index, which stays readable. False if its type cannot.
 	bool DisownBlocks(BlockIdVisitor &visitor);
+	//! Marks the index as not committed yet, or as committed.
+	void SetCommitted(bool committed);
 	//! Binds the unbound physical index without replacing it (nullptr for skipped mismatched keys).
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types,
 	                            bool skip_mismatched_keys = false);
@@ -233,6 +235,8 @@ private:
 	//! Whether the enforced constraint is deferred. Derived from the catalog constraint, not serialized.
 	const ConstraintCheckMode check_mode;
 	IndexDeltas deltas;
+	//! False while the transaction that creates the index has not committed: changes then skip the checkpoint deltas
+	atomic<bool> committed {true};
 };
 
 template <class TARGET>

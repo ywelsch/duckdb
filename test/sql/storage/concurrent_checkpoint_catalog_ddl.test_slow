@@ -381,6 +381,7 @@ Cannot CHECKPOINT
 statement ok con1
 ROLLBACK
 
+# creating an index does not keep them from running
 statement ok con1
 BEGIN TRANSACTION
 
@@ -390,10 +391,8 @@ CREATE INDEX u_idx ON u(i)
 statement ok
 INSERT INTO t2 VALUES (1, 1)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK

@@ -99,7 +99,7 @@ onlyif threadid=1
 statement ok
 INSERT INTO mem.timing VALUES ('changes', now())
 
-# creating an index waits for the checkpoint
+# creating an index does not wait for the checkpoint, which does not write it
 onlyif threadid=3
 statement ok
 CREATE INDEX other_i ON other(i)
@@ -136,7 +136,7 @@ SELECT COUNT(*) FROM mem.timing w, mem.timing e WHERE w.who = 'changes' AND e.wh
 1
 
 query I
-SELECT COUNT(*) FROM mem.timing w, mem.timing e WHERE w.who = 'create index' AND e.who = 'checkpoint end' AND w.t > e.t - INTERVAL 1 SECOND
+SELECT COUNT(*) FROM mem.timing w, mem.timing e WHERE w.who = 'create index' AND e.who = 'checkpoint end' AND w.t < e.t - INTERVAL 2 SECOND
 ----
 1
 

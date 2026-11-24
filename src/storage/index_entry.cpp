@@ -63,7 +63,8 @@ ErrorData IndexEntry::Append(DataChunk &chunk, Vector &row_ids, const shared_ptr
 
 	bool lookup_main_index = false;
 	optional_ptr<BoundIndex> append_index;
-	if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint)) {
+	// the WAL record of an index that is not committed yet has its main index only: it takes no deltas
+	if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint) && committed) {
 		append_index = deltas.GetOrCreate(bound_index, IndexDeltaType::ADDED_DATA_DURING_CHECKPOINT);
 		if (bound_index.IsUnique()) {
 			lookup_main_index = true;
@@ -289,7 +290,7 @@ void IndexEntry::RemoveFromIndex(DataChunk &chunk, Vector &row_ids, const IndexR
 	if (removal_type == IndexRemovalType::DELETED_ROWS_IN_USE) {
 		// Cleanup always removes directly from "deleted_rows_in_use", even during a checkpoint.
 		ApplyIndexRemoval(bound_index, deltas, chunk, row_ids, removal_type);
-	} else if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint)) {
+	} else if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint) && committed) {
 		// During a checkpoint, route changes through the checkpoint deltas instead of the main index.
 		ApplyIndexRemovalDuringCheckpoint(bound_index, deltas, chunk, row_ids, removal_type);
 	} else {
@@ -378,6 +379,10 @@ bool IndexEntry::DisownBlocks(BlockIdVisitor &visitor) {
 	}
 	owned_index->Cast<ART>().DisownBlocks(visitor);
 	return true;
+}
+
+void IndexEntry::SetCommitted(bool committed_p) {
+	committed = committed_p;
 }
 
 unique_ptr<BoundIndex> IndexEntry::Bind(IndexBinder &binder, const vector<LogicalType> &table_types,

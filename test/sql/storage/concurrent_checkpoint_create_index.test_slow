@@ -1,0 +1,230 @@
+# name: test/sql/storage/concurrent_checkpoint_create_index.test_slow
+# description: Indexes created while a checkpoint runs, also one not committed when it starts, and replay from the WAL
+# group: [storage]
+
+load {TEST_DIR}/concurrent_checkpoint_create_index.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE a AS SELECT i, 'a' || i AS s FROM range(100000) t(i)
+
+statement ok
+CREATE TABLE b AS SELECT i, 'b' || i AS s FROM range(100000) t(i)
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CREATE TABLE checkpoint_done (i INTEGER)
+
+statement ok
+CHECKPOINT
+
+# the checkpoint sleeps for four seconds before it scans the catalog
+statement ok
+SET debug_checkpoint_sleep_ms=4000
+
+concurrentloop threadid 0 4
+
+# thread 3 is a reader that needs the state from before the insert below, so that this is a concurrent checkpoint
+onlyif threadid=3
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=3
+query I
+SELECT COUNT(*) FROM a
+----
+100000
+
+# thread 2 creates an index that is not committed when the checkpoint starts
+onlyif threadid=2
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=2
+statement ok
+CREATE UNIQUE INDEX a_i ON a(i)
+
+sleep 500 millisecond
+
+onlyif threadid=0
+statement ok
+INSERT INTO tick VALUES (1)
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+onlyif threadid=0
+statement ok
+INSERT INTO checkpoint_done VALUES (1)
+
+sleep 1000 millisecond
+
+# during the sleep before the catalog scan, after the checkpoint's bound
+onlyif threadid=1
+statement ok
+INSERT INTO a VALUES (100000, 'during')
+
+onlyif threadid=1
+statement ok
+CREATE UNIQUE INDEX b_i ON b(i)
+
+onlyif threadid=1
+statement ok
+INSERT INTO b VALUES (100000, 'during')
+
+onlyif threadid=1
+statement ok
+DELETE FROM b WHERE i = 7
+
+# none of this waited for the checkpoint
+onlyif threadid=1
+query I
+SELECT COUNT(*) FROM checkpoint_done
+----
+0
+
+sleep 1000 millisecond
+
+onlyif threadid=2
+statement ok
+COMMIT
+
+onlyif threadid=2
+statement ok
+INSERT INTO a VALUES (100001, 'after')
+
+onlyif threadid=2
+query I
+SELECT COUNT(*) FROM checkpoint_done
+----
+0
+
+sleep 5000 millisecond
+
+onlyif threadid=3
+statement ok
+COMMIT
+
+endloop
+
+statement ok
+SET debug_checkpoint_sleep_ms=0
+
+statement ok
+INSERT INTO b VALUES (7, 'again')
+
+# replay the WAL on top of the checkpoint that ran meanwhile, twice, then checkpoint
+loop k 0 4
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+SET debug_verify_blocks=true
+
+query I
+SELECT index_name FROM duckdb_indexes() ORDER BY ALL
+----
+a_i
+b_i
+
+statement error
+INSERT INTO a VALUES (100000, 'duplicate')
+----
+Duplicate key
+
+statement error
+INSERT INTO a VALUES (100001, 'duplicate')
+----
+Duplicate key
+
+statement error
+INSERT INTO b VALUES (100000, 'duplicate')
+----
+Duplicate key
+
+statement error
+INSERT INTO b VALUES (7, 'duplicate')
+----
+Duplicate key
+
+query II
+SELECT COUNT(*), SUM(i) FROM a
+----
+100002	5000150001
+
+query II
+SELECT COUNT(*), SUM(i) FROM b
+----
+100001	5000050000
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+INSERT INTO tick VALUES (2)
+
+onlyif k=2
+statement ok
+CHECKPOINT
+
+restart
+
+endloop
+
+# an open transaction that creates an index keeps a checkpoint from vacuuming
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET max_vacuum_tasks=99
+
+statement ok
+CREATE TABLE vacuumed AS SELECT i FROM range(1000000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM vacuumed WHERE i % 2 = 0
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+CREATE INDEX vacuumed_i ON vacuumed(i)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT COUNT(DISTINCT row_group_id) > 6 FROM pragma_storage_info('vacuumed')
+----
+true
+
+statement ok con1
+COMMIT
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT COUNT(DISTINCT row_group_id) <= 6 FROM pragma_storage_info('vacuumed')
+----
+true
+
+query I
+SELECT i FROM vacuumed WHERE i = 777
+----
+777
