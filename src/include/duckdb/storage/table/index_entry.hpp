@@ -149,8 +149,12 @@ public:
 	void Retire();
 	//! Gives up the on-disk blocks of the physical index, which stays readable. False if its type cannot.
 	bool DisownBlocks(BlockIdVisitor &visitor);
-	//! Marks the index as not committed yet, or as committed.
-	void SetCommitted(bool committed);
+	//! Marks a new index as not committed yet.
+	void SetUncommitted();
+	//! Marks a new index as committed while the given checkpoint, if any, runs: that checkpoint does not write it.
+	void SetCommitted(optional_idx active_checkpoint);
+	//! Whether the running checkpoint writes the index: only then do changes go to its checkpoint deltas.
+	bool InCheckpoint(optional_idx active_checkpoint) const;
 	//! Binds the unbound physical index without replacing it (nullptr for skipped mismatched keys).
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types,
 	                            bool skip_mismatched_keys = false);
@@ -235,8 +239,10 @@ private:
 	//! Whether the enforced constraint is deferred. Derived from the catalog constraint, not serialized.
 	const ConstraintCheckMode check_mode;
 	IndexDeltas deltas;
-	//! False while the transaction that creates the index has not committed: changes then skip the checkpoint deltas
+	//! False while the transaction that creates the index has not committed
 	atomic<bool> committed {true};
+	//! The checkpoint that was running when the index committed, if any
+	atomic<idx_t> committed_during_checkpoint {DConstants::INVALID_INDEX};
 };
 
 template <class TARGET>

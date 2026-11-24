@@ -63,8 +63,8 @@ ErrorData IndexEntry::Append(DataChunk &chunk, Vector &row_ids, const shared_ptr
 
 	bool lookup_main_index = false;
 	optional_ptr<BoundIndex> append_index;
-	// the WAL record of an index that is not committed yet has its main index only: it takes no deltas
-	if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint) && committed) {
+	// a checkpoint merges the deltas of the indexes it writes: the others would lose them on WAL replay or later
+	if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint) && InCheckpoint(active_checkpoint)) {
 		append_index = deltas.GetOrCreate(bound_index, IndexDeltaType::ADDED_DATA_DURING_CHECKPOINT);
 		if (bound_index.IsUnique()) {
 			lookup_main_index = true;
@@ -290,7 +290,8 @@ void IndexEntry::RemoveFromIndex(DataChunk &chunk, Vector &row_ids, const IndexR
 	if (removal_type == IndexRemovalType::DELETED_ROWS_IN_USE) {
 		// Cleanup always removes directly from "deleted_rows_in_use", even during a checkpoint.
 		ApplyIndexRemoval(bound_index, deltas, chunk, row_ids, removal_type);
-	} else if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint) && committed) {
+	} else if (bound_index.SupportsDeltaIndexes() && deltas.ShouldUse(active_checkpoint) &&
+	           InCheckpoint(active_checkpoint)) {
 		// During a checkpoint, route changes through the checkpoint deltas instead of the main index.
 		ApplyIndexRemovalDuringCheckpoint(bound_index, deltas, chunk, row_ids, removal_type);
 	} else {
@@ -381,8 +382,22 @@ bool IndexEntry::DisownBlocks(BlockIdVisitor &visitor) {
 	return true;
 }
 
-void IndexEntry::SetCommitted(bool committed_p) {
-	committed = committed_p;
+void IndexEntry::SetUncommitted() {
+	committed = false;
+}
+
+void IndexEntry::SetCommitted(optional_idx active_checkpoint) {
+	if (committed) {
+		// not new: an altered or renamed table keeps the indexes of its constraints
+		return;
+	}
+	auto checkpoint_id = active_checkpoint.IsValid() ? active_checkpoint.GetIndex() : DConstants::INVALID_INDEX;
+	committed_during_checkpoint = checkpoint_id;
+	committed = true;
+}
+
+bool IndexEntry::InCheckpoint(optional_idx active_checkpoint) const {
+	return committed && (!active_checkpoint.IsValid() || committed_during_checkpoint != active_checkpoint.GetIndex());
 }
 
 unique_ptr<BoundIndex> IndexEntry::Bind(IndexBinder &binder, const vector<LogicalType> &table_types,

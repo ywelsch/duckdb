@@ -1,5 +1,5 @@
 # name: test/sql/storage/concurrent_checkpoint_create_index.test_slow
-# description: Indexes created while a checkpoint runs, also one not committed when it starts, and replay from the WAL
+# description: Indexes and tables with indexes created while a checkpoint runs, also an index not committed when it starts
 # group: [storage]
 
 load {TEST_DIR}/concurrent_checkpoint_create_index.db
@@ -228,3 +228,150 @@ query I
 SELECT i FROM vacuumed WHERE i = 777
 ----
 777
+
+# tables with keys, an index on a table that the checkpoint does not have, and COPY FROM DATABASE, while a checkpoint
+# runs: the next checkpoint writes their indexes for the first time
+statement ok
+ATTACH ':memory:' AS src
+
+statement ok
+CREATE TABLE src.cp (i INTEGER PRIMARY KEY, s VARCHAR)
+
+statement ok
+INSERT INTO src.cp SELECT i, 'cp' || i FROM range(1000) t(i)
+
+statement ok
+CREATE UNIQUE INDEX cp_s ON src.cp(s)
+
+statement ok
+SET debug_checkpoint_sleep_ms=4000
+
+concurrentloop threadid 0 3
+
+# thread 2 is a reader that needs the state from before the insert below, so that this is a concurrent checkpoint
+onlyif threadid=2
+statement ok
+BEGIN TRANSACTION
+
+onlyif threadid=2
+query I
+SELECT COUNT(*) FROM tick
+----
+5
+
+sleep 500 millisecond
+
+onlyif threadid=0
+statement ok
+INSERT INTO tick VALUES (3)
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+onlyif threadid=0
+statement ok
+INSERT INTO checkpoint_done VALUES (2)
+
+sleep 1000 millisecond
+
+onlyif threadid=1
+statement ok
+CREATE TABLE c (i INTEGER PRIMARY KEY, s VARCHAR UNIQUE)
+
+onlyif threadid=1
+statement ok
+INSERT INTO c SELECT i, 'c' || i FROM range(1000) t(i)
+
+onlyif threadid=1
+statement ok
+CREATE TABLE d (i INTEGER REFERENCES c(i))
+
+onlyif threadid=1
+statement ok
+INSERT INTO d VALUES (1), (2)
+
+onlyif threadid=1
+statement ok
+CREATE TABLE e (i INTEGER)
+
+onlyif threadid=1
+statement ok
+CREATE UNIQUE INDEX e_i ON e(i)
+
+onlyif threadid=1
+statement ok
+INSERT INTO e SELECT i FROM range(1000) t(i)
+
+onlyif threadid=1
+statement ok
+COPY FROM DATABASE src TO concurrent_checkpoint_create_index
+
+onlyif threadid=1
+query I
+SELECT COUNT(*) FROM checkpoint_done WHERE i = 2
+----
+0
+
+sleep 5000 millisecond
+
+onlyif threadid=2
+statement ok
+COMMIT
+
+endloop
+
+statement ok
+SET debug_checkpoint_sleep_ms=0
+
+statement ok
+INSERT INTO tick VALUES (4)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+statement error
+INSERT INTO c VALUES (5, 'x')
+----
+Duplicate key
+
+statement error
+INSERT INTO c VALUES (5000, 'c5')
+----
+Duplicate key
+
+statement error
+INSERT INTO d VALUES (5000)
+----
+foreign key
+
+statement error
+INSERT INTO e VALUES (5)
+----
+Duplicate key
+
+statement error
+INSERT INTO cp VALUES (5, 'x')
+----
+Duplicate key
+
+statement error
+INSERT INTO cp VALUES (5000, 'cp5')
+----
+Duplicate key
+
+query IIII
+SELECT (SELECT COUNT(*) FROM c), (SELECT COUNT(*) FROM d), (SELECT COUNT(*) FROM e), (SELECT COUNT(*) FROM cp)
+----
+1000	2	1000	1000
+
+statement ok
+INSERT INTO tick VALUES (5)
+
+statement ok
+CHECKPOINT

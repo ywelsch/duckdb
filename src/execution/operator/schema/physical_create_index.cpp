@@ -169,7 +169,6 @@ SinkFinalizeType PhysicalCreateIndex::Finalize(Pipeline &pipeline, Event &event,
 		auto &index = catalog_entry->Cast<DuckIndexEntry>();
 		index.initial_index_size = bound_index->GetInMemorySize();
 		index_entry = index.GetIndexEntry();
-		index_entry->SetCommitted(false);
 	} else {
 		// PRIMARY KEY columns cannot be NULL.
 		if (info->constraint_type == IndexConstraintType::PRIMARY) {

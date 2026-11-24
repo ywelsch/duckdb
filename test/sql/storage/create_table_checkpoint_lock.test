@@ -1,5 +1,5 @@
 # name: test/sql/storage/create_table_checkpoint_lock.test
-# description: CREATE TABLE AS and CREATE OR REPLACE TABLE with rows written to blocks before the commit, across checkpoints
+# description: CREATE TABLE AS and CREATE OR REPLACE TABLE, also of tables with indexes, across checkpoints
 # group: [storage]
 
 require skip_reload
@@ -136,23 +136,33 @@ COMMIT
 ----
 a dependency was created after the transaction started
 
-# the table has an index now: replacing it holds a checkpoint back
+# the table has an index now, and is replaced across a checkpoint, which still writes it with its index
 statement ok con1
 BEGIN TRANSACTION
 
 statement ok con1
-CREATE OR REPLACE TABLE replaced (i INTEGER)
+CREATE OR REPLACE TABLE replaced (i INTEGER PRIMARY KEY)
 
 statement ok
 INSERT INTO tick VALUES (5)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
-ROLLBACK
+COMMIT
+
+query I
+SELECT index_name FROM duckdb_indexes() WHERE table_name = 'replaced'
+----
+
+statement ok
+INSERT INTO replaced VALUES (1)
+
+statement error
+INSERT INTO replaced VALUES (1)
+----
+Duplicate key
 
 # an open transaction with CREATE TABLE AS keeps a checkpoint from vacuuming, as an insert does
 statement ok

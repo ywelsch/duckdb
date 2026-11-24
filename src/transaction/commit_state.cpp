@@ -404,8 +404,15 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info)
 
 		// Set the timestamp of the catalog entry to the given commit_id, marking it as committed
 		CatalogSet::UpdateTimestamp(old_entry.Parent(), commit_id);
-		if (new_entry.type == CatalogType::INDEX_ENTRY && old_entry.type != CatalogType::INDEX_ENTRY) {
-			new_entry.Cast<DuckIndexEntry>().GetIndexEntry()->SetCommitted(true);
+		// under the commit lock, under which a checkpoint becomes active: that checkpoint does not write new indexes
+		auto &transaction_manager = transaction.GetTransactionManager().Cast<DuckTransactionManager>();
+		auto active_checkpoint = transaction_manager.GetActiveCheckpoint();
+		if (new_entry.type == CatalogType::INDEX_ENTRY) {
+			new_entry.Cast<DuckIndexEntry>().GetIndexEntry()->SetCommitted(active_checkpoint);
+		} else if (new_entry.type == CatalogType::TABLE_ENTRY) {
+			for (auto &index : new_entry.Cast<DuckTableEntry>().GetConstraintIndexes()) {
+				index->SetCommitted(active_checkpoint);
+			}
 		}
 
 		// drop any blocks associated with the catalog entry if possible (e.g. in case of a DROP or ALTER)
@@ -481,10 +488,6 @@ void CommitState::RevertCommit(UndoFlags type, data_ptr_t data) {
 		auto catalog_entry = Load<CatalogEntry *>(data);
 		D_ASSERT(catalog_entry->HasParent());
 		CatalogSet::UpdateTimestamp(catalog_entry->Parent(), transaction_id);
-		auto &parent = catalog_entry->Parent();
-		if (parent.type == CatalogType::INDEX_ENTRY && catalog_entry->type != CatalogType::INDEX_ENTRY) {
-			parent.Cast<DuckIndexEntry>().GetIndexEntry()->SetCommitted(false);
-		}
 		if (catalog_entry->name != catalog_entry->Parent().name) {
 			CatalogSet::UpdateTimestamp(*catalog_entry, transaction_id);
 		}

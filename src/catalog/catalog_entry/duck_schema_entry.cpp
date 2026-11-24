@@ -182,6 +182,12 @@ bool DuckSchemaEntry::DropEntryInternal(CatalogTransaction transaction, CatalogE
 
 optional_ptr<CatalogEntry> DuckSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
 	auto table = make_uniq<DuckTableEntry>(catalog, *this, info);
+	if (transaction.transaction) {
+		// the indexes of its constraints are new until the table commits, unlike when a checkpoint is loaded
+		for (auto &index : table->GetConstraintIndexes()) {
+			index->SetUncommitted();
+		}
+	}
 	auto &dependencies = info.Base().dependencies;
 
 	vector<unique_ptr<AlterForeignKeyInfo>> fk_arrays;
@@ -280,6 +286,9 @@ optional_ptr<CatalogEntry> DuckSchemaEntry::CreateIndex(CatalogTransaction trans
 	info.dependencies.AddDependency(table, DependencyDependentFlags());
 
 	auto index = make_uniq<DuckIndexEntry>(catalog, *this, info, table);
+	if (transaction.transaction) {
+		index->GetIndexEntry()->SetUncommitted();
+	}
 	auto dependencies = index->dependencies;
 	return AddEntryInternal(transaction, std::move(index), info.on_conflict, dependencies);
 }
