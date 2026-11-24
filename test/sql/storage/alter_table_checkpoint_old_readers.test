@@ -1,0 +1,153 @@
+# name: test/sql/storage/alter_table_checkpoint_old_readers.test
+# description: Snapshots from before a storage ALTER keep reading the old version across later checkpoints
+# group: [storage]
+
+# a restart between the statements checkpoints without the reader
+require skip_reload
+
+load {TEST_DIR}/alter_table_checkpoint_old_readers.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+# uncompressed strings longer than a block's string limit go to overflow blocks
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+CREATE TABLE dropped AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(2000) t(i)
+
+statement ok
+CREATE TABLE retyped AS SELECT i, repeat(md5((i + 1)::VARCHAR), 160) AS s FROM range(2000) t(i)
+
+statement ok
+CREATE TABLE added AS SELECT i, repeat(md5((i + 2)::VARCHAR), 160) AS s FROM range(2000) t(i)
+
+loop k 0 3
+
+statement ok
+CREATE TABLE filler{k} (i INTEGER, s VARCHAR)
+
+endloop
+
+statement ok
+CHECKPOINT
+
+# the columns are loaded from disk only when read
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok con1
+BEGIN
+
+query III con1
+SELECT (SELECT SUM(i) FROM dropped), (SELECT SUM(i) FROM retyped), (SELECT SUM(i) FROM added)
+----
+1999000	1999000	1999000
+
+statement ok con2
+ALTER TABLE dropped DROP COLUMN s
+
+statement ok con2
+ALTER TABLE retyped ALTER s TYPE BLOB
+
+statement ok con2
+ALTER TABLE added ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok con2
+CHECKPOINT
+
+# would take the blocks those checkpoints freed if they could be reused
+loop k 0 3
+
+statement ok con2
+INSERT INTO filler{k} SELECT i, repeat(md5((i + 100 * {k})::VARCHAR), 160) FROM range(2000) t(i)
+
+statement ok con2
+CHECKPOINT
+
+endloop
+
+query I con2
+SELECT free_blocks FROM pragma_database_size()
+----
+0
+
+query III con1
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), typeof(ANY_VALUE(s)) FROM dropped
+----
+2000	2000	VARCHAR
+
+query III con1
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)), typeof(ANY_VALUE(s)) FROM retyped
+----
+2000	2000	VARCHAR
+
+query II con1
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 2)::VARCHAR), 160)) FROM added
+----
+2000	2000
+
+statement error con1
+SELECT k FROM added
+----
+not found
+
+statement ok con1
+COMMIT
+
+query I con2
+SELECT free_blocks > 0 FROM pragma_database_size()
+----
+true
+
+statement ok con2
+INSERT INTO filler0 SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(2000, 4000) t(i)
+
+statement ok con2
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query II
+SELECT COUNT(*), SUM(i) FROM dropped
+----
+2000	1999000
+
+query III
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)::BLOB), typeof(ANY_VALUE(s)) FROM retyped
+----
+2000	2000	BLOB
+
+query III
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 2)::VARCHAR), 160)), SUM(k) FROM added
+----
+2000	2000	2000
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM filler0
+----
+4000	4000
+
+loop k 1 3
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 100 * {k})::VARCHAR), 160)) FROM filler{k}
+----
+2000	2000
+
+endloop
+
+statement ok
+CHECKPOINT

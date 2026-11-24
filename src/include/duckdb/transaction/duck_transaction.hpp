@@ -112,6 +112,8 @@ public:
 	}
 
 	unique_ptr<StorageLockKey> TryGetCheckpointLock();
+	//! Hands out the checkpoint lock if this transaction only needs it until its commit is resolved, else null
+	unique_ptr<StorageLockKey> TakeCommitScopedCheckpointLock();
 
 	void SetIsCheckpointTransaction() {
 		is_checkpoint_transaction = true;
@@ -130,6 +132,8 @@ private:
 	mutex lock_keys_lock;
 	//! Lock that prevents checkpoints from starting
 	unique_ptr<StorageLockKey> checkpoint_lock;
+	//! Whether checkpoint_lock is held until cleanup, not only until the commit is resolved
+	bool checkpoint_lock_until_cleanup = false;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
 	//! Lock for accessing sequence_usage

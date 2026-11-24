@@ -363,19 +363,19 @@ unique_ptr<StorageLockKey> DuckTransaction::GetCheckpointLockForStatement() {
 
 void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	lock_guard<mutex> guard(lock_keys_lock);
-	if (!checkpoint_lock) {
-		bool require_write_lock = false;
-		require_write_lock = require_write_lock || type.UpdateData();
-		require_write_lock = require_write_lock || type.AlterTable();
-		require_write_lock = require_write_lock || type.CreateCatalogEntry();
-		require_write_lock = require_write_lock || type.DropCatalogEntry();
-		require_write_lock = require_write_lock || type.CreateIndex();
-		// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
-
-		if (require_write_lock) {
-			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
-			checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
-		}
+	bool require_lock_until_cleanup = false;
+	require_lock_until_cleanup = require_lock_until_cleanup || type.UpdateData();
+	require_lock_until_cleanup = require_lock_until_cleanup || type.CreateCatalogEntry();
+	require_lock_until_cleanup = require_lock_until_cleanup || type.DropCatalogEntry();
+	require_lock_until_cleanup = require_lock_until_cleanup || type.CreateIndex();
+	// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
+	if (require_lock_until_cleanup) {
+		checkpoint_lock_until_cleanup = true;
+	}
+	// a storage ALTER only needs the lock until its commit is resolved: older snapshots keep the old version
+	if (!checkpoint_lock && (require_lock_until_cleanup || type.AlterTable())) {
+		// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
+		checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
 	}
 	if (!vacuum_lock) {
 		bool require_vacuum_lock = false;
@@ -386,6 +386,14 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
 		}
 	}
+}
+
+unique_ptr<StorageLockKey> DuckTransaction::TakeCommitScopedCheckpointLock() {
+	lock_guard<mutex> guard(lock_keys_lock);
+	if (checkpoint_lock_until_cleanup) {
+		return nullptr;
+	}
+	return std::move(checkpoint_lock);
 }
 
 unique_ptr<StorageLockKey> DuckTransaction::TryGetCheckpointLock() {

@@ -430,6 +430,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		}
 	}
 
+	// released after the exclusive key below, as when the transaction held it until cleanup
+	unique_ptr<StorageLockKey> commit_scoped_checkpoint_lock;
 	// check if we can checkpoint
 	unique_ptr<StorageLockKey> lock;
 	auto undo_properties = transaction.GetUndoProperties();
@@ -559,6 +561,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		skip_wal_write_due_to_checkpoint = false;
 		lock.reset();
 	}
+
+	// kept until the commit is durable: a checkpoint that starts earlier would write the state from before it
+	commit_scoped_checkpoint_lock = transaction.TakeCommitScopedCheckpointLock();
 
 	// commit successful: remove the transaction id from the list of active transactions
 	// potentially resulting in garbage collection

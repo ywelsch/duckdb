@@ -1,0 +1,170 @@
+# name: test/sql/storage/alter_table_checkpoint_lock.test
+# description: A storage ALTER holds checkpoints back until it commits, not until the older snapshots end
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_table_checkpoint_lock.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+CREATE TABLE t (i INTEGER, s VARCHAR, st STRUCT(a INTEGER))
+
+statement ok
+INSERT INTO t SELECT i, 's' || i, {'a': i} FROM range(10000) t(i)
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CHECKPOINT
+
+# an open ALTER holds checkpoints back
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE t ADD COLUMN k INTEGER DEFAULT 42
+
+statement ok
+INSERT INTO tick VALUES (1)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+# once committed, it does not, also while a snapshot from before it is open
+statement ok con2
+BEGIN
+
+query I con2
+SELECT COUNT(*) FROM t
+----
+10000
+
+statement ok con1
+ALTER TABLE t ADD COLUMN k INTEGER DEFAULT 42
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ALTER TABLE t DROP COLUMN k
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ALTER TABLE t ALTER i TYPE BIGINT
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ALTER TABLE t ALTER i SET NOT NULL
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ALTER TABLE t ADD COLUMN st.b INTEGER
+
+statement ok
+CHECKPOINT
+
+# with an insert in the same transaction
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE t ADD COLUMN k INTEGER DEFAULT 7
+
+statement ok con1
+INSERT INTO t VALUES (10000, 's10000', {'a': 10000, 'b': 1}, 8)
+
+statement ok con1
+COMMIT
+
+statement ok
+CHECKPOINT
+
+query IIIII con2
+SELECT COUNT(*), SUM(i), COUNT(s), SUM(st.a), typeof(ANY_VALUE(i)) FROM t
+----
+10000	49995000	10000	49995000	INTEGER
+
+statement ok con2
+COMMIT
+
+query IIIII
+SELECT COUNT(*), SUM(i), SUM(k), SUM(st.a), typeof(ANY_VALUE(i)) FROM t
+----
+10001	50005000	70008	50005000	BIGINT
+
+# an ALTER that also updates holds checkpoints back until the older snapshots end
+statement ok con2
+BEGIN
+
+query I con2
+SELECT COUNT(*) FROM t
+----
+10001
+
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE t ADD COLUMN u INTEGER
+
+statement ok con1
+UPDATE t SET u = i
+
+statement ok con1
+COMMIT
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con2
+COMMIT
+
+statement ok
+CHECKPOINT
+
+# so does adding a primary key
+statement ok con2
+BEGIN
+
+query I con2
+SELECT COUNT(*) FROM t
+----
+10001
+
+statement ok con1
+ALTER TABLE t ADD PRIMARY KEY (i)
+
+statement error
+CHECKPOINT
+----
+Cannot CHECKPOINT
+
+statement ok con2
+COMMIT
+
+statement ok
+CHECKPOINT
+
+restart
+
+query IIIIII
+SELECT COUNT(*), SUM(i), SUM(k), SUM(u), SUM(st.a), COUNT(st.b) FROM t
+----
+10001	50005000	70008	50005000	50005000	1

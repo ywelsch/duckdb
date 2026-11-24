@@ -45,6 +45,12 @@ DatabaseModificationType AlterInfo::GetModifications() const {
 	case AlterTableType::SET_COLUMN_COMMENT:
 		// the new version of the table keeps the storage of the old one
 		return DatabaseModificationType();
+	case AlterTableType::ADD_CONSTRAINT:
+		if (IsAddUniqueConstraint()) {
+			// builds an index, which holds checkpoints back until the older snapshots end
+			return DatabaseModificationType::ALTER_TABLE | DatabaseModificationType::CREATE_INDEX;
+		}
+		return DatabaseModificationType::ALTER_TABLE;
 	default:
 		return DatabaseModificationType::ALTER_TABLE;
 	}
