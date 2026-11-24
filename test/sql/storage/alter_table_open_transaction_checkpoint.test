@@ -32,6 +32,15 @@ statement ok
 CREATE TABLE not_null AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
 
 statement ok
+CREATE TABLE appended AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE keyed (i INTEGER PRIMARY KEY, s VARCHAR)
+
+statement ok
+INSERT INTO keyed SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000) t(i)
+
+statement ok
 CREATE TABLE tick (i INTEGER)
 
 statement ok
@@ -52,6 +61,12 @@ INSERT INTO rolled_back SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 
 
 statement ok
 INSERT INTO not_null SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO appended SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO keyed SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
 
 statement ok con1
 BEGIN
@@ -82,6 +97,22 @@ BEGIN
 statement ok con2
 ALTER TABLE not_null ALTER i SET NOT NULL
 
+# only deletes and inserts after the checkpoint: the commit rebases
+statement ok con4
+BEGIN
+
+statement ok con4
+ALTER TABLE appended ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok con5
+BEGIN
+
+statement ok con5
+ALTER TABLE keyed ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok con5
+ALTER TABLE keyed DROP COLUMN s
+
 # the open ALTERs do not hold the checkpoint back
 statement ok
 CHECKPOINT
@@ -92,8 +123,9 @@ ALTER TABLE chain ALTER v TYPE BIGINT
 statement ok con1
 ALTER TABLE chain ADD COLUMN k INTEGER DEFAULT 3
 
+# rows of the row group the checkpoint rewrote
 statement ok con1
-UPDATE written SET i = i + 1000000 WHERE i < 10
+UPDATE written SET i = i + 1000000 WHERE i >= 1000 AND i < 1010
 
 statement ok con1
 DELETE FROM written WHERE i >= 1090 AND i < 1100
@@ -105,6 +137,22 @@ statement ok con1
 COMMIT
 
 statement ok con2
+COMMIT
+
+statement ok con4
+DELETE FROM appended WHERE i % 10 = 0
+
+# spans several row groups, written before the commit
+statement ok con4
+INSERT INTO appended SELECT i, i::VARCHAR, 2 FROM range(1100, 301100) t(i)
+
+statement ok con4
+COMMIT
+
+statement ok con5
+INSERT INTO keyed VALUES (5000, 9)
+
+statement ok con5
 COMMIT
 
 statement ok con3
@@ -129,6 +177,26 @@ query III
 SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM rolled_back
 ----
 1100	604450	1100
+
+query IIIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (i % 10 = 0 AND i < 1100), COUNT(*) FILTER (i < 1100 AND s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM appended
+----
+300990	45330394500	0	990	600990
+
+query II
+SELECT i, k FROM keyed WHERE i = 5000
+----
+5000	9
+
+query II
+SELECT i, k FROM keyed WHERE i = 500
+----
+500	1
+
+query II
+SELECT COUNT(*), SUM(k) FROM keyed
+----
+1101	1109
 
 statement error
 INSERT INTO not_null VALUES (NULL, 'x')
@@ -174,6 +242,31 @@ query II
 SELECT COUNT(*), SUM(i) FROM not_null
 ----
 1100	604450
+
+query IIIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (i % 10 = 0 AND i < 1100), COUNT(*) FILTER (i < 1100 AND s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM appended
+----
+300990	45330394500	0	990	600990
+
+query II
+SELECT i, k FROM keyed WHERE i = 5000
+----
+5000	9
+
+query II
+SELECT i, k FROM keyed WHERE i = 500
+----
+500	1
+
+query II
+SELECT COUNT(*), SUM(k) FROM keyed
+----
+1101	1109
+
+statement error
+INSERT INTO keyed VALUES (500, 0)
+----
+Duplicate key
 
 statement ok
 INSERT INTO chain SELECT i, i * 2, 4 FROM range(1100, 1200) t(i)
