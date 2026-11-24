@@ -76,7 +76,8 @@ DataTable::DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_m
                      unique_ptr<PersistentTableData> data)
     : db(db),
       info(make_shared_ptr<DataTableInfo>(db, std::move(table_io_manager_p), std::move(schema_path), std::move(table))),
-      column_definitions(std::move(column_definitions_p)), version(DataTableVersion::MAIN_TABLE) {
+      column_definitions(std::move(column_definitions_p)), append_lock(info->append_lock),
+      version(DataTableVersion::MAIN_TABLE) {
 	// initialize the table with the existing data from disk, if any
 	auto types = GetTypes();
 	auto &io_manager = TableIOManager::Get(*this);
@@ -92,7 +93,7 @@ DataTable::DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_m
 }
 
 DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value)
-    : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
+    : db(parent.db), info(parent.info), append_lock(info->append_lock), version(DataTableVersion::MAIN_TABLE) {
 	// add the column definitions from this DataTable
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
@@ -117,7 +118,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 }
 
 DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_column)
-    : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
+    : db(parent.db), info(parent.info), append_lock(info->append_lock), version(DataTableVersion::MAIN_TABLE) {
 	// prevent any new tuples from being added to the parent
 	auto &local_storage = LocalStorage::Get(context, db);
 	lock_guard<mutex> parent_lock(parent.append_lock);
@@ -163,7 +164,8 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 }
 
 DataTable::DataTable(ClientContext &context, DataTable &parent, BoundConstraint &constraint)
-    : db(parent.db), info(parent.info), row_groups(parent.row_groups), version(DataTableVersion::MAIN_TABLE) {
+    : db(parent.db), info(parent.info), append_lock(info->append_lock), row_groups(parent.row_groups),
+      version(DataTableVersion::MAIN_TABLE) {
 	// ALTER COLUMN to add a new constraint.
 
 	// Bind all indexes.
@@ -191,7 +193,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, BoundConstraint 
 DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_idx, const LogicalType &target_type,
                      const vector<StorageIndex> &bound_columns, Expression &cast_expr,
                      optional_ptr<BoundConstraint> constraint_to_verify)
-    : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
+    : db(parent.db), info(parent.info), append_lock(info->append_lock), version(DataTableVersion::MAIN_TABLE) {
 	auto &transaction = DuckTransaction::Get(context, db);
 	auto &local_storage = LocalStorage::Get(transaction);
 	// prevent any tuples from being added to the parent
