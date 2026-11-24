@@ -21,7 +21,7 @@ CREATE TABLE tick (i INTEGER)
 statement ok
 CHECKPOINT
 
-# an open ALTER holds checkpoints back
+# an open ALTER does not hold checkpoints back
 statement ok con1
 BEGIN
 
@@ -31,10 +31,8 @@ ALTER TABLE t ADD COLUMN k INTEGER DEFAULT 42
 statement ok
 INSERT INTO tick VALUES (1)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK

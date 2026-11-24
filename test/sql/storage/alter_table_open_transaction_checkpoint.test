@@ -1,0 +1,182 @@
+# name: test/sql/storage/alter_table_open_transaction_checkpoint.test
+# description: Checkpoints run while an ALTER that copies the row groups of a table is uncommitted
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_table_open_transaction_checkpoint.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+# uncompressed strings longer than a block's string limit go to overflow blocks
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE added AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE chain AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i * 2 AS v FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE written AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE rolled_back AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE not_null AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CHECKPOINT
+
+# rows appended to the persistent row groups: the next checkpoint rewrites their columns and frees the old blocks
+statement ok
+INSERT INTO added SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO chain SELECT i, repeat(md5(i::VARCHAR), 160), i * 2 FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO written SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO rolled_back SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO not_null SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE added ADD COLUMN k INTEGER DEFAULT 1
+
+# a chain of ALTERs in one transaction, with the checkpoint between them
+statement ok con1
+ALTER TABLE chain DROP COLUMN s
+
+# the ALTER is written to by its own transaction after the checkpoint
+statement ok con1
+ALTER TABLE written ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok con3
+BEGIN
+
+statement ok con3
+ALTER TABLE rolled_back DROP COLUMN s
+
+statement ok con3
+ALTER TABLE rolled_back ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok con2
+BEGIN
+
+statement ok con2
+ALTER TABLE not_null ALTER i SET NOT NULL
+
+# the open ALTERs do not hold the checkpoint back
+statement ok
+CHECKPOINT
+
+statement ok con1
+ALTER TABLE chain ALTER v TYPE BIGINT
+
+statement ok con1
+ALTER TABLE chain ADD COLUMN k INTEGER DEFAULT 3
+
+statement ok con1
+UPDATE written SET i = i + 1000000 WHERE i < 10
+
+statement ok con1
+DELETE FROM written WHERE i >= 1090 AND i < 1100
+
+statement ok con1
+INSERT INTO written VALUES (5000, 'x', 5)
+
+statement ok con1
+COMMIT
+
+statement ok con2
+COMMIT
+
+statement ok con3
+ROLLBACK
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM added
+----
+1100	604450	1100	1100
+
+query IIIII
+SELECT COUNT(*), SUM(i), SUM(v), SUM(k), typeof(ANY_VALUE(v)) FROM chain
+----
+1100	604450	1208900	3300	BIGINT
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5((i % 1000000)::VARCHAR), 160)), SUM(k) FROM written
+----
+1091	10598505	1090	1095
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM rolled_back
+----
+1100	604450	1100
+
+statement error
+INSERT INTO not_null VALUES (NULL, 'x')
+----
+NOT NULL
+
+# would take freed blocks the ALTERs still referenced if they had kept the copied columns
+statement ok
+INSERT INTO tick SELECT i FROM range(100) t(i)
+
+statement ok
+INSERT INTO added SELECT i, repeat(md5(i::VARCHAR), 160), 2 FROM range(1100, 1200) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM added
+----
+1200	719400	1200	1300
+
+query IIIII
+SELECT COUNT(*), SUM(i), SUM(v), SUM(k), typeof(ANY_VALUE(v)) FROM chain
+----
+1100	604450	1208900	3300	BIGINT
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5((i % 1000000)::VARCHAR), 160)), SUM(k) FROM written
+----
+1091	10598505	1090	1095
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM rolled_back
+----
+1100	604450	1100
+
+query II
+SELECT COUNT(*), SUM(i) FROM not_null
+----
+1100	604450
+
+statement ok
+INSERT INTO chain SELECT i, i * 2, 4 FROM range(1100, 1200) t(i)
+
+statement ok
+CHECKPOINT

@@ -415,6 +415,7 @@ Cannot CHECKPOINT
 statement ok con1
 ROLLBACK
 
+# an ALTER that changes table storage holds them back only while its statement runs and while it commits
 statement ok con1
 BEGIN TRANSACTION
 
@@ -424,10 +425,8 @@ ALTER TABLE u ADD COLUMN k INTEGER
 statement ok
 INSERT INTO t2 VALUES (1, 1)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK
@@ -441,10 +440,8 @@ ALTER TABLE u ALTER i TYPE BIGINT
 statement ok
 INSERT INTO t2 VALUES (1, 1)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK
@@ -459,10 +456,8 @@ ALTER TABLE u ALTER COLUMN i SET NOT NULL
 statement ok
 INSERT INTO t2 VALUES (1, 1)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
 
 statement ok con1
 ROLLBACK

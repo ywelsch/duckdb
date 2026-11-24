@@ -17,6 +17,7 @@
 
 namespace duckdb {
 class CommitDropState;
+struct DataTableInfo;
 class DuckTableEntry;
 class RowGroupCollection;
 class RowVersionManager;
@@ -115,6 +116,13 @@ public:
 	//! Hands out the checkpoint lock if this transaction only needs it until its commit is resolved, else null
 	unique_ptr<StorageLockKey> TakeCommitScopedCheckpointLock();
 
+	//! Registers the row groups an ALTER of this transaction copied from the table of info
+	void AddAlteredCollection(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection);
+	//! Waits for a running checkpoint if a storage ALTER needs the checkpoint lock to commit, then rebases the copies
+	void LockForAlterCommit();
+	//! Releases the copies once the commit or rollback is resolved
+	void FinishAlteredCollections() noexcept;
+
 	void SetIsCheckpointTransaction() {
 		is_checkpoint_transaction = true;
 	}
@@ -134,6 +142,14 @@ private:
 	unique_ptr<StorageLockKey> checkpoint_lock;
 	//! Whether checkpoint_lock is held until cleanup, not only until the commit is resolved
 	bool checkpoint_lock_until_cleanup = false;
+	//! Whether the transaction ran an ALTER that may change table storage: it takes checkpoint_lock to commit
+	bool has_storage_alter = false;
+	//! Guards altered_collections and altered_tables
+	mutex altered_collections_lock;
+	//! The row groups that ALTERs of this transaction copied
+	vector<shared_ptr<RowGroupCollection>> altered_collections;
+	//! The tables whose row groups were copied, each counted once in its pending ALTERs
+	vector<shared_ptr<DataTableInfo>> altered_tables;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
 	//! Lock for accessing sequence_usage

@@ -1,4 +1,5 @@
 #include "duckdb/storage/table/row_group_collection.hpp"
+#include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/transaction/commit_state.hpp"
 
@@ -1535,6 +1536,11 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	if (!state.can_vacuum_deletes) {
 		return;
 	}
+	if (info->HasPendingAlter()) {
+		// an uncommitted ALTER copied the row groups: it takes the rewritten ones at commit, row group by row group
+		state.can_vacuum_deletes = false;
+		return;
+	}
 
 	// Index state decides whether vacuum may change surviving rowids.
 	auto &attached = checkpoint_state.writer.GetAttached();
@@ -2445,6 +2451,98 @@ shared_ptr<RowGroupCollection> RowGroupCollection::AlterType(ClientContext &cont
 		result_row_groups->AppendSegment(std::move(new_row_group), node.GetRowStart());
 	}
 	return result;
+}
+
+void RowGroupCollection::SetAlterSource(const shared_ptr<RowGroupCollection> &parent,
+                                        shared_ptr<RowGroupSegmentTree> parent_row_groups,
+                                        const vector<optional_idx> &parent_columns) {
+	auto source = make_uniq<AlterSource>();
+	{
+		lock_guard<mutex> guard(parent->alter_source_lock);
+		if (parent->alter_source) {
+			// an earlier ALTER of the same transaction built the parent: trace the columns back to the committed table
+			auto &parent_source = *parent->alter_source;
+			source->root = parent_source.root;
+			source->row_groups = parent_source.row_groups;
+			for (auto &parent_column : parent_columns) {
+				source->root_columns.push_back(
+				    parent_column.IsValid() ? parent_source.root_columns[parent_column.GetIndex()] : optional_idx());
+			}
+		} else {
+			source->root = parent;
+			source->row_groups = std::move(parent_row_groups);
+			source->root_columns = parent_columns;
+		}
+	}
+	lock_guard<mutex> guard(alter_source_lock);
+	alter_source = std::move(source);
+}
+
+namespace {
+
+struct RowGroupEntry {
+	idx_t row_start;
+	shared_ptr<RowGroup> row_group;
+};
+
+vector<RowGroupEntry> GetRowGroupEntries(RowGroupSegmentTree &row_groups) {
+	vector<RowGroupEntry> result;
+	auto l = row_groups.Lock();
+	auto count = row_groups.GetSegmentCount(l);
+	for (idx_t i = 0; i < count; i++) {
+		auto node = row_groups.GetSegmentByIndex(l, UnsafeNumericCast<int64_t>(i));
+		result.push_back(RowGroupEntry {node->GetRowStart(), node->ReferenceNode()});
+	}
+	return result;
+}
+
+} // namespace
+
+void RowGroupCollection::RebaseAlter() {
+	lock_guard<mutex> guard(alter_source_lock);
+	if (!alter_source) {
+		return;
+	}
+	auto &source = *alter_source;
+	auto current_row_groups = source.root->GetRowGroups();
+	if (current_row_groups == source.row_groups) {
+		// no checkpoint replaced the row groups of the committed table since they were copied
+		return;
+	}
+	auto own_row_groups = GetRowGroups();
+	auto own = GetRowGroupEntries(*own_row_groups);
+	auto copied = GetRowGroupEntries(*source.row_groups);
+	auto current = GetRowGroupEntries(*current_row_groups);
+	if (own.size() != copied.size() || current.size() != copied.size()) {
+		throw TransactionException("Cannot commit the ALTER of table %s: a checkpoint changed its row groups",
+		                           info->GetTableName());
+	}
+	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, own_row_groups->GetBaseRowId());
+	{
+		auto l = new_row_groups->Lock();
+		for (idx_t i = 0; i < own.size(); i++) {
+			if (own[i].row_start != copied[i].row_start || current[i].row_start != copied[i].row_start ||
+			    current[i].row_group->count != copied[i].row_group->count) {
+				throw TransactionException("Cannot commit the ALTER of table %s: a checkpoint changed its row groups",
+				                           info->GetTableName());
+			}
+			if (current[i].row_group == copied[i].row_group) {
+				// not rewritten by a checkpoint
+				new_row_groups->AppendSegment(l, own[i].row_group, own[i].row_start);
+				continue;
+			}
+			new_row_groups->AppendSegment(
+			    l, own[i].row_group->RebaseColumns(*this, *current[i].row_group, source.root_columns),
+			    own[i].row_start);
+		}
+	}
+	SetRowGroups(std::move(new_row_groups));
+	source.row_groups = std::move(current_row_groups);
+}
+
+void RowGroupCollection::ClearAlterSource() {
+	lock_guard<mutex> guard(alter_source_lock);
+	alter_source.reset();
 }
 
 void RowGroupCollection::VerifyNewConstraint(const QueryContext &context, DuckTransaction &transaction,

@@ -50,6 +50,16 @@ public:
 	bool AppendRequiresNewRowGroup(RowGroupCollection &collection, optional_idx checkpoint_id);
 	optional_idx CheckpointRowGroupCount(const CheckpointOptions &options) const;
 	void VerifyIndexBuffers() const;
+	//! An uncommitted ALTER copied the row groups of this table: a checkpoint must not merge them
+	void AddPendingAlter() {
+		pending_alters++;
+	}
+	void RemovePendingAlter() {
+		pending_alters--;
+	}
+	bool HasPendingAlter() const {
+		return pending_alters > 0;
+	}
 
 	Identifier GetSchemaName();
 	//! The full (possibly nested) schema path of the table
@@ -76,6 +86,8 @@ private:
 	optional_idx last_seen_checkpoint;
 	//! The amount of row groups the checkpoint is processing
 	optional_idx checkpoint_row_group_count;
+	//! The number of transactions with an uncommitted ALTER that copied the row groups
+	atomic<idx_t> pending_alters {0};
 };
 
 } // namespace duckdb

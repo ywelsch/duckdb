@@ -26,6 +26,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 
 namespace duckdb {
@@ -50,6 +51,7 @@ SnapshotView DuckTransaction::GetSnapshotView() const {
 }
 
 DuckTransaction::~DuckTransaction() {
+	FinishAlteredCollections();
 }
 
 DuckTransaction &DuckTransaction::Get(ClientContext &context, AttachedDatabase &db) {
@@ -340,6 +342,7 @@ ErrorData DuckTransaction::Commit(ClientContext &context, AttachedDatabase &db, 
 }
 
 ErrorData DuckTransaction::Rollback() {
+	FinishAlteredCollections();
 	try {
 		storage->Rollback();
 		undo_buffer.Rollback();
@@ -362,30 +365,86 @@ unique_ptr<StorageLockKey> DuckTransaction::GetCheckpointLockForStatement() {
 }
 
 void DuckTransaction::SetModifications(DatabaseModificationType type) {
-	lock_guard<mutex> guard(lock_keys_lock);
-	bool require_lock_until_cleanup = false;
-	require_lock_until_cleanup = require_lock_until_cleanup || type.UpdateData();
-	require_lock_until_cleanup = require_lock_until_cleanup || type.CreateCatalogEntry();
-	require_lock_until_cleanup = require_lock_until_cleanup || type.DropCatalogEntry();
-	require_lock_until_cleanup = require_lock_until_cleanup || type.CreateIndex();
-	// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
-	if (require_lock_until_cleanup) {
-		checkpoint_lock_until_cleanup = true;
-	}
-	// a storage ALTER only needs the lock until its commit is resolved: older snapshots keep the old version
-	if (!checkpoint_lock && (require_lock_until_cleanup || type.AlterTable())) {
-		// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
-		checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
-	}
-	if (!vacuum_lock) {
-		bool require_vacuum_lock = false;
-		require_vacuum_lock = require_vacuum_lock || type.InsertData();
-		require_vacuum_lock = require_vacuum_lock || type.DeleteData();
+	bool acquired_checkpoint_lock = false;
+	{
+		lock_guard<mutex> guard(lock_keys_lock);
+		bool require_lock_until_cleanup = false;
+		require_lock_until_cleanup = require_lock_until_cleanup || type.UpdateData();
+		require_lock_until_cleanup = require_lock_until_cleanup || type.CreateCatalogEntry();
+		require_lock_until_cleanup = require_lock_until_cleanup || type.DropCatalogEntry();
+		require_lock_until_cleanup = require_lock_until_cleanup || type.CreateIndex();
+		// not SEQUENCE: a checkpoint writes a sequence's current state, and WAL replay keeps the most used one
+		if (require_lock_until_cleanup) {
+			checkpoint_lock_until_cleanup = true;
+		}
+		// a storage ALTER holds checkpoints back while its statement runs and while it commits, see PhysicalAlter
+		if (type.AlterTable()) {
+			has_storage_alter = true;
+		}
+		if (!checkpoint_lock && require_lock_until_cleanup) {
+			// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
+			checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
+			acquired_checkpoint_lock = true;
+		}
+		if (!vacuum_lock) {
+			bool require_vacuum_lock = false;
+			require_vacuum_lock = require_vacuum_lock || type.InsertData();
+			require_vacuum_lock = require_vacuum_lock || type.DeleteData();
 
-		if (require_vacuum_lock) {
-			vacuum_lock = GetTransactionManager().SharedVacuumLock();
+			if (require_vacuum_lock) {
+				vacuum_lock = GetTransactionManager().SharedVacuumLock();
+			}
 		}
 	}
+	if (acquired_checkpoint_lock) {
+		// no checkpoint runs from here on: copies of earlier ALTERs take what one rewrote before they are modified
+		lock_guard<mutex> guard(altered_collections_lock);
+		for (auto &collection : altered_collections) {
+			collection->RebaseAlter();
+		}
+	}
+}
+
+void DuckTransaction::AddAlteredCollection(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection) {
+	lock_guard<mutex> guard(altered_collections_lock);
+	bool counted = false;
+	for (auto &table : altered_tables) {
+		counted = counted || table.get() == info.get();
+	}
+	if (!counted) {
+		info->AddPendingAlter();
+		altered_tables.push_back(std::move(info));
+	}
+	altered_collections.push_back(std::move(collection));
+}
+
+void DuckTransaction::LockForAlterCommit() {
+	{
+		lock_guard<mutex> guard(lock_keys_lock);
+		if (!has_storage_alter) {
+			return;
+		}
+		if (!checkpoint_lock) {
+			// waits for a running checkpoint: one that started before the commit would write the old version
+			checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
+		}
+	}
+	lock_guard<mutex> guard(altered_collections_lock);
+	for (auto &collection : altered_collections) {
+		collection->RebaseAlter();
+	}
+}
+
+void DuckTransaction::FinishAlteredCollections() noexcept {
+	lock_guard<mutex> guard(altered_collections_lock);
+	for (auto &collection : altered_collections) {
+		collection->ClearAlterSource();
+	}
+	for (auto &table : altered_tables) {
+		table->RemovePendingAlter();
+	}
+	altered_collections.clear();
+	altered_tables.clear();
 }
 
 unique_ptr<StorageLockKey> DuckTransaction::TakeCommitScopedCheckpointLock() {

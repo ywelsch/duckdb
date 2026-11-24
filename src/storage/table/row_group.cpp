@@ -617,6 +617,46 @@ unique_ptr<RowGroup> RowGroup::RemoveColumn(RowGroupCollection &new_collection, 
 	return row_group;
 }
 
+unique_ptr<RowGroup> RowGroup::RebaseColumns(RowGroupCollection &new_collection, RowGroup &source,
+                                             const vector<optional_idx> &source_columns) {
+	D_ASSERT(source_columns.size() == columns.size());
+	D_ASSERT(source.count == count);
+	auto column_count = columns.size();
+	auto row_group = make_uniq<RowGroup>(new_collection, this->count);
+	row_group->version_info = version_info;
+	row_group->columns.resize(column_count);
+	row_group->is_loaded = unique_ptr<atomic<bool>[]>(new atomic<bool>[column_count]);
+	row_group->column_pointers.resize(column_count);
+	row_group->has_changes = true;
+
+	unique_lock<mutex> own_lock(row_group_lock);
+	unique_lock<mutex> source_lock(source.row_group_lock);
+	// the shared columns keep their metadata for reuse: the other columns were computed by the ALTER
+	row_group->has_per_column_metadata_blocks = source.has_per_column_metadata_blocks;
+	for (idx_t c = 0; c < column_count; c++) {
+		if (source_columns[c].IsValid()) {
+			auto source_idx = source_columns[c].GetIndex();
+			row_group->columns[c] = source.columns[source_idx];
+			row_group->is_loaded[c] = source.ColumnIsLoaded(source_idx);
+			if (source_idx < source.column_pointers.size()) {
+				row_group->column_pointers[c] = source.column_pointers[source_idx];
+			}
+			if (source.has_per_column_metadata_blocks) {
+				auto blocks = source.per_column_metadata_blocks.GetBlocksForColumns({source_idx});
+				row_group->per_column_metadata_blocks.AddColumn(c, blocks[0]);
+			}
+		} else {
+			D_ASSERT(ColumnIsLoaded(c));
+			row_group->columns[c] = columns[c];
+			row_group->is_loaded[c] = true;
+		}
+	}
+	source_lock.unlock();
+	own_lock.unlock();
+	row_group->Verify();
+	return row_group;
+}
+
 void RowGroup::CommitDrop(CommitDropState &drop_state) {
 	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
 		CommitDropColumn(column_idx, drop_state);

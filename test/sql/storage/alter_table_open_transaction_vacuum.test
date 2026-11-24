@@ -1,0 +1,77 @@
+# name: test/sql/storage/alter_table_open_transaction_vacuum.test
+# description: A checkpoint does not merge the row groups of a table while an ALTER that copied them is uncommitted
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_table_open_transaction_vacuum.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE t AS SELECT i, i::VARCHAR AS s FROM range(400000) t(i)
+
+statement ok
+CREATE TABLE u AS SELECT i, i::VARCHAR AS s FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM t WHERE i < 300000 AND i % 10 <> 0
+
+statement ok
+DELETE FROM u WHERE i < 300000 AND i % 10 <> 0
+
+query II
+SELECT (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t')), (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('u'))
+----
+4	4
+
+# nothing commits after the open transaction starts: the checkpoint is a full one and vacuums
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE t ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok
+CHECKPOINT
+
+# the other table is merged
+query II
+SELECT (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t')), (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('u'))
+----
+4	2
+
+statement ok con1
+COMMIT
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i::VARCHAR), SUM(k) FROM t
+----
+130000	39499800000	130000	130000
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t')
+----
+2
+
+restart
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i::VARCHAR), SUM(k) FROM t
+----
+130000	39499800000	130000	130000
+
+query II
+SELECT COUNT(*), SUM(i) FROM u
+----
+130000	39499800000

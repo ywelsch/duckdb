@@ -108,6 +108,12 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	lock_guard<mutex> parent_lock(parent.append_lock);
 
 	this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
+	vector<optional_idx> parent_columns;
+	for (idx_t i = 0; i + 1 < row_groups->GetTypes().size(); i++) {
+		parent_columns.emplace_back(i);
+	}
+	parent_columns.emplace_back();
+	RegisterAlterCopy(context, parent, parent_columns);
 
 	// also add this column to client local storage
 	local_storage.AddColumn(context, parent, *this, new_column, default_executor);
@@ -154,6 +160,11 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 
 	// alter the row_groups and remove the column from each of them
 	this->row_groups = parent.row_groups->RemoveColumn(removed_column);
+	vector<optional_idx> parent_columns;
+	for (idx_t i = 0; i < row_groups->GetTypes().size(); i++) {
+		parent_columns.emplace_back(i < removed_column ? i : i + 1);
+	}
+	RegisterAlterCopy(context, parent, parent_columns);
 
 	// scan the original table, and fill the new column with the transformed value
 	local_storage.DropColumn(parent, *this, removed_column);
@@ -226,6 +237,11 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 		                                   VisibilityBound::Through(transaction_manager.GetLastCommit()));
 		row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
 		                                          rewrite_visibility);
+		vector<optional_idx> parent_columns;
+		for (idx_t i = 0; i < row_groups->GetTypes().size(); i++) {
+			parent_columns.push_back(i == changed_idx ? optional_idx() : optional_idx(i));
+		}
+		RegisterAlterCopy(context, parent, parent_columns);
 
 		// scan the original table, and fill the new column with the transformed value
 		local_storage.ChangeType(context, parent, *this, changed_idx, target_type, bound_columns, cast_expr);
@@ -239,6 +255,13 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 		parent.version = previous_version;
 		throw;
 	}
+}
+
+void DataTable::RegisterAlterCopy(ClientContext &context, DataTable &parent,
+                                  const vector<optional_idx> &parent_columns) {
+	// under the parent's append lock and the ALTER's checkpoint lock: these are the row groups the copy was made from
+	row_groups->SetAlterSource(parent.row_groups, parent.row_groups->GetRowGroups(), parent_columns);
+	DuckTransaction::Get(context, db).AddAlteredCollection(info, row_groups);
 }
 
 vector<LogicalType> DataTable::GetTypes() {

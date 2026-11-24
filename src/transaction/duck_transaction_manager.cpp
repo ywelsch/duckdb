@@ -418,8 +418,17 @@ void DuckTransactionManager::CleanupTransactions() {
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
-	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
-	ErrorData error = transaction.PreFlushOptimisticBlocks(context, db);
+	ErrorData error;
+	try {
+		// before any commit lock: this can wait for a running checkpoint
+		transaction.LockForAlterCommit();
+	} catch (std::exception &ex) {
+		error = ErrorData(ex);
+	}
+	if (!error.HasError()) {
+		// flush the transaction-local blocks of bulk appends before any commit lock (see PreFlushOptimisticBlocks)
+		error = transaction.PreFlushOptimisticBlocks(context, db);
+	}
 	unique_lock<mutex> t_lock(transaction_lock);
 	if (!db.IsSystem() && !db.IsTemporary()) {
 		if (transaction.ChangesMade()) {
@@ -564,6 +573,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 	// kept until the commit is durable: a checkpoint that starts earlier would write the state from before it
 	commit_scoped_checkpoint_lock = transaction.TakeCommitScopedCheckpointLock();
+	transaction.FinishAlteredCollections();
 
 	// commit successful: remove the transaction id from the list of active transactions
 	// potentially resulting in garbage collection

@@ -314,6 +314,8 @@ private:
 	//! Verify the new added constraints against current persistent&local data
 	void VerifyNewConstraint(ClientContext &context, LocalStorage &local_storage, DataTable &parent,
 	                         const BoundConstraint &constraint);
+	//! Registers the row groups this ALTER copied from parent, parent_columns[i] is the parent column of column i
+	void RegisterAlterCopy(ClientContext &context, DataTable &parent, const vector<optional_idx> &parent_columns);
 
 	//! Verify constraints with a chunk from the Update containing only the specified column_ids
 	void VerifyUpdateConstraints(ConstraintState &state, ClientContext &context, DataChunk &chunk,

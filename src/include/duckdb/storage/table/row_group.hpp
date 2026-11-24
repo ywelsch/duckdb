@@ -176,6 +176,9 @@ public:
 	unique_ptr<RowGroup> AddColumn(RowGroupCollection &collection, ColumnDefinition &new_column,
 	                               ExpressionExecutor &executor, ColumnStatistics &new_column_stats);
 	unique_ptr<RowGroup> RemoveColumn(RowGroupCollection &collection, idx_t removed_column);
+	//! A copy of this row group that takes column i from column source_columns[i] of source where that is valid
+	unique_ptr<RowGroup> RebaseColumns(RowGroupCollection &collection, RowGroup &source,
+	                                   const vector<optional_idx> &source_columns);
 
 	//! Accumulates this row group's on-disk blocks into the drop state.
 	void CommitDrop(CommitDropState &drop_state);

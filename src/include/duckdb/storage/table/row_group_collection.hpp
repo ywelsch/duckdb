@@ -87,6 +87,16 @@ struct CollectionCheckpointResult {
 	idx_t checkpointed_row_group_count = 0;
 };
 
+//! Where the shared columns of a collection that an uncommitted ALTER copied come from
+struct AlterSource {
+	//! The collection of the committed table
+	shared_ptr<RowGroupCollection> root;
+	//! The row groups of the root that the shared columns were taken from
+	shared_ptr<RowGroupSegmentTree> row_groups;
+	//! The root column of each column, invalid for a column that the ALTER computed
+	vector<optional_idx> root_columns;
+};
+
 class RowGroupCollection {
 public:
 	RowGroupCollection(shared_ptr<DataTableInfo> info, TableIOManager &io_manager, vector<LogicalType> types,
@@ -255,6 +265,13 @@ public:
 		return metadata_pointers;
 	}
 
+	//! Records that an uncommitted ALTER built this collection from parent, parent_columns[i] is column i's source
+	void SetAlterSource(const shared_ptr<RowGroupCollection> &parent, shared_ptr<RowGroupSegmentTree> parent_row_groups,
+	                    const vector<optional_idx> &parent_columns);
+	//! Takes the shared columns from the root's current row groups if a checkpoint replaced them since the copy
+	void RebaseAlter();
+	void ClearAlterSource();
+
 private:
 	optional_ptr<SegmentNode<RowGroup>> NextUpdateRowGroup(RowGroupSegmentTree &row_groups, row_t *ids, idx_t &pos,
 	                                                       idx_t count) const;
@@ -291,6 +308,10 @@ private:
 	RowGroupAppendMode row_group_append_mode;
 	//! Whether or not we can append to a checkpointed row group
 	bool can_append_to_checkpointed_row_group = true;
+	//! Guards alter_source
+	mutex alter_source_lock;
+	//! Set while the ALTER that built this collection is uncommitted
+	unique_ptr<AlterSource> alter_source;
 };
 
 class RowGroupIterationHelper {
