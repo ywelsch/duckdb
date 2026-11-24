@@ -372,8 +372,8 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	if (require_lock_until_cleanup) {
 		checkpoint_lock_until_cleanup = true;
 	}
-	// a storage ALTER only needs the lock until its commit is resolved: older snapshots keep the old version
-	if (!checkpoint_lock && (require_lock_until_cleanup || type.AlterTable())) {
+	// storage ALTERs take no checkpoint lock
+	if (!checkpoint_lock && require_lock_until_cleanup) {
 		// obtain a shared checkpoint lock to prevent concurrent checkpoints while this transaction is running
 		checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
 	}

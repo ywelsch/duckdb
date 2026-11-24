@@ -1,0 +1,356 @@
+# name: test/sql/storage/alter_concurrent_checkpoint_paused.test_slow
+# description: ALTER statements and commits while a checkpoint is paused between writing a table and publishing it
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_concurrent_checkpoint_paused.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+# ADD COLUMN, statement and commit while the checkpoint is paused after writing the table
+statement ok
+CREATE TABLE p AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+# rows appended to the table: the checkpoint rewrites its columns and frees the old blocks
+statement ok
+INSERT INTO p SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+ALTER TABLE p ADD COLUMN k INTEGER DEFAULT 1
+
+onlyif threadid=1
+statement ok
+INSERT INTO p VALUES (5000, 'x', 2)
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM p
+----
+1101	609450	1100	1102
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM p
+----
+1101	609450	1100	1102
+
+statement ok
+DROP TABLE p
+
+statement ok
+CHECKPOINT
+
+# DROP COLUMN while the checkpoint is paused: its image still has the column
+statement ok
+CREATE TABLE q AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i * 2 AS v FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+# rows appended to the table: the checkpoint rewrites its columns and frees the old blocks
+statement ok
+INSERT INTO q SELECT i, repeat(md5(i::VARCHAR), 160), i * 2 FROM range(1000, 1100) t(i)
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+ALTER TABLE q DROP COLUMN s
+
+onlyif threadid=1
+statement ok
+INSERT INTO q VALUES (5000, 10000)
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query III
+SELECT COUNT(*), SUM(i), SUM(v) FROM q
+----
+1101	609450	1218900
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(i), SUM(v) FROM q
+----
+1101	609450	1218900
+
+statement ok
+DROP TABLE q
+
+statement ok
+CHECKPOINT
+
+# ALTER TYPE while the checkpoint is paused
+statement ok
+CREATE TABLE r AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+# rows appended to the table: the checkpoint rewrites its columns and frees the old blocks
+statement ok
+INSERT INTO r SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+ALTER TABLE r ALTER i TYPE BIGINT
+
+onlyif threadid=1
+statement ok
+INSERT INTO r VALUES (5000, 'x')
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), typeof(ANY_VALUE(i)) FROM r
+----
+1101	609450	1100	BIGINT
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), typeof(ANY_VALUE(i)) FROM r
+----
+1101	609450	1100	BIGINT
+
+statement ok
+DROP TABLE r
+
+statement ok
+CHECKPOINT
+
+# an ALTER opened before the checkpoint, which must not fail, commits while it is paused
+statement ok
+CREATE TABLE w AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+# rows appended to the table: the checkpoint rewrites its columns and frees the old blocks
+statement ok
+INSERT INTO w SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=1
+statement ok
+BEGIN
+
+onlyif threadid=1
+statement ok
+ALTER TABLE w ADD COLUMN k INTEGER DEFAULT 1
+
+sleep 300 millisecond
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+COMMIT
+
+onlyif threadid=1
+statement ok
+INSERT INTO w VALUES (5000, 'x', 2)
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM w
+----
+1101	609450	1100	1102
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(k) FROM w
+----
+1101	609450	1100	1102
+
+statement ok
+DROP TABLE w
+
+statement ok
+CHECKPOINT
+
+# SET NOT NULL, which shares the row groups, commits while the checkpoint is paused, then rows are appended
+statement ok
+CREATE TABLE n AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+# rows appended to the table: the checkpoint rewrites its columns and frees the old blocks
+statement ok
+INSERT INTO n SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(1000, 1100) t(i)
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+ALTER TABLE n ALTER i SET NOT NULL
+
+onlyif threadid=1
+statement ok
+INSERT INTO n SELECT i, 'x' FROM range(5000, 5100) t(i)
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM n
+----
+1200	1109400	1100
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM n
+----
+1200	1109400	1100
+
+statement error
+INSERT INTO n VALUES (NULL, 'x')
+----
+NOT NULL
+
+statement ok
+DROP TABLE n
+
+statement ok
+CHECKPOINT

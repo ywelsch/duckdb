@@ -1,0 +1,105 @@
+# name: test/sql/storage/alter_concurrent_checkpoint_stress.test_slow
+# description: ALTER transactions with writes on four threads while another thread checkpoints, which never fails
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_concurrent_checkpoint_stress.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+loop k 1 5
+
+statement ok
+CREATE TABLE w{k} AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(3000) t(i)
+
+endloop
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CHECKPOINT
+
+concurrentloop threadid 0 5
+
+loop r 0 12
+
+onlyif threadid=0
+statement ok
+INSERT INTO tick VALUES ({r})
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+skipif threadid=0
+statement ok
+INSERT INTO w{threadid} (i, s) SELECT i, repeat(md5(i::VARCHAR), 160) FROM range(100000 + {r} * 1000, 100000 + {r} * 1000 + 300) t(i)
+
+skipif threadid=0
+statement ok
+BEGIN
+
+skipif threadid=0
+statement ok
+ALTER TABLE w{threadid} ADD COLUMN c{r} INTEGER DEFAULT {r}
+
+skipif threadid=0
+statement ok
+ALTER TABLE w{threadid} ADD COLUMN d{r} VARCHAR DEFAULT 'd'
+
+skipif threadid=0
+statement ok
+ALTER TABLE w{threadid} ALTER i TYPE BIGINT
+
+skipif threadid=0
+statement ok
+ALTER TABLE w{threadid} DROP COLUMN d{r}
+
+skipif threadid=0
+statement ok
+DELETE FROM w{threadid} WHERE i % 89 = {r}
+
+skipif threadid=0
+statement ok
+INSERT INTO w{threadid} (i, s) VALUES (200000 + {r}, 'x')
+
+skipif threadid=0
+statement ok
+COMMIT
+
+endloop
+
+endloop
+
+statement ok
+CREATE TABLE expected AS SELECT 1 AS k, COUNT(*) AS c, SUM(i) AS si, COUNT(s) AS cs FROM w1 UNION ALL SELECT 2, COUNT(*), SUM(i), COUNT(s) FROM w2 UNION ALL SELECT 3, COUNT(*), SUM(i), COUNT(s) FROM w3 UNION ALL SELECT 4, COUNT(*), SUM(i), COUNT(s) FROM w4
+
+query I
+SELECT COUNT(*) FROM expected WHERE c < 3000
+----
+0
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query I
+SELECT COUNT(*) FROM (SELECT 1 AS k, COUNT(*) AS c, SUM(i) AS si, COUNT(s) AS cs FROM w1 UNION ALL SELECT 2, COUNT(*), SUM(i), COUNT(s) FROM w2 UNION ALL SELECT 3, COUNT(*), SUM(i), COUNT(s) FROM w3 UNION ALL SELECT 4, COUNT(*), SUM(i), COUNT(s) FROM w4 EXCEPT SELECT * FROM expected)
+----
+0
+
+statement ok
+CHECKPOINT

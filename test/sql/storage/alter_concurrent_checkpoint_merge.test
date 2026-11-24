@@ -1,0 +1,90 @@
+# name: test/sql/storage/alter_concurrent_checkpoint_merge.test
+# description: A checkpoint that merges row groups runs while ALTERs of the table are uncommitted
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_concurrent_checkpoint_merge.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE added AS SELECT i, i::VARCHAR AS s FROM range(400000) t(i)
+
+statement ok
+CREATE TABLE dropped AS SELECT i, i::VARCHAR AS s, i * 2 AS v FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM added WHERE i < 300000 AND i % 10 <> 0
+
+statement ok
+DELETE FROM dropped WHERE i < 300000 AND i % 10 <> 0
+
+# nothing commits after the open transactions start: the checkpoint is a full one and may merge
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE added ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok con2
+BEGIN
+
+statement ok con2
+ALTER TABLE dropped DROP COLUMN s
+
+statement ok
+CHECKPOINT
+
+statement ok con2
+UPDATE dropped SET i = i + 1000000 WHERE i < 100
+
+statement ok con2
+ALTER TABLE dropped ALTER v TYPE BIGINT
+
+statement ok con1
+COMMIT
+
+statement ok con2
+COMMIT
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i::VARCHAR), SUM(k) FROM added
+----
+130000	39499800000	130000	130000
+
+query IIII
+SELECT COUNT(*), SUM(i), SUM(v), typeof(ANY_VALUE(v)) FROM dropped
+----
+130000	39509800000	78999600000	BIGINT
+
+statement ok
+INSERT INTO added SELECT i, i::VARCHAR, 2 FROM range(400000, 410000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i::VARCHAR), SUM(k) FROM added
+----
+140000	43549795000	140000	150000
+
+query IIII
+SELECT COUNT(*), SUM(i), SUM(v), typeof(ANY_VALUE(v)) FROM dropped
+----
+130000	39509800000	78999600000	BIGINT
+
+statement ok
+CHECKPOINT
