@@ -1,5 +1,5 @@
 # name: test/sql/index/art/storage/test_art_drop_index_older_reader.test
-# description: A dropped index gives up its blocks once no transaction sees it anymore
+# description: A dropped index stays usable for an older reader while checkpoints free its blocks
 # group: [storage]
 
 load {TEST_DIR}/art_drop_index_older_reader.db
@@ -38,11 +38,20 @@ SELECT count(*) FROM t WHERE i = 42
 ----
 1
 
-# the index keeps its blocks while con1 can see it: no checkpoint may leave it out until then
-statement error con2
+# the drop gave up the index's blocks: the header lists them as free, but they are not reused while con1 is active
+statement ok con2
 CHECKPOINT
+
+statement ok con2
+INSERT INTO t SELECT range, range FROM range(200000, 400000);
+
+statement ok con2
+CHECKPOINT
+
+query I con1
+SELECT count(*) FROM t WHERE i = 42
 ----
-<REGEX>:.*Cannot CHECKPOINT: there are other write transactions active.*
+1
 
 statement ok con1
 COMMIT

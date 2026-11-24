@@ -29,10 +29,17 @@ class ClientContext;
 struct DataTableInfo;
 struct IndexDataTableInfo;
 class DataTable;
+class IndexEntry;
 struct DeleteInfo;
 struct UpdateInfo;
 
 enum class CommitMode { COMMIT, REVERT_COMMIT };
+
+//! A dropped table or index, whose storage a checkpoint that runs meanwhile may still write
+struct DroppedStorage {
+	shared_ptr<DataTable> table;
+	shared_ptr<IndexEntry> index;
+};
 
 //! Accumulates block marks and index removals during commit so they can be applied together once the
 //! commit chain has succeeded and FlushCommit() has been called, since these are side effects that can't be reverted
@@ -46,15 +53,13 @@ public:
 	void DropBlock(block_id_t block_id);
 	//! Register a dropped table, whose on-disk blocks are registered when the commit is finalized.
 	void DropTable(shared_ptr<DataTable> table);
-	//! Registers the on-disk blocks of dropped tables. Marks nothing, so a failure leaves nothing freed
-	void FreeTables(const vector<shared_ptr<DataTable>> &tables);
-	//! Register an index to be removed from a table's index list during FinalizeCommit: the table no longer
-	//! maintains it. The index memory is dropped and its blocks on disk are marked as free when the catalog entry of
-	//! the index is cleaned up.
-	void RemoveIndex(shared_ptr<IndexDataTableInfo> index_info);
+	//! Register a dropped index: it leaves its table's index list, and its on-disk blocks are freed like a table's.
+	void DropIndex(shared_ptr<IndexDataTableInfo> index_info);
+	//! Registers the on-disk blocks of dropped storage. A failure leaves nothing given up or freed
+	void FreeStorage(const vector<DroppedStorage> &dropped);
 	//! Finalize accumulated block marks and index removals.
 	void FinalizeCommit();
-	//! Finalize a commit: also frees the dropped tables, or hands them over to a running checkpoint.
+	//! Finalize a commit: also frees the dropped storage, or hands it over to a running checkpoint.
 	void FinalizeCommit(DuckTransactionManager &transaction_manager);
 	//! True if no work has been queued.
 	bool Empty() const;
@@ -64,7 +69,7 @@ private:
 	vector<block_id_t> dropped_block_ids;
 	//! The indexes that have been marked for removal from their table's index list once the commit chain succeeds.
 	vector<shared_ptr<IndexDataTableInfo>> pending_index_removals;
-	vector<shared_ptr<DataTable>> dropped_tables;
+	vector<DroppedStorage> dropped_storage;
 };
 
 struct IndexDataRemover {

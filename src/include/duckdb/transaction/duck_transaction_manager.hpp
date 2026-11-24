@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/transaction/commit_state.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
@@ -16,7 +17,6 @@
 #include <condition_variable>
 
 namespace duckdb {
-class DataTable;
 class DuckTransactionManager;
 class DuckTransaction;
 struct UndoBufferProperties;
@@ -68,10 +68,10 @@ public:
 		return ++next_checkpoint_id;
 	}
 	void SetActiveCheckpoint(idx_t checkpoint_id);
-	//! Ends the checkpoint. If it succeeded, frees the tables that drops handed over to it
+	//! Ends the checkpoint. If it succeeded, frees the storage that drops handed over to it
 	void ResetActiveCheckpoint(bool checkpoint_succeeded);
-	//! Hands dropped tables over to the running checkpoint, which frees them. False if none runs: the commit does
-	bool DeferDroppedTables(const vector<shared_ptr<DataTable>> &tables);
+	//! Hands dropped storage over to the running checkpoint, which frees it. False if none runs: the commit does
+	bool DeferDroppedStorage(const vector<DroppedStorage> &dropped);
 	//! The next start time, and the earliest of the active transactions: the same if none, 0 if a cleanup waits
 	void GetStartTimes(transaction_t &next_start, transaction_t &lowest_active_start);
 
@@ -160,10 +160,10 @@ private:
 	//! The lowest bound any active transaction reads at. A version preceding it is visible to
 	//! every active transaction, so whatever it supersedes can be cleaned up or compacted
 	atomic<VisibilityBound> lowest_visibility_bound;
-	//! Guards the dropped tables that are handed over to a checkpoint
-	mutex deferred_tables_lock;
-	//! The dropped tables that the running checkpoint frees once it has written its header
-	vector<shared_ptr<DataTable>> deferred_tables;
+	//! Guards the dropped storage that is handed over to a checkpoint
+	mutex deferred_storage_lock;
+	//! The dropped storage that the running checkpoint frees once it has written its header
+	vector<DroppedStorage> deferred_storage;
 	//! The lowest start time of the transactions that stayed active when the last one ended, checkpoints aside
 	atomic<transaction_t> lowest_remaining_start;
 	//! The last commit timestamp

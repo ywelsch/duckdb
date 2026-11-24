@@ -16,6 +16,7 @@
 namespace duckdb {
 
 class BoundIndex;
+struct BlockIdVisitor;
 class ColumnDataCollection;
 class DataChunk;
 class IndexBinder;
@@ -87,6 +88,8 @@ public:
 
 public:
 	void ResetStorage() override;
+	//! Gives up the persistent blocks without freeing them, and visits them once per use.
+	void DisownBlocks(BlockIdVisitor &visitor);
 
 	bool IsBound() const override {
 		return false;

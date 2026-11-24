@@ -66,7 +66,7 @@ shared_ptr<IndexEntry> DuckIndexEntry::GetIndexEntry() const {
 
 void DuckIndexEntry::CommitDrop(CommitDropState &drop_state) {
 	D_ASSERT(info);
-	drop_state.RemoveIndex(info);
+	drop_state.DropIndex(info);
 }
 
 } // namespace duckdb

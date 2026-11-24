@@ -1,5 +1,5 @@
 # name: test/sql/storage/concurrent_checkpoint_catalog_ddl.test_slow
-# description: DDL that keeps table storage and sequence use commit while a checkpoint runs, and replay from the WAL
+# description: DDL that keeps or drops table storage, and sequence use, commit while a checkpoint runs, and replay from the WAL
 # group: [storage]
 
 load {TEST_DIR}/concurrent_checkpoint_catalog_ddl.db
@@ -483,7 +483,7 @@ CHECKPOINT
 statement ok con1
 ROLLBACK
 
-# a drop with CASCADE does
+# nor does a drop with CASCADE, of an index, or of a table with indexes
 statement ok con1
 BEGIN TRANSACTION
 
@@ -493,10 +493,44 @@ DROP SCHEMA s2 CASCADE
 statement ok
 INSERT INTO t2 VALUES (1, 1)
 
-statement error
+statement ok
 CHECKPOINT
-----
-Cannot CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok
+CREATE TABLE indexed (i INTEGER PRIMARY KEY, j INTEGER)
+
+statement ok
+CREATE INDEX indexed_j ON indexed(j)
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+DROP INDEX indexed_j
+
+statement ok
+INSERT INTO t2 VALUES (1, 1)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+ROLLBACK
+
+statement ok con1
+BEGIN TRANSACTION
+
+statement ok con1
+DROP TABLE indexed
+
+statement ok
+INSERT INTO t2 VALUES (1, 1)
+
+statement ok
+CHECKPOINT
 
 statement ok con1
 ROLLBACK

@@ -120,12 +120,12 @@ void DuckTransactionManager::SetActiveCheckpoint(idx_t checkpoint_id) {
 }
 
 void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
-	vector<shared_ptr<DataTable>> dropped;
+	vector<DroppedStorage> dropped;
 	{
-		lock_guard<mutex> guard(deferred_tables_lock);
+		lock_guard<mutex> guard(deferred_storage_lock);
 		active_checkpoint = 0;
-		dropped = std::move(deferred_tables);
-		deferred_tables.clear();
+		dropped = std::move(deferred_storage);
+		deferred_storage.clear();
 	}
 	if (!checkpoint_succeeded || dropped.empty()) {
 		// a failed checkpoint invalidates the database: the WAL replays the drops when it is opened again
@@ -133,17 +133,17 @@ void DuckTransactionManager::ResetActiveCheckpoint(bool checkpoint_succeeded) {
 	}
 	// the checkpoint no longer writes them: the next checkpoint frees the blocks
 	CommitDropState drop_state(&db.GetStorageManager().GetBlockManager());
-	drop_state.FreeTables(dropped);
+	drop_state.FreeStorage(dropped);
 	drop_state.FinalizeCommit();
 }
 
-bool DuckTransactionManager::DeferDroppedTables(const vector<shared_ptr<DataTable>> &tables) {
-	lock_guard<mutex> guard(deferred_tables_lock);
+bool DuckTransactionManager::DeferDroppedStorage(const vector<DroppedStorage> &dropped) {
+	lock_guard<mutex> guard(deferred_storage_lock);
 	if (active_checkpoint == 0) {
 		return false;
 	}
-	// the checkpoint started before the drops committed: its catalog still has the tables
-	deferred_tables.insert(deferred_tables.end(), tables.begin(), tables.end());
+	// the checkpoint started before the drops committed: its catalog still has the tables and indexes
+	deferred_storage.insert(deferred_storage.end(), dropped.begin(), dropped.end());
 	return true;
 }
 
@@ -237,9 +237,8 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	auto checkpoint_type = CheckpointType::FULL_CHECKPOINT;
 	bool has_other_transactions = HasOtherTransactions(transaction);
 	if (has_other_transactions) {
-		if (undo_properties.has_updates || undo_properties.has_dropped_entries) {
-			// if we have made updates/catalog changes in this transaction we cannot checkpoint
-			// in the presence of other transactions
+		if (undo_properties.has_updates) {
+			// if we have made updates in this transaction we cannot checkpoint in the presence of other transactions
 			string other_transactions;
 			for (auto &active_transaction : active_transactions) {
 				if (!RefersToSameObject(*active_transaction, transaction)) {
@@ -252,14 +251,6 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 			if (!other_transactions.empty()) {
 				// there are other transactions!
 				// these active transactions might need data from BEFORE this transaction
-				// we might need to change our strategy here based on what changes THIS transaction has made
-				if (undo_properties.has_dropped_entries) {
-					// this transaction has changed the catalog - we cannot checkpoint
-					return CheckpointDecision(
-					    "Transaction has dropped catalog entries and there are other transactions "
-					    "active\nActive transactions: " +
-					    other_transactions);
-				}
 				// this transaction has performed updates - we cannot checkpoint
 				return CheckpointDecision(
 				    "Transaction has performed updates and there are other transactions active\nActive transactions: " +
@@ -618,7 +609,7 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 	CleanupTransactions();
 
-	if (checkpoint_decision.can_checkpoint && (undo_properties.has_updates || undo_properties.has_dropped_entries) &&
+	if (checkpoint_decision.can_checkpoint && undo_properties.has_updates &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
 		// GetCheckpointType does not checkpoint while another transaction might still need the state
 		// from before this commit. That check ran before the sync; transactions that started during

@@ -22,6 +22,7 @@
 
 namespace duckdb {
 
+struct BlockIdVisitor;
 class ConflictManager;
 class IndexEntry;
 class IndexBinder;
@@ -146,6 +147,8 @@ public:
 	//! Destroys the physical index, if any. The physical index of a dropped index is destroyed when its catalog entry
 	//! is cleaned up: until then, the transactions that still see the catalog entry can use it.
 	void Retire();
+	//! Gives up the on-disk blocks of the physical index, which stays readable. False if its type cannot.
+	bool DisownBlocks(BlockIdVisitor &visitor);
 	//! Binds the unbound physical index without replacing it (nullptr for skipped mismatched keys).
 	unique_ptr<BoundIndex> Bind(IndexBinder &binder, const vector<LogicalType> &table_types,
 	                            bool skip_mismatched_keys = false);

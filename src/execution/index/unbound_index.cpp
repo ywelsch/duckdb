@@ -57,6 +57,20 @@ void UnboundIndex::ResetStorage() {
 	}
 }
 
+void UnboundIndex::DisownBlocks(BlockIdVisitor &visitor) {
+	if (storage_reclaimed) {
+		return;
+	}
+	storage_reclaimed = true;
+	for (auto &info : storage_info->allocator_infos) {
+		for (auto &block : info.block_pointers) {
+			if (block.IsValid()) {
+				visitor.Visit(block.block_id);
+			}
+		}
+	}
+}
+
 IndexCheckpointResult UnboundIndex::Checkpoint(PartialBlockManager &, StorageVersion) {
 	if (HasBufferedReplays()) {
 		throw InternalException("Cannot checkpoint index %s: it has buffered operations that were not applied",

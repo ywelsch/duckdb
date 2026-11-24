@@ -1,5 +1,5 @@
 # name: test/sql/storage/concurrent_checkpoint_index_write.test_slow
-# description: A checkpoint does not hold a table's index list lock between the writes of the table's indexes
+# description: A checkpoint does not hold a table's index list lock between the writes of the table's indexes, and still writes an index dropped meanwhile
 # group: [storage]
 
 load {TEST_DIR}/concurrent_checkpoint_index_write.db
@@ -11,10 +11,16 @@ statement ok
 PRAGMA disable_checkpoint_on_shutdown
 
 statement ok
+SET debug_verify_blocks=true
+
+statement ok
 CREATE TABLE t (i INTEGER PRIMARY KEY, s VARCHAR);
 
 statement ok
 CREATE INDEX t_s ON t(s);
+
+statement ok
+CREATE INDEX t_si ON t(s, i);
 
 statement ok
 INSERT INTO t SELECT i, 's' || i FROM range(100000) t(i);
@@ -36,11 +42,11 @@ ATTACH ':memory:' AS mem
 statement ok
 CREATE TABLE mem.timing (who VARCHAR, t TIMESTAMP);
 
-# the checkpoint sleeps for three seconds after it wrote each of the two indexes of t
+# the checkpoint sleeps for three seconds after it wrote each of the three indexes of t
 statement ok
 SET debug_checkpoint_index_sleep_ms=3000
 
-concurrentloop threadid 0 4
+concurrentloop threadid 0 5
 
 # thread 2 reads the state from before the commit of thread 0, so that the checkpoint is a concurrent one
 onlyif threadid=2
@@ -102,6 +108,15 @@ onlyif threadid=3
 statement ok
 INSERT INTO mem.timing VALUES ('create index', now())
 
+# the checkpoint still writes the dropped index, which it frees after its header
+onlyif threadid=4
+statement ok
+DROP INDEX t_si
+
+onlyif threadid=4
+statement ok
+INSERT INTO mem.timing VALUES ('drop', now())
+
 onlyif threadid=2
 statement ok
 ROLLBACK
@@ -122,6 +137,12 @@ SELECT COUNT(*) FROM mem.timing w, mem.timing e WHERE w.who = 'changes' AND e.wh
 
 query I
 SELECT COUNT(*) FROM mem.timing w, mem.timing e WHERE w.who = 'create index' AND e.who = 'checkpoint end' AND w.t > e.t - INTERVAL 1 SECOND
+----
+1
+
+# neither did the drop
+query I
+SELECT COUNT(*) FROM mem.timing w, mem.timing e WHERE w.who = 'drop' AND e.who = 'checkpoint end' AND w.t < e.t - INTERVAL 2 SECOND
 ----
 1
 
@@ -157,8 +178,11 @@ SELECT s FROM t WHERE i = 20
 ----
 again
 
-# WAL replay of the changes and of the new index on top of the checkpoint
+# WAL replay of the changes, the new index and the drop on top of the checkpoint
 restart
+
+statement ok
+SET debug_verify_blocks=true
 
 query II
 SELECT COUNT(*), SUM(i) FROM t
@@ -186,6 +210,9 @@ statement ok
 CHECKPOINT
 
 restart
+
+statement ok
+SET debug_verify_blocks=true
 
 query II
 SELECT COUNT(*), SUM(i) FROM t
