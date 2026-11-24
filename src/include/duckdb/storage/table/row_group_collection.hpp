@@ -225,8 +225,9 @@ public:
 	//! Adds a column holding a constant to this collection, which the older table version keeps using: the row
 	//! groups are replaced, not changed. Runs under the table's append lock
 	void AddSharedColumn(ColumnDefinition &new_column, ExpressionExecutor &default_executor, Value constant);
-	//! Removes the shared columns past column_count again. Runs under the table's append lock
-	void RemoveSharedColumns(idx_t column_count);
+	//! Removes the shared columns past column_count again, returns the row groups that had them. Runs under the
+	//! table's append lock
+	shared_ptr<RowGroupSegmentTree> RemoveSharedColumns(idx_t column_count);
 	shared_ptr<RowGroupCollection> RemoveColumn(idx_t col_idx);
 	shared_ptr<RowGroupCollection> AlterType(ClientContext &context, idx_t changed_idx, const LogicalType &target_type,
 	                                         vector<StorageIndex> bound_columns, Expression &cast_expr,

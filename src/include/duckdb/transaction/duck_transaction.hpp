@@ -20,6 +20,7 @@ class CommitDropState;
 struct DataTableInfo;
 class DuckTableEntry;
 class RowGroupCollection;
+class RowGroupSegmentTree;
 class RowVersionManager;
 class DuckTransactionManager;
 class StorageLockKey;
@@ -151,8 +152,9 @@ private:
 	mutex shared_columns_lock;
 	//! Columns this transaction's ADD COLUMNs added to row groups that older table versions share
 	vector<SharedColumnAddition> shared_columns;
-	//! Removes them again, before the catalog restores the older version
-	void RevertSharedColumns();
+	//! Removes them again, before the catalog restores the older version. Returns the row groups that had them:
+	//! undo entries of the transaction still point into their column data
+	vector<shared_ptr<RowGroupSegmentTree>> RevertSharedColumns();
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
 	//! Lock for accessing sequence_usage

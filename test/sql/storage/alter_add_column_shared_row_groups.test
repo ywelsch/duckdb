@@ -149,6 +149,24 @@ SELECT COUNT(*), SUM(i), SUM(k) FROM m
 statement ok
 INSERT INTO a SELECT i, repeat(md5(i::VARCHAR), 160), 2 FROM range(6000, 6100) t(i)
 
+# the rolled back transaction updated the column it added: the undo runs after the column is removed
+statement ok con2
+BEGIN
+
+statement ok con2
+ALTER TABLE c ADD COLUMN z INTEGER DEFAULT 1
+
+statement ok con2
+UPDATE c SET z = 2 WHERE i < 10
+
+statement ok con2
+ROLLBACK
+
+statement error
+SELECT z FROM c
+----
+not found
+
 # a second transaction's ALTER of a table with an uncommitted shared column conflicts
 statement ok con1
 BEGIN

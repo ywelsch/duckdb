@@ -2256,7 +2256,7 @@ void RowGroupCollection::AddSharedColumn(ColumnDefinition &new_column, Expressio
 	SetTypes(std::move(new_types));
 }
 
-void RowGroupCollection::RemoveSharedColumns(idx_t column_count) {
+shared_ptr<RowGroupSegmentTree> RowGroupCollection::RemoveSharedColumns(idx_t column_count) {
 	auto row_groups = GetRowGroups();
 	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, row_groups->GetBaseRowId());
 	for (auto &node : row_groups->SegmentNodes()) {
@@ -2273,6 +2273,7 @@ void RowGroupCollection::RemoveSharedColumns(idx_t column_count) {
 	new_types.resize(column_count);
 	SetRowGroups(std::move(new_row_groups));
 	SetTypes(std::move(new_types));
+	return row_groups;
 }
 
 void RowGroupCollection::InstallCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats) {

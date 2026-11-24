@@ -342,7 +342,7 @@ ErrorData DuckTransaction::Commit(ClientContext &context, AttachedDatabase &db, 
 
 ErrorData DuckTransaction::Rollback() {
 	try {
-		RevertSharedColumns();
+		auto removed_columns = RevertSharedColumns();
 		storage->Rollback();
 		undo_buffer.Rollback();
 		return ErrorData();
@@ -408,14 +408,16 @@ void DuckTransaction::ClearSharedColumns() {
 	shared_columns.clear();
 }
 
-void DuckTransaction::RevertSharedColumns() {
+vector<shared_ptr<RowGroupSegmentTree>> DuckTransaction::RevertSharedColumns() {
 	lock_guard<mutex> guard(shared_columns_lock);
+	vector<shared_ptr<RowGroupSegmentTree>> removed;
 	for (idx_t i = shared_columns.size(); i > 0; i--) {
 		auto &addition = shared_columns[i - 1];
 		lock_guard<mutex> append_guard(addition.info->GetAppendLock());
-		addition.collection->RemoveSharedColumns(addition.column_count);
+		removed.push_back(addition.collection->RemoveSharedColumns(addition.column_count));
 	}
 	shared_columns.clear();
+	return removed;
 }
 
 unique_ptr<StorageLockKey> DuckTransaction::TakeCommitScopedCheckpointLock() {
