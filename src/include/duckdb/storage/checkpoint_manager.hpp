@@ -166,8 +166,6 @@ private:
 	unique_ptr<MetadataWriter> table_metadata_writer;
 	//! With metadata locality, writes each table's statistics and row group pointers apart from its DataPointers
 	unique_ptr<MetadataWriter> table_stats_writer;
-	//! Blocks shared by the writers whose metadata is read at attach (catalog and table statistics)
-	MetadataReservation attach_reservation;
 	//! Because this is single-file storage, we can share partial blocks across
 	//! an entire checkpoint.
 	PartialBlockManager partial_block_manager;

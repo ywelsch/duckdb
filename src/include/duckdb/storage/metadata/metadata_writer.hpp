@@ -16,7 +16,8 @@ namespace duckdb {
 class MetadataWriter : public WriteStream {
 public:
 	explicit MetadataWriter(MetadataManager &manager,
-	                        optional_ptr<vector<MetaBlockPointer>> written_pointers = nullptr);
+	                        optional_ptr<vector<MetaBlockPointer>> written_pointers = nullptr,
+	                        MetadataPool pool = MetadataPool::DEFAULT);
 	MetadataWriter(const MetadataWriter &) = delete;
 	MetadataWriter &operator=(const MetadataWriter &) = delete;
 	~MetadataWriter() override;
@@ -48,22 +49,8 @@ private:
 	optional_ptr<vector<MetaBlockPointer>> written_pointers;
 	idx_t capacity;
 	idx_t offset;
-};
-
-//! A MetadataWriter that takes its sub-blocks from a reservation, keeping its metadata out of shared blocks
-class ReservedMetadataWriter : public MetadataWriter {
-public:
-	ReservedMetadataWriter(MetadataManager &manager, MetadataReservation &reservation)
-	    : MetadataWriter(manager), reservation(reservation) {
-	}
-
-protected:
-	MetadataHandle NextHandle() override {
-		return GetManager().AllocateHandle(reservation);
-	}
-
-private:
-	MetadataReservation &reservation;
+	//! The pool new sub-blocks come from
+	MetadataPool pool;
 };
 
 } // namespace duckdb

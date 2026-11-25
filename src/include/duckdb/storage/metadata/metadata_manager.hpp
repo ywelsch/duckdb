@@ -13,11 +13,18 @@
 #include "duckdb/storage/block_manager.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/storage/buffer/buffer_handle.hpp"
-#include "duckdb/common/unordered_set.hpp"
 
 namespace duckdb {
 class DatabaseInstance;
 struct MetadataBlockInfo;
+
+//! Which writers a metadata block serves, kept in memory only and derived again when the database loads
+enum class MetadataPool : uint8_t {
+	//! row group metadata and everything else
+	DEFAULT,
+	//! what loading the database reads: the catalog, the table statistics and the free list
+	ATTACH
+};
 
 struct MetadataBlock {
 	MetadataBlock();
@@ -32,6 +39,7 @@ struct MetadataBlock {
 	block_id_t block_id;
 	vector<uint8_t> free_blocks;
 	atomic<bool> dirty;
+	MetadataPool pool;
 
 	void Write(WriteStream &sink);
 	static MetadataBlock Read(ReadStream &source);
@@ -53,13 +61,6 @@ struct MetadataHandle {
 	BufferHandle handle;
 };
 
-//! Sub-blocks of a fresh metadata block held back for one group of writers, so what they write stays together
-struct MetadataReservation {
-	block_id_t block_id = INVALID_BLOCK;
-	//! The sub-blocks still unused, handed out from the back
-	vector<uint8_t> free_indexes;
-};
-
 class MetadataManager {
 public:
 	//! The amount of metadata blocks per storage block
@@ -73,15 +74,14 @@ public:
 		return buffer_manager;
 	}
 
-	MetadataHandle AllocateHandle();
-	//! Allocate a sub-block from the reservation, reserving a fresh metadata block once it runs out
-	MetadataHandle AllocateHandle(MetadataReservation &reservation);
-	//! Return the unused sub-blocks of the reservation to the shared pool
-	void ReleaseReservation(MetadataReservation &reservation);
+	//! Allocate a sub-block from a block of the pool (with metadata locality, otherwise from any block)
+	MetadataHandle AllocateHandle(MetadataPool pool = MetadataPool::DEFAULT);
 	//! Whether checkpoints keep the metadata read at attach (catalog, table statistics, free list) in blocks of its own
 	static bool MetadataLocalityEnabled();
-	//! Blocks pinned until this call hold what loading the database reads, they are where attach writes go first
-	void StopRecordingAttachBlocks();
+	//! Remember sub-blocks that loading the database read
+	void AddAttachPointers(const vector<MetaBlockPointer> &pointers);
+	//! Put the blocks mostly holding remembered sub-blocks into the attach pool
+	void ClassifyAttachBlocks();
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
 	MetadataHandle Pin(const QueryContext &context, const MetadataPointer &pointer);
@@ -121,10 +121,8 @@ protected:
 	mutable mutex block_lock;
 	unordered_map<block_id_t, MetadataBlock> blocks;
 	unordered_map<block_id_t, idx_t> modified_blocks;
-	//! Blocks holding metadata read at attach: their free sub-blocks only go to reservations
-	unordered_set<block_id_t> attach_blocks;
-	//! Whether pinned blocks are recorded as attach blocks (true while the database loads)
-	bool recording_attach_blocks = true;
+	//! Sub-blocks read while the database loaded, until ClassifyAttachBlocks
+	vector<MetaBlockPointer> attach_pointers;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;

@@ -2,8 +2,9 @@
 
 namespace duckdb {
 
-MetadataWriter::MetadataWriter(MetadataManager &manager, optional_ptr<vector<MetaBlockPointer>> written_pointers_p)
-    : manager(manager), written_pointers(written_pointers_p), capacity(0), offset(0) {
+MetadataWriter::MetadataWriter(MetadataManager &manager, optional_ptr<vector<MetaBlockPointer>> written_pointers_p,
+                               MetadataPool pool)
+    : manager(manager), written_pointers(written_pointers_p), capacity(0), offset(0), pool(pool) {
 	D_ASSERT(!written_pointers || written_pointers->empty());
 }
 
@@ -37,7 +38,7 @@ void MetadataWriter::SetWrittenPointers(optional_ptr<vector<MetaBlockPointer>> w
 }
 
 MetadataHandle MetadataWriter::NextHandle() {
-	return manager.AllocateHandle();
+	return manager.AllocateHandle(pool);
 }
 
 void MetadataWriter::NextBlock() {

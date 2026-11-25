@@ -7,17 +7,19 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/database_size.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 
 namespace duckdb {
 
-MetadataBlock::MetadataBlock() : block_id(INVALID_BLOCK), dirty(false) {
+MetadataBlock::MetadataBlock() : block_id(INVALID_BLOCK), dirty(false), pool(MetadataPool::DEFAULT) {
 }
 
-MetadataBlock::MetadataBlock(MetadataBlock &&other) noexcept : dirty(false) {
+MetadataBlock::MetadataBlock(MetadataBlock &&other) noexcept : dirty(false), pool(MetadataPool::DEFAULT) {
 	std::swap(block, other.block);
 	std::swap(block_id, other.block_id);
 	std::swap(free_blocks, other.free_blocks);
+	std::swap(pool, other.pool);
 	auto dirty_val = dirty.load();
 	dirty = other.dirty.load();
 	other.dirty = dirty_val;
@@ -27,6 +29,7 @@ MetadataBlock &MetadataBlock::operator=(MetadataBlock &&other) noexcept {
 	std::swap(block, other.block);
 	std::swap(block_id, other.block_id);
 	std::swap(free_blocks, other.free_blocks);
+	std::swap(pool, other.pool);
 	auto dirty_val = dirty.load();
 	dirty = other.dirty.load();
 	other.dirty = dirty_val;
@@ -53,28 +56,28 @@ MetadataManager::MetadataManager(BlockManager &block_manager, BufferManager &buf
 MetadataManager::~MetadataManager() {
 }
 
-MetadataHandle MetadataManager::AllocateHandle() {
-	// check if there is any free space left in an existing block
+MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
+	// check if there is any free space left in an existing block (of the pool, with metadata locality)
 	// if not allocate a new block
 	MetadataPointer pointer;
+	auto locality = MetadataLocalityEnabled();
 	unique_lock<mutex> guard(block_lock);
 	block_id_t free_block = INVALID_BLOCK;
-	auto locality = MetadataLocalityEnabled();
 	for (auto &kv : blocks) {
 		auto &block = kv.second;
 		D_ASSERT(kv.first == block.block_id);
-		if (!block.free_blocks.empty()) {
-			if (locality && attach_blocks.find(kv.first) != attach_blocks.end()) {
-				// free sub-blocks in attach blocks are kept for metadata read at attach
-				continue;
-			}
+		if (!block.free_blocks.empty() && (!locality || block.pool == pool)) {
 			free_block = kv.first;
 			break;
 		}
 	}
 	guard.unlock();
-	if (free_block == INVALID_BLOCK || free_block > PeekNextBlockId()) {
+	// preferring a new block at a lower block id keeps the file compact, but attach blocks must get their holes
+	// refilled or attach metadata spreads over ever more blocks
+	auto prefer_lower_block = !locality || pool == MetadataPool::DEFAULT;
+	if (free_block == INVALID_BLOCK || (prefer_lower_block && free_block > PeekNextBlockId())) {
 		free_block = AllocateNewBlock(guard);
+		blocks[free_block].pool = pool;
 	} else {
 		guard.lock();
 	}
@@ -126,9 +129,6 @@ MetadataHandle MetadataManager::Pin(const QueryContext &context, const MetadataP
 			}
 #endif
 			block_handle = block.block;
-			if (recording_attach_blocks) {
-				attach_blocks.insert(UnsafeNumericCast<block_id_t>(pointer.block_index));
-			}
 		}
 
 		auto buffer_handle = buffer_manager.Pin(block_handle);
@@ -183,62 +183,64 @@ bool MetadataManager::MetadataLocalityEnabled() {
 	return enabled;
 }
 
-void MetadataManager::StopRecordingAttachBlocks() {
+void MetadataManager::AddAttachPointers(const vector<MetaBlockPointer> &pointers) {
+	if (!MetadataLocalityEnabled()) {
+		return;
+	}
 	lock_guard<mutex> guard(block_lock);
-	recording_attach_blocks = false;
+	attach_pointers.insert(attach_pointers.end(), pointers.begin(), pointers.end());
 }
 
-MetadataHandle MetadataManager::AllocateHandle(MetadataReservation &reservation) {
-	unique_lock<mutex> guard(block_lock, std::defer_lock);
-	if (reservation.free_indexes.empty()) {
-		// hold back all free sub-blocks of an attach block, so AllocateHandle() cannot hand them to other writers:
-		// refill the holes in attach blocks first, take a fresh block only when there are none
-		guard.lock();
-		block_id_t block_id = INVALID_BLOCK;
-		for (auto attach_block_id : attach_blocks) {
-			auto entry = blocks.find(attach_block_id);
-			if (entry != blocks.end() && !entry->second.free_blocks.empty()) {
-				block_id = attach_block_id;
-				break;
-			}
-		}
-		if (block_id == INVALID_BLOCK) {
-			guard.unlock();
-			block_id = AllocateNewBlock(guard);
-			attach_blocks.insert(block_id);
-		}
-		D_ASSERT(guard.owns_lock());
-		auto &reserved_block = blocks[block_id];
-		reservation.block_id = block_id;
-		reservation.free_indexes = std::move(reserved_block.free_blocks);
-		reserved_block.free_blocks.clear();
-	} else {
-		guard.lock();
+void MetadataManager::ClassifyAttachBlocks() {
+	if (!MetadataLocalityEnabled()) {
+		return;
 	}
-	MetadataPointer pointer;
-	pointer.block_index = UnsafeNumericCast<idx_t>(reservation.block_id);
-	pointer.index = reservation.free_indexes.back();
-	reservation.free_indexes.pop_back();
-	auto &block = blocks[reservation.block_id];
-	block.dirty = true;
-	if (block.block->BlockId() < MAXIMUM_BLOCK) {
-		ConvertToTransient(guard, block);
+	// prototype knob: the share of a block's used sub-blocks loading must have read for it to join the attach pool
+	static const idx_t min_attach_pct = [] {
+		auto value = std::getenv("DUCKDB_METADATA_LOCALITY_MIN_PCT");
+		return value ? idx_t(std::atoi(value)) : idx_t(25);
+	}();
+	lock_guard<mutex> guard(block_lock);
+	unordered_map<block_id_t, idx_t> read_masks;
+	for (auto &pointer : attach_pointers) {
+		read_masks[pointer.GetBlockId()] |= 1ULL << pointer.GetBlockIndex();
 	}
-	guard.unlock();
-	return Pin(pointer);
-}
-
-void MetadataManager::ReleaseReservation(MetadataReservation &reservation) {
-	if (!reservation.free_indexes.empty()) {
-		lock_guard<mutex> guard(block_lock);
-		auto entry = blocks.find(reservation.block_id);
-		if (entry != blocks.end()) {
-			auto &free_blocks = entry->second.free_blocks;
-			free_blocks.insert(free_blocks.end(), reservation.free_indexes.begin(), reservation.free_indexes.end());
+	attach_pointers.clear();
+	// a block holding mostly other metadata (files written without locality) stays in the default pool, so attach
+	// writes start over in blocks of their own instead of refilling mixed blocks
+	idx_t histogram[11] = {};
+	idx_t tagged = 0;
+	for (auto &kv : read_masks) {
+		auto entry = blocks.find(kv.first);
+		if (entry == blocks.end()) {
+			continue;
+		}
+		auto &block = entry->second;
+		idx_t used = METADATA_BLOCK_COUNT - block.free_blocks.size();
+		idx_t read = 0;
+		for (idx_t mask = kv.second; mask; mask &= mask - 1) {
+			read++;
+		}
+		if (used == 0) {
+			continue;
+		}
+		histogram[MinValue<idx_t>(10, read * 10 / used)]++;
+		if (read * 100 >= used * min_attach_pct) {
+			block.pool = MetadataPool::ATTACH;
+			tagged++;
 		}
 	}
-	reservation.free_indexes.clear();
-	reservation.block_id = INVALID_BLOCK;
+	auto debug = std::getenv("DUCKDB_METADATA_LOCALITY_DEBUG");
+	if (debug && string(debug) == "1") {
+		string hist;
+		for (idx_t i = 0; i <= 10; i++) {
+			hist += (i ? "," : "") + std::to_string(histogram[i]);
+		}
+		std::fprintf(stderr, "metadata locality: %llu metadata blocks, %llu read at load, %llu in attach pool, "
+		                     "read share of used sub-blocks by tenths [%s]\n",
+		             (unsigned long long)blocks.size(), (unsigned long long)read_masks.size(),
+		             (unsigned long long)tagged, hist.c_str());
+	}
 }
 
 block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock) {
@@ -490,7 +492,6 @@ void MetadataManager::MarkBlocksAsModified() {
 		if (new_free_blocks == NumericLimits<idx_t>::Maximum()) {
 			// if new free_blocks is all blocks - mark entire block as modified
 			blocks.erase(entry);
-			attach_blocks.erase(block_id);
 
 			guard.unlock();
 			block_manager.MarkBlockAsModified(block_id);
