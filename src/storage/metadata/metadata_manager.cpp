@@ -7,6 +7,8 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/database_size.hpp"
 
+#include <cstdlib>
+
 namespace duckdb {
 
 MetadataBlock::MetadataBlock() : block_id(INVALID_BLOCK), dirty(false) {
@@ -57,10 +59,15 @@ MetadataHandle MetadataManager::AllocateHandle() {
 	MetadataPointer pointer;
 	unique_lock<mutex> guard(block_lock);
 	block_id_t free_block = INVALID_BLOCK;
+	auto locality = MetadataLocalityEnabled();
 	for (auto &kv : blocks) {
 		auto &block = kv.second;
 		D_ASSERT(kv.first == block.block_id);
 		if (!block.free_blocks.empty()) {
+			if (locality && attach_blocks.find(kv.first) != attach_blocks.end()) {
+				// free sub-blocks in attach blocks are kept for metadata read at attach
+				continue;
+			}
 			free_block = kv.first;
 			break;
 		}
@@ -119,6 +126,9 @@ MetadataHandle MetadataManager::Pin(const QueryContext &context, const MetadataP
 			}
 #endif
 			block_handle = block.block;
+			if (recording_attach_blocks) {
+				attach_blocks.insert(UnsafeNumericCast<block_id_t>(pointer.block_index));
+			}
 		}
 
 		auto buffer_handle = buffer_manager.Pin(block_handle);
@@ -162,6 +172,73 @@ void MetadataManager::ConvertToTransient(unique_lock<mutex> &block_lock, Metadat
 	block_lock.lock();
 	metadata_block.block = std::move(new_block);
 	metadata_block.dirty = true;
+}
+
+bool MetadataManager::MetadataLocalityEnabled() {
+	// prototype toggle, a real change would use a setting
+	static const bool enabled = [] {
+		auto value = std::getenv("DUCKDB_METADATA_LOCALITY");
+		return value && string(value) == "1";
+	}();
+	return enabled;
+}
+
+void MetadataManager::StopRecordingAttachBlocks() {
+	lock_guard<mutex> guard(block_lock);
+	recording_attach_blocks = false;
+}
+
+MetadataHandle MetadataManager::AllocateHandle(MetadataReservation &reservation) {
+	unique_lock<mutex> guard(block_lock, std::defer_lock);
+	if (reservation.free_indexes.empty()) {
+		// hold back all free sub-blocks of an attach block, so AllocateHandle() cannot hand them to other writers:
+		// refill the holes in attach blocks first, take a fresh block only when there are none
+		guard.lock();
+		block_id_t block_id = INVALID_BLOCK;
+		for (auto attach_block_id : attach_blocks) {
+			auto entry = blocks.find(attach_block_id);
+			if (entry != blocks.end() && !entry->second.free_blocks.empty()) {
+				block_id = attach_block_id;
+				break;
+			}
+		}
+		if (block_id == INVALID_BLOCK) {
+			guard.unlock();
+			block_id = AllocateNewBlock(guard);
+			attach_blocks.insert(block_id);
+		}
+		D_ASSERT(guard.owns_lock());
+		auto &reserved_block = blocks[block_id];
+		reservation.block_id = block_id;
+		reservation.free_indexes = std::move(reserved_block.free_blocks);
+		reserved_block.free_blocks.clear();
+	} else {
+		guard.lock();
+	}
+	MetadataPointer pointer;
+	pointer.block_index = UnsafeNumericCast<idx_t>(reservation.block_id);
+	pointer.index = reservation.free_indexes.back();
+	reservation.free_indexes.pop_back();
+	auto &block = blocks[reservation.block_id];
+	block.dirty = true;
+	if (block.block->BlockId() < MAXIMUM_BLOCK) {
+		ConvertToTransient(guard, block);
+	}
+	guard.unlock();
+	return Pin(pointer);
+}
+
+void MetadataManager::ReleaseReservation(MetadataReservation &reservation) {
+	if (!reservation.free_indexes.empty()) {
+		lock_guard<mutex> guard(block_lock);
+		auto entry = blocks.find(reservation.block_id);
+		if (entry != blocks.end()) {
+			auto &free_blocks = entry->second.free_blocks;
+			free_blocks.insert(free_blocks.end(), reservation.free_indexes.begin(), reservation.free_indexes.end());
+		}
+	}
+	reservation.free_indexes.clear();
+	reservation.block_id = INVALID_BLOCK;
 }
 
 block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock) {
@@ -413,6 +490,7 @@ void MetadataManager::MarkBlocksAsModified() {
 		if (new_free_blocks == NumericLimits<idx_t>::Maximum()) {
 			// if new free_blocks is all blocks - mark entire block as modified
 			blocks.erase(entry);
+			attach_blocks.erase(block_id);
 
 			guard.unlock();
 			block_manager.MarkBlockAsModified(block_id);

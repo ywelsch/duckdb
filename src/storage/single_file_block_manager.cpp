@@ -1271,6 +1271,9 @@ vector<MetadataHandle> SingleFileBlockManager::GetFreeListBlocks() {
 	// since these blocks are no longer free we cannot just include them in the free list!
 	auto block_size = metadata_manager.GetMetadataBlockSize() - sizeof(idx_t);
 	idx_t allocated_size = 0;
+	// with metadata locality the free list (read at every attach) goes into blocks of its own
+	auto locality = MetadataManager::MetadataLocalityEnabled();
+	MetadataReservation reservation;
 	while (true) {
 		idx_t free_list_count;
 		idx_t multi_use_blocks_count;
@@ -1289,10 +1292,12 @@ vector<MetadataHandle> SingleFileBlockManager::GetFreeListBlocks() {
 		if (total_size < allocated_size) {
 			break;
 		}
-		auto free_list_handle = GetMetadataManager().AllocateHandle();
+		auto free_list_handle =
+		    locality ? metadata_manager.AllocateHandle(reservation) : metadata_manager.AllocateHandle();
 		free_list_blocks.push_back(std::move(free_list_handle));
 		allocated_size += block_size;
 	}
+	metadata_manager.ReleaseReservation(reservation);
 
 	return free_list_blocks;
 }

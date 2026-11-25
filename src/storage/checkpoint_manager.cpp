@@ -108,7 +108,8 @@ MetadataManager &SingleFileCheckpointWriter::GetMetadataManager() {
 }
 
 unique_ptr<TableDataWriter> SingleFileCheckpointWriter::GetTableDataWriter(TableCatalogEntry &table) {
-	return make_uniq<SingleFileTableDataWriter>(*this, table, *table_metadata_writer);
+	auto &stats_writer = table_stats_writer ? *table_stats_writer : *table_metadata_writer;
+	return make_uniq<SingleFileTableDataWriter>(*this, table, *table_metadata_writer, stats_writer);
 }
 
 static catalog_entry_vector_t GetCatalogEntries(vector<reference<SchemaCatalogEntry>> &schemas) {
@@ -207,9 +208,16 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 
 	auto &block_manager = GetBlockManager();
 	auto &metadata_manager = GetMetadataManager();
+	metadata_manager.StopRecordingAttachBlocks();
 
 	//! Set up the writers for the checkpoints
-	metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
+	if (MetadataManager::MetadataLocalityEnabled()) {
+		// keep what ATTACH reads (catalog and table statistics) out of the blocks holding row group metadata
+		metadata_writer = make_uniq<ReservedMetadataWriter>(metadata_manager, attach_reservation);
+		table_stats_writer = make_uniq<ReservedMetadataWriter>(metadata_manager, attach_reservation);
+	} else {
+		metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
+	}
 	table_metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
 
 	// get the id of the first meta block
@@ -279,6 +287,11 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 
 	metadata_writer->Flush();
 	table_metadata_writer->Flush();
+	if (table_stats_writer) {
+		table_stats_writer->Flush();
+	}
+	// the free list written with the header has to see the unused reserved sub-blocks as free
+	metadata_manager.ReleaseReservation(attach_reservation);
 
 	auto debug_checkpoint_abort = Settings::Get<DebugCheckpointAbortSetting>(db.GetDatabase());
 	if (debug_checkpoint_abort == CheckpointAbort::DEBUG_ABORT_BEFORE_HEADER) {
@@ -393,6 +406,7 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 	MetaBlockPointer meta_block(block_manager.GetMetaBlock(), 0);
 	if (!meta_block.IsValid()) {
 		// storage is empty
+		metadata_manager.StopRecordingAttachBlocks();
 		return;
 	}
 
@@ -407,6 +421,8 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 	MetadataReader reader(metadata_manager, meta_block);
 	auto transaction = CatalogTransaction::GetSystemTransaction(catalog.GetDatabase());
 	LoadCheckpoint(transaction, reader);
+	// everything read so far (free list, catalog, table statistics) is what an attach reads
+	metadata_manager.StopRecordingAttachBlocks();
 }
 
 void CheckpointWriter::WriteEntry(CatalogEntry &entry, Serializer &serializer) {

@@ -50,4 +50,20 @@ private:
 	idx_t offset;
 };
 
+//! A MetadataWriter that takes its sub-blocks from a reservation, keeping its metadata out of shared blocks
+class ReservedMetadataWriter : public MetadataWriter {
+public:
+	ReservedMetadataWriter(MetadataManager &manager, MetadataReservation &reservation)
+	    : MetadataWriter(manager), reservation(reservation) {
+	}
+
+protected:
+	MetadataHandle NextHandle() override {
+		return GetManager().AllocateHandle(reservation);
+	}
+
+private:
+	MetadataReservation &reservation;
+};
+
 } // namespace duckdb
