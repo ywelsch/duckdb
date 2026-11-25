@@ -222,6 +222,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_GLOBAL(MaxTempDirectorySizeSetting),
     DUCKDB_SETTING(MaxVacuumTasksSetting),
     DUCKDB_SETTING(MergeJoinThresholdSetting),
+    DUCKDB_SETTING(MetadataLocalitySetting),
     DUCKDB_SETTING(NestedLoopJoinThresholdSetting),
     DUCKDB_SETTING(OldImplicitCastingSetting),
     DUCKDB_LOCAL(OperatorMemoryLimitSetting),

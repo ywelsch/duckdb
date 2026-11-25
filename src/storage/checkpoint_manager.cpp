@@ -210,14 +210,13 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	auto &metadata_manager = GetMetadataManager();
 
 	//! Set up the writers for the checkpoints
-	if (MetadataManager::MetadataLocalityEnabled()) {
-		// keep what ATTACH reads (catalog and table statistics) out of the blocks holding row group metadata
-		metadata_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
-		table_stats_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
-	} else {
-		metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
-	}
+	auto metadata_locality = Settings::Get<MetadataLocalitySetting>(db.GetDatabase());
+	metadata_manager.SetMetadataLocality(metadata_locality);
+	metadata_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
 	table_metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
+	if (metadata_locality) {
+		table_stats_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
+	}
 
 	// get the id of the first meta block
 	auto meta_block = metadata_writer->GetMetaBlockPointer();
@@ -415,10 +414,10 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 
 	// create the MetadataReader to read from the storage
 	vector<MetaBlockPointer> catalog_pointers;
-	MetadataReader reader(metadata_manager, meta_block, &catalog_pointers);
+	MetadataReader reader(metadata_manager, meta_block, catalog_pointers);
 	auto transaction = CatalogTransaction::GetSystemTransaction(catalog.GetDatabase());
 	LoadCheckpoint(transaction, reader);
-	// the free list, the catalog and the table statistics are what loading reads
+	// loading read the free list, the catalog and the table statistics
 	metadata_manager.AddAttachPointers(catalog_pointers);
 	metadata_manager.ClassifyAttachBlocks();
 }

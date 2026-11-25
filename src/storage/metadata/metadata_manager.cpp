@@ -1,14 +1,12 @@
 #include "duckdb/storage/metadata/metadata_manager.hpp"
 
+#include "duckdb/common/bitset.hpp"
 #include "duckdb/common/serializer/read_stream.hpp"
 #include "duckdb/common/serializer/write_stream.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/buffer/block_handle.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/database_size.hpp"
-
-#include <cstdio>
-#include <cstdlib>
 
 namespace duckdb {
 
@@ -60,8 +58,11 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 	// check if there is any free space left in an existing block (of the pool, with metadata locality)
 	// if not allocate a new block
 	MetadataPointer pointer;
-	auto locality = MetadataLocalityEnabled();
 	unique_lock<mutex> guard(block_lock);
+	auto locality = metadata_locality;
+	if (!locality) {
+		pool = MetadataPool::DEFAULT;
+	}
 	block_id_t free_block = INVALID_BLOCK;
 	for (auto &kv : blocks) {
 		auto &block = kv.second;
@@ -72,12 +73,10 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 		}
 	}
 	guard.unlock();
-	// preferring a new block at a lower block id keeps the file compact, but attach blocks must get their holes
-	// refilled or attach metadata spreads over ever more blocks
-	auto prefer_lower_block = !locality || pool == MetadataPool::DEFAULT;
-	if (free_block == INVALID_BLOCK || (prefer_lower_block && free_block > PeekNextBlockId())) {
-		free_block = AllocateNewBlock(guard);
-		blocks[free_block].pool = pool;
+	// the attach pool refills its own holes rather than taking a new block with a lower id
+	auto prefer_lower_block_id = !locality || pool == MetadataPool::DEFAULT;
+	if (free_block == INVALID_BLOCK || (prefer_lower_block_id && free_block > PeekNextBlockId())) {
+		free_block = AllocateNewBlock(guard, pool);
 	} else {
 		guard.lock();
 	}
@@ -174,76 +173,7 @@ void MetadataManager::ConvertToTransient(unique_lock<mutex> &block_lock, Metadat
 	metadata_block.dirty = true;
 }
 
-bool MetadataManager::MetadataLocalityEnabled() {
-	// prototype toggle, a real change would use a setting
-	static const bool enabled = [] {
-		auto value = std::getenv("DUCKDB_METADATA_LOCALITY");
-		return value && string(value) == "1";
-	}();
-	return enabled;
-}
-
-void MetadataManager::AddAttachPointers(const vector<MetaBlockPointer> &pointers) {
-	if (!MetadataLocalityEnabled()) {
-		return;
-	}
-	lock_guard<mutex> guard(block_lock);
-	attach_pointers.insert(attach_pointers.end(), pointers.begin(), pointers.end());
-}
-
-void MetadataManager::ClassifyAttachBlocks() {
-	if (!MetadataLocalityEnabled()) {
-		return;
-	}
-	// prototype knob: the share of a block's used sub-blocks loading must have read for it to join the attach pool
-	static const idx_t min_attach_pct = [] {
-		auto value = std::getenv("DUCKDB_METADATA_LOCALITY_MIN_PCT");
-		return value ? idx_t(std::atoi(value)) : idx_t(25);
-	}();
-	lock_guard<mutex> guard(block_lock);
-	unordered_map<block_id_t, idx_t> read_masks;
-	for (auto &pointer : attach_pointers) {
-		read_masks[pointer.GetBlockId()] |= 1ULL << pointer.GetBlockIndex();
-	}
-	attach_pointers.clear();
-	// a block holding mostly other metadata (files written without locality) stays in the default pool, so attach
-	// writes start over in blocks of their own instead of refilling mixed blocks
-	idx_t histogram[11] = {};
-	idx_t tagged = 0;
-	for (auto &kv : read_masks) {
-		auto entry = blocks.find(kv.first);
-		if (entry == blocks.end()) {
-			continue;
-		}
-		auto &block = entry->second;
-		idx_t used = METADATA_BLOCK_COUNT - block.free_blocks.size();
-		idx_t read = 0;
-		for (idx_t mask = kv.second; mask; mask &= mask - 1) {
-			read++;
-		}
-		if (used == 0) {
-			continue;
-		}
-		histogram[MinValue<idx_t>(10, read * 10 / used)]++;
-		if (read * 100 >= used * min_attach_pct) {
-			block.pool = MetadataPool::ATTACH;
-			tagged++;
-		}
-	}
-	auto debug = std::getenv("DUCKDB_METADATA_LOCALITY_DEBUG");
-	if (debug && string(debug) == "1") {
-		string hist;
-		for (idx_t i = 0; i <= 10; i++) {
-			hist += (i ? "," : "") + std::to_string(histogram[i]);
-		}
-		std::fprintf(stderr, "metadata locality: %llu metadata blocks, %llu read at load, %llu in attach pool, "
-		                     "read share of used sub-blocks by tenths [%s]\n",
-		             (unsigned long long)blocks.size(), (unsigned long long)read_masks.size(),
-		             (unsigned long long)tagged, hist.c_str());
-	}
-}
-
-block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock) {
+block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool) {
 	D_ASSERT(!block_lock.owns_lock());
 	auto new_block_id = GetNextBlockId();
 
@@ -251,6 +181,7 @@ block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock) {
 	auto handle = buffer_manager.Allocate(MemoryTag::METADATA, &block_manager, false);
 	new_block.block = handle.GetBlockHandle();
 	new_block.block_id = new_block_id;
+	new_block.pool = pool;
 	for (idx_t i = 0; i < METADATA_BLOCK_COUNT; i++) {
 		new_block.free_blocks.push_back(NumericCast<uint8_t>(METADATA_BLOCK_COUNT - i - 1));
 	}
@@ -261,6 +192,40 @@ block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock) {
 	block_lock.lock();
 	AddBlock(block_lock, std::move(new_block));
 	return new_block_id;
+}
+
+void MetadataManager::SetMetadataLocality(bool enabled) {
+	lock_guard<mutex> guard(block_lock);
+	metadata_locality = enabled;
+}
+
+void MetadataManager::AddAttachPointers(const vector<MetaBlockPointer> &pointers) {
+	lock_guard<mutex> guard(block_lock);
+	attach_pointers.insert(attach_pointers.end(), pointers.begin(), pointers.end());
+}
+
+void MetadataManager::ClassifyAttachBlocks() {
+	// row group pointers follow the table statistics but are read lazily, so loading reads only part of a block
+	static constexpr idx_t MIN_READ_PERCENTAGE = 25;
+	lock_guard<mutex> guard(block_lock);
+	unordered_map<block_id_t, idx_t> read_masks;
+	for (auto &pointer : attach_pointers) {
+		read_masks[pointer.GetBlockId()] |= idx_t(1) << pointer.GetBlockIndex();
+	}
+	attach_pointers = vector<MetaBlockPointer>();
+	for (auto &entry : read_masks) {
+		auto block_entry = blocks.find(entry.first);
+		if (block_entry == blocks.end()) {
+			continue;
+		}
+		auto &block = block_entry->second;
+		auto used = bitset<64>(~block.FreeBlocksToInteger()).count();
+		auto read = bitset<64>(entry.second).count();
+		// mixed blocks, e.g. written without metadata locality, stay in the default pool
+		if (read * 100 >= used * MIN_READ_PERCENTAGE) {
+			block.pool = MetadataPool::ATTACH;
+		}
+	}
 }
 
 void MetadataManager::AddBlock(unique_lock<mutex> &block_lock, MetadataBlock new_block, bool if_exists) {

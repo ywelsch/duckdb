@@ -1262,6 +1262,13 @@
         "default_value": "1000"
     },
     {
+        "name": "metadata_locality",
+        "description": "Keep the metadata that loading a database reads (catalog, table statistics and free list) in metadata blocks of its own when checkpointing.",
+        "type": "BOOLEAN",
+        "scope": "global",
+        "default_value": "false"
+    },
+    {
         "name": "nested_loop_join_threshold",
         "description": "The maximum number of rows on either table to choose a nested loop join.",
         "type": "UBIGINT",

@@ -112,8 +112,7 @@ private:
 	SingleFileCheckpointWriter &checkpoint_manager;
 	//! Writes the actual table data
 	MetadataWriter &table_data_writer;
-	//! Writes the table statistics and row group pointers, which ATTACH reads (the same writer unless metadata
-	//! locality is on)
+	//! Writes the table statistics and row group pointers, which loading the database reads
 	MetadataWriter &stats_writer;
 	//! The root pointer, if we are re-using metadata of the table
 	MetaBlockPointer existing_pointer;

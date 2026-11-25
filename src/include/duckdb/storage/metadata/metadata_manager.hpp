@@ -74,13 +74,13 @@ public:
 		return buffer_manager;
 	}
 
-	//! Allocate a sub-block from a block of the pool (with metadata locality, otherwise from any block)
+	//! Allocates a sub-block, only from blocks of the pool if metadata locality is on
 	MetadataHandle AllocateHandle(MetadataPool pool = MetadataPool::DEFAULT);
-	//! Whether checkpoints keep the metadata read at attach (catalog, table statistics, free list) in blocks of its own
-	static bool MetadataLocalityEnabled();
-	//! Remember sub-blocks that loading the database read
+	//! Sets whether metadata of different pools is kept in separate blocks
+	void SetMetadataLocality(bool enabled);
+	//! Remembers sub-blocks that loading the database read
 	void AddAttachPointers(const vector<MetaBlockPointer> &pointers);
-	//! Put the blocks mostly holding remembered sub-blocks into the attach pool
+	//! Puts the blocks whose contents loading the database mostly read into the attach pool
 	void ClassifyAttachBlocks();
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
@@ -123,12 +123,14 @@ protected:
 	unordered_map<block_id_t, idx_t> modified_blocks;
 	//! Sub-blocks read while the database loaded, until ClassifyAttachBlocks
 	vector<MetaBlockPointer> attach_pointers;
+	//! Whether metadata of different pools is kept in separate blocks
+	bool metadata_locality = false;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;
 
 protected:
-	block_id_t AllocateNewBlock(unique_lock<mutex> &block_lock);
+	block_id_t AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool);
 	block_id_t PeekNextBlockId() const;
 	block_id_t GetNextBlockId() const;
 
