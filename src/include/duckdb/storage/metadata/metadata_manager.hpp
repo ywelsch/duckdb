@@ -18,6 +18,14 @@ namespace duckdb {
 class DatabaseInstance;
 struct MetadataBlockInfo;
 
+//! Which writers a metadata block serves, kept in memory only and derived again when the database loads
+enum class MetadataPool : uint8_t {
+	//! row group metadata and everything else
+	DEFAULT,
+	//! what loading the database reads: the catalog, the table statistics and the free list
+	ATTACH
+};
+
 struct MetadataBlock {
 	MetadataBlock();
 	// disable copy constructors
@@ -33,6 +41,7 @@ struct MetadataBlock {
 	//! The blocks that are free on disk but cannot be reused yet, as a mask
 	idx_t pending_reuse;
 	atomic<bool> dirty;
+	MetadataPool pool;
 
 	void Write(WriteStream &sink);
 	static MetadataBlock Read(ReadStream &source);
@@ -67,7 +76,14 @@ public:
 		return buffer_manager;
 	}
 
-	MetadataHandle AllocateHandle();
+	//! Allocates a sub-block, only from blocks of the pool if metadata locality is on
+	MetadataHandle AllocateHandle(MetadataPool pool = MetadataPool::DEFAULT);
+	//! Sets whether metadata of different pools is kept in separate blocks
+	void SetMetadataLocality(bool enabled);
+	//! Remembers sub-blocks that loading the database read
+	void AddAttachPointers(const vector<MetaBlockPointer> &pointers);
+	//! Puts the blocks whose contents loading the database mostly read into the attach pool
+	void ClassifyAttachBlocks();
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
 	MetadataHandle Pin(const QueryContext &context, const MetadataPointer &pointer);
@@ -110,12 +126,16 @@ protected:
 	mutable mutex block_lock;
 	unordered_map<block_id_t, MetadataBlock> blocks;
 	unordered_map<block_id_t, idx_t> modified_blocks;
+	//! Sub-blocks read while the database loaded, until ClassifyAttachBlocks
+	vector<MetaBlockPointer> attach_pointers;
+	//! Whether metadata of different pools is kept in separate blocks
+	bool metadata_locality = false;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;
 
 protected:
-	block_id_t AllocateNewBlock(unique_lock<mutex> &block_lock);
+	block_id_t AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool);
 	block_id_t PeekNextBlockId() const;
 	block_id_t GetNextBlockId() const;
 

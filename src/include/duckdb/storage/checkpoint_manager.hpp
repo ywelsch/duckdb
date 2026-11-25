@@ -180,6 +180,8 @@ private:
 	unique_ptr<MetadataWriter> metadata_writer;
 	//! The table data writer is responsible for writing the DataPointers used by the table chunks
 	unique_ptr<MetadataWriter> table_metadata_writer;
+	//! With metadata locality, writes the table statistics and row group pointers apart from the DataPointers
+	unique_ptr<MetadataWriter> table_stats_writer;
 	//! Because this is single-file storage, we can share partial blocks across
 	//! an entire checkpoint.
 	PartialBlockManager partial_block_manager;
