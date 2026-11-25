@@ -74,10 +74,8 @@ public:
 		return buffer_manager;
 	}
 
-	//! Allocates a sub-block, only from blocks of the pool if metadata locality is on
+	//! Allocates a sub-block, only from blocks of the pool once there are a few metadata blocks
 	MetadataHandle AllocateHandle(MetadataPool pool = MetadataPool::DEFAULT);
-	//! Sets whether metadata of different pools is kept in separate blocks
-	void SetMetadataLocality(bool enabled);
 	//! Remembers sub-blocks that loading the database read
 	void AddAttachPointers(const vector<MetaBlockPointer> &pointers);
 	//! Puts the blocks whose contents loading the database mostly read into the attach pool
@@ -123,8 +121,6 @@ protected:
 	unordered_map<block_id_t, idx_t> modified_blocks;
 	//! Sub-blocks read while the database loaded, until ClassifyAttachBlocks
 	vector<MetaBlockPointer> attach_pointers;
-	//! Whether metadata of different pools is kept in separate blocks
-	bool metadata_locality = false;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;

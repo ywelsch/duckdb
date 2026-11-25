@@ -2071,20 +2071,6 @@ struct MergeJoinThresholdSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
-struct MetadataLocalitySetting {
-	using RETURN_TYPE = bool;
-	static constexpr const char *Name = "metadata_locality";
-	static constexpr const char *Description =
-	    "Keep the metadata that loading a database reads (catalog, table statistics and free list) in metadata blocks "
-	    "of its own when checkpointing.";
-	static constexpr const char *InputType = "BOOLEAN";
-	static constexpr bool IsDebug = false;
-	static constexpr bool IsDeprecated = false;
-	static constexpr const char *DefaultValue = "false";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_ONLY;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
 struct NestedLoopJoinThresholdSetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "nested_loop_join_threshold";

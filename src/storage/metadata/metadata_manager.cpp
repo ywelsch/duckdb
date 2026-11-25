@@ -10,6 +10,9 @@
 
 namespace duckdb {
 
+//! Below this many metadata blocks loading reads all of them anyway, so the pools share blocks
+static constexpr idx_t METADATA_LOCALITY_MIN_BLOCKS = 4;
+
 MetadataBlock::MetadataBlock() : block_id(INVALID_BLOCK), dirty(false), pool(MetadataPool::DEFAULT) {
 }
 
@@ -59,7 +62,7 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 	// if not allocate a new block
 	MetadataPointer pointer;
 	unique_lock<mutex> guard(block_lock);
-	auto locality = metadata_locality;
+	auto locality = blocks.size() >= METADATA_LOCALITY_MIN_BLOCKS;
 	if (!locality) {
 		pool = MetadataPool::DEFAULT;
 	}
@@ -192,11 +195,6 @@ block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock, Met
 	block_lock.lock();
 	AddBlock(block_lock, std::move(new_block));
 	return new_block_id;
-}
-
-void MetadataManager::SetMetadataLocality(bool enabled) {
-	lock_guard<mutex> guard(block_lock);
-	metadata_locality = enabled;
 }
 
 void MetadataManager::AddAttachPointers(const vector<MetaBlockPointer> &pointers) {

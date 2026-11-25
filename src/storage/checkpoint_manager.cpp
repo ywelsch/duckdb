@@ -108,8 +108,7 @@ MetadataManager &SingleFileCheckpointWriter::GetMetadataManager() {
 }
 
 unique_ptr<TableDataWriter> SingleFileCheckpointWriter::GetTableDataWriter(TableCatalogEntry &table) {
-	auto &stats_writer = table_stats_writer ? *table_stats_writer : *table_metadata_writer;
-	return make_uniq<SingleFileTableDataWriter>(*this, table, *table_metadata_writer, stats_writer);
+	return make_uniq<SingleFileTableDataWriter>(*this, table, *table_metadata_writer, *table_stats_writer);
 }
 
 static catalog_entry_vector_t GetCatalogEntries(vector<reference<SchemaCatalogEntry>> &schemas) {
@@ -210,13 +209,9 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	auto &metadata_manager = GetMetadataManager();
 
 	//! Set up the writers for the checkpoints
-	auto metadata_locality = Settings::Get<MetadataLocalitySetting>(db.GetDatabase());
-	metadata_manager.SetMetadataLocality(metadata_locality);
 	metadata_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
 	table_metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
-	if (metadata_locality) {
-		table_stats_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
-	}
+	table_stats_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
 
 	// get the id of the first meta block
 	auto meta_block = metadata_writer->GetMetaBlockPointer();
@@ -285,9 +280,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 
 	metadata_writer->Flush();
 	table_metadata_writer->Flush();
-	if (table_stats_writer) {
-		table_stats_writer->Flush();
-	}
+	table_stats_writer->Flush();
 
 	auto debug_checkpoint_abort = Settings::Get<DebugCheckpointAbortSetting>(db.GetDatabase());
 	if (debug_checkpoint_abort == CheckpointAbort::DEBUG_ABORT_BEFORE_HEADER) {
