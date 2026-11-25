@@ -788,9 +788,14 @@ SinkFinalizeType PhysicalInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		LocalAppendState append_state;
 		data_table.InitializeLocalAppend(append_state, table, context, bound_constraints);
 		auto &transaction = DuckTransaction::Get(context, table.catalog);
+		// the collections have the columns of the table's row groups: read the table's own columns
+		vector<StorageIndex> column_ids;
+		for (idx_t i = 0; i < data_table.ColumnCount(); i++) {
+			column_ids.push_back(data_table.PhysicalColumn(StorageIndex(i)));
+		}
 		for (auto &collection_index : gstate.unmerged_collections) {
 			auto &optimistic_collection = data_table.GetOptimisticCollection(context, collection_index);
-			for (auto &insert_chunk : optimistic_collection.collection->Chunks(transaction)) {
+			for (auto &insert_chunk : optimistic_collection.collection->Chunks(transaction, column_ids)) {
 				data_table.LocalAppend(append_state, table, context, insert_chunk, false);
 			}
 			data_table.ResetOptimisticCollection(context, collection_index);

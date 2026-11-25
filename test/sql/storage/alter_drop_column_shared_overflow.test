@@ -1,0 +1,131 @@
+# name: test/sql/storage/alter_drop_column_shared_overflow.test
+# description: A dropped column's freed blocks, overflow blocks among them, are reused while the column stays hidden
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_drop_column_shared_overflow_main.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+ATTACH '{TEST_DIR}/alter_drop_column_shared_overflow.db' AS d (ROW_GROUP_SIZE 2048)
+
+# read by an older snapshot after its blocks are freed
+statement ok
+CREATE TABLE d.t AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i * 2 AS x FROM range(20000) t(i)
+
+# merged after its blocks are freed and reused
+statement ok
+CREATE TABLE d.m AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i * 2 AS x FROM range(20000) t(i)
+
+statement ok
+CREATE TABLE d.u (s VARCHAR)
+
+statement ok
+CHECKPOINT d
+
+# no overflow block of the strings is held by a handle
+statement ok
+DETACH d
+
+statement ok
+ATTACH '{TEST_DIR}/alter_drop_column_shared_overflow.db' AS d (ROW_GROUP_SIZE 2048)
+
+# a snapshot from before the DROP COLUMN, which has not read the strings yet
+statement ok con3
+BEGIN
+
+query I con3
+SELECT COUNT(*) FROM d.t
+----
+20000
+
+statement ok
+ALTER TABLE d.t DROP COLUMN s
+
+statement ok
+ALTER TABLE d.m DROP COLUMN s
+
+# frees the dropped columns' blocks, which the older snapshot can still read
+statement ok
+CHECKPOINT d
+
+loop k 0 3
+
+statement ok
+INSERT INTO d.u SELECT repeat(md5((i + 1000000 * {k})::VARCHAR), 160) FROM range(20000) t(i)
+
+statement ok
+CHECKPOINT d
+
+endloop
+
+query I con3
+SELECT COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM d.t
+----
+20000
+
+statement ok con3
+COMMIT
+
+# nothing reads the dropped columns any more: their blocks are reused
+loop k 3 6
+
+statement ok
+INSERT INTO d.u SELECT repeat(md5((i + 1000000 * {k})::VARCHAR), 160) FROM range(20000) t(i)
+
+statement ok
+CHECKPOINT d
+
+endloop
+
+# merges the row groups that keep the hidden column
+statement ok
+DELETE FROM d.m WHERE i % 10 <> 0
+
+statement ok
+CHECKPOINT d
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM d.m
+----
+2000	19990000	39980000
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM d.t
+----
+20000	199990000	399980000
+
+query I
+SELECT COUNT(*) FROM d.u
+----
+120000
+
+statement ok
+DETACH d
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+ATTACH '{TEST_DIR}/alter_drop_column_shared_overflow.db' AS d
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM d.m
+----
+2000	19990000	39980000
+
+query I
+SELECT COUNT(*) FILTER (s = repeat(md5((i % 20000 + 1000000 * (i // 20000))::VARCHAR), 160)) FROM (SELECT row_number() OVER () - 1 AS i, s FROM d.u)
+----
+120000

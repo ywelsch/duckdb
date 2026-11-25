@@ -236,7 +236,7 @@ public:
 
 	void SetAsMainTable() {
 		this->version = DataTableVersion::MAIN_TABLE;
-		hid_column_in_successor = false;
+		successor_shares_row_groups = false;
 	}
 
 	void SetAsDropped() {
@@ -381,7 +381,7 @@ private:
 	vector<idx_t> physical_columns;
 	//! The number of columns of the row groups this version uses, if physical_columns is set
 	idx_t physical_column_count = 0;
-	//! Whether a newer version hid one of this version's columns in the shared row groups
-	bool hid_column_in_successor = false;
+	//! Whether the newer version shares the row groups: an ADD COLUMN with a constant, SET NOT NULL, DROP COLUMN
+	bool successor_shares_row_groups = false;
 };
 } // namespace duckdb

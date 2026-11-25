@@ -1,0 +1,129 @@
+# name: test/sql/storage/alter_drop_column_shared_paths.test
+# description: Upserts, statistics, filters and further ALTERs on a table version that hides a dropped column
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_drop_column_shared_paths.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE t (k INTEGER PRIMARY KEY, d VARCHAR, v INTEGER, w INTEGER, g AS (v * 10))
+
+statement ok
+INSERT INTO t SELECT i, 'd' || i, i, i % 100 FROM range(300000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+ALTER TABLE t DROP COLUMN d
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE table_name = 't' ORDER BY column_index
+----
+k
+v
+w
+g
+
+# an upsert fetches the existing row and updates a column past the hidden one
+statement ok
+INSERT INTO t VALUES (5, 50, 1), (300001, 7, 7) ON CONFLICT (k) DO UPDATE SET v = excluded.v + t.v, w = t.w + 100
+
+query IIII
+SELECT k, v, w, g FROM t WHERE k IN (5, 300001) ORDER BY k
+----
+5	55	105	550
+300001	7	7	70
+
+# statistics of the columns past the hidden one
+query II
+SELECT MIN(v), MAX(v) FROM t
+----
+0	299999
+
+query II
+SELECT k, v FROM t ORDER BY v DESC LIMIT 2
+----
+299999	299999
+299998	299998
+
+# a filter that row group statistics prune
+query II
+SELECT COUNT(*), SUM(w) FROM t WHERE v BETWEEN 200000 AND 200009
+----
+10	45
+
+statement ok
+CHECKPOINT
+
+query II
+SELECT COUNT(*), SUM(w) FROM t WHERE v BETWEEN 200000 AND 200009
+----
+10	45
+
+query II
+SELECT MIN(v), MAX(v) FROM t
+----
+0	299999
+
+# further ALTERs on the version with the hidden column
+statement ok
+ALTER TABLE t ALTER v SET NOT NULL
+
+statement error
+INSERT INTO t VALUES (300002, NULL, 1)
+----
+NOT NULL
+
+statement ok
+ALTER TABLE t ALTER w TYPE BIGINT
+
+statement ok
+ALTER TABLE t ADD COLUMN r INTEGER DEFAULT 1 + 1
+
+statement ok
+ALTER TABLE t ADD COLUMN q DOUBLE DEFAULT random()
+
+query IIIII
+SELECT COUNT(*), SUM(v), SUM(w), SUM(r), COUNT(q) FROM t
+----
+300001	44999850057	14850107	600002	300001
+
+statement ok
+UPDATE t SET w = w + 1 WHERE k < 10
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIIII
+SELECT COUNT(*), SUM(v), SUM(w), SUM(r), COUNT(q) FROM t
+----
+300001	44999850057	14850117	600002	300001
+
+query IIII
+SELECT k, v, w, g FROM t WHERE k IN (5, 300001) ORDER BY k
+----
+5	55	106	550
+300001	7	7	70
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE table_name = 't' ORDER BY column_index
+----
+k
+v
+w
+g
+r
+q

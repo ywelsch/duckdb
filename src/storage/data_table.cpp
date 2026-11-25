@@ -117,6 +117,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 		auto column_count = row_groups->GetTypes().size();
 		row_groups->AddSharedColumn(new_column, default_executor, std::move(constant));
 		DuckTransaction::Get(context, db).AddSharedColumns(info, row_groups, column_count);
+		parent.successor_shares_row_groups = true;
 	} else {
 		this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
 	}
@@ -173,7 +174,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 	local_storage.MoveStorage(parent, *this);
 
 	// a checkpoint of this version frees the column's blocks, not the commit
-	parent.hid_column_in_successor = true;
+	parent.successor_shares_row_groups = true;
 	// this table replaces the previous table, hence the parent is no longer the root DataTable
 	parent.version = DataTableVersion::ALTERED;
 }
@@ -204,6 +205,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, BoundConstraint 
 		}
 	}
 	local_storage.MoveStorage(parent, *this);
+	parent.successor_shares_row_groups = true;
 	parent.version = DataTableVersion::ALTERED;
 }
 
@@ -1369,7 +1371,8 @@ void DataTable::CommitAppend(transaction_t commit_id, idx_t row_start, idx_t cou
 }
 
 void DataTable::RevertAppendInternal(idx_t start_row) {
-	D_ASSERT(IsMainTable());
+	// a newer version that shares the row groups loses the rows as well
+	D_ASSERT(IsMainTable() || successor_shares_row_groups);
 	// revert appends made to row_groups
 	row_groups->RevertAppendInternal(start_row);
 }
@@ -1405,9 +1408,10 @@ void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_
 	info->indexes.VerifyBuffers();
 #endif
 
-	if (!IsMainTable()) {
+	if (!IsMainTable() && !successor_shares_row_groups) {
 		//! The table was altered by another transaction since we staged our commit, revert it
 		//! Causing the commit of the other transaction to fail
+		//! A version that shares the row groups loses the reverted rows as well: it stays
 		version = DataTableVersion::MAIN_TABLE;
 	}
 	// revert the data table append
@@ -1826,7 +1830,7 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 }
 
 void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state) {
-	if (hid_column_in_successor) {
+	if (successor_shares_row_groups) {
 		// the newer version keeps the column hidden in the shared row groups: its checkpoint frees the blocks
 		return;
 	}

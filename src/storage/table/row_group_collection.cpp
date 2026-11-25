@@ -1194,6 +1194,12 @@ struct CollectionCheckpointState {
 	vector<LogicalType> types;
 	//! Whether the version being checkpointed has the first columns of the row groups, none hidden
 	bool writes_column_prefix = true;
+	//! For each column of the row groups, whether the version being checkpointed hid it
+	vector<bool> hidden_columns;
+
+	bool IsHiddenColumn(idx_t column_idx) const {
+		return column_idx < hidden_columns.size() && hidden_columns[column_idx];
+	}
 
 	idx_t SegmentCount() const {
 		return writers.size();
@@ -1416,15 +1422,28 @@ public:
 			row_group_rows -= current_row_group_rows;
 		}
 
+		// a column the version hid is not read: its blocks can be freed and reused already, and only a
+		// non-concurrent checkpoint merges, so no older snapshot reads it
 		vector<StorageIndex> column_ids;
+		vector<LogicalType> scan_types;
 		for (idx_t c = 0; c < types.size(); c++) {
+			if (checkpoint_state.IsHiddenColumn(c)) {
+				continue;
+			}
 			column_ids.emplace_back(c);
+			scan_types.push_back(types[c]);
 		}
+		bool has_hidden_columns = column_ids.size() != types.size();
 		DataChunk scan_chunk;
 		if (remapper) {
+			D_ASSERT(!has_hidden_columns);
 			remapper->InitializeMergeScan(scan_chunk, column_ids);
 		} else {
-			scan_chunk.Initialize(Allocator::DefaultAllocator(), types);
+			scan_chunk.Initialize(Allocator::DefaultAllocator(), scan_types);
+		}
+		DataChunk full_chunk;
+		if (has_hidden_columns) {
+			full_chunk.InitializeEmpty(types);
 		}
 
 		idx_t current_append_idx = 0;
@@ -1464,10 +1483,23 @@ public:
 				}
 				scan_chunk.Flatten();
 				const auto chunk_count = scan_chunk.size();
+				if (has_hidden_columns) {
+					// the hidden columns of the merged row groups hold NULL
+					idx_t scan_idx = 0;
+					for (idx_t c = 0; c < types.size(); c++) {
+						if (checkpoint_state.IsHiddenColumn(c)) {
+							full_chunk.data[c].Reference(Value(types[c]), count_t(chunk_count));
+						} else {
+							full_chunk.data[c].Reference(scan_chunk.data[scan_idx++]);
+						}
+					}
+					full_chunk.SetCardinalityUnsafe(chunk_count);
+				}
 				// Buffer shifted rows and strip the scanned rowid column before appending to the new row groups.
 				auto &append_chunk =
 				    remapper ? remapper->ProcessScanChunk(scan_chunk, row_start.GetIndex() + live_row_offset)
-				             : scan_chunk;
+				    : has_hidden_columns ? full_chunk
+				                         : scan_chunk;
 				idx_t remaining = append_chunk.size();
 				while (remaining > 0) {
 					auto &current_append_row_group = new_row_groups[current_append_idx]->GetNode();
@@ -1831,6 +1863,10 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 		writes_column_prefix = writes_column_prefix && written_columns[i] == i;
 	}
 	checkpoint_state.writes_column_prefix = writes_column_prefix;
+	checkpoint_state.hidden_columns.resize(version_column_count, true);
+	for (auto &position : written_columns) {
+		checkpoint_state.hidden_columns[position] = false;
+	}
 
 	auto &vacuum_state = checkpoint_state.vacuum_state;
 	InitializeVacuumState(checkpoint_state, vacuum_state, writer.GetRowGroupCount());
