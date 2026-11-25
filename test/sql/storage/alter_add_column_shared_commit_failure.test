@@ -1,0 +1,82 @@
+# name: test/sql/storage/alter_add_column_shared_commit_failure.test
+# description: An ADD COLUMN that shares the row groups and appends rows, and whose commit fails, leaves the table as it was
+# group: [storage]
+
+# the forced commit failure crashes the alternative-verify build
+require no_alternative_verify
+
+require skip_reload
+
+load {TEST_DIR}/alter_add_column_shared_commit_failure.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE t (i INTEGER, s VARCHAR)
+
+statement ok
+INSERT INTO t SELECT i, repeat('x', 100) || i FROM range(100000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE t ADD COLUMN k INTEGER DEFAULT 1
+
+statement ok
+INSERT INTO t SELECT i, 'new' || i, 2 FROM range(100000, 100100) t(i)
+
+statement ok
+INSERT INTO t SELECT i, 'bulk' || i, 3 FROM range(200000, 400000) t(i)
+
+statement ok
+SET GLOBAL debug_force_commit_failure = true
+
+statement error
+COMMIT
+----
+Forced commit failure
+
+statement ok
+SET GLOBAL debug_force_commit_failure = false
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+100000	4999950000
+
+statement error
+SELECT k FROM t
+----
+not found
+
+statement ok
+INSERT INTO t VALUES (100000, 'after')
+
+statement ok
+ALTER TABLE t ADD COLUMN k INTEGER DEFAULT 5
+
+query III
+SELECT COUNT(*), SUM(i), SUM(k) FROM t
+----
+100001	5000050000	500005
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(i), SUM(k) FROM t
+----
+100001	5000050000	500005
