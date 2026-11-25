@@ -73,8 +73,8 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 		}
 	}
 	guard.unlock();
-	// the attach pool refills its own holes rather than taking a new block with a lower id
-	auto prefer_lower_block_id = !locality || pool == MetadataPool::DEFAULT;
+	// with metadata locality each pool refills its own holes rather than taking a new block with a lower id
+	auto prefer_lower_block_id = !locality;
 	if (free_block == INVALID_BLOCK || (prefer_lower_block_id && free_block > PeekNextBlockId())) {
 		free_block = AllocateNewBlock(guard, pool);
 	} else {
