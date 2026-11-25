@@ -323,6 +323,8 @@ static bool AlterCopiesRowGroups(AlterInfo &info) {
 	auto &table_info = info.Cast<AlterTableInfo>();
 	switch (table_info.alter_table_type) {
 	case AlterTableType::SET_NOT_NULL:
+	case AlterTableType::REMOVE_COLUMN:
+		// the versions share the row groups, a dropped column stays in them hidden
 		return false;
 	case AlterTableType::ADD_COLUMN: {
 		// a constant column is added to row groups the versions share

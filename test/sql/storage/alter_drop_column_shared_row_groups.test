@@ -1,0 +1,224 @@
+# name: test/sql/storage/alter_drop_column_shared_row_groups.test
+# description: DROP COLUMN shares the row groups with the older version, which keeps reading the dropped column
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_drop_column_shared_row_groups.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE a AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i * 2 AS x FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE b AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i * 2 AS x FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE m AS SELECT i, i::VARCHAR AS s, i * 2 AS x FROM range(400000) t(i)
+
+statement ok
+CREATE TABLE l AS SELECT i, i * 2 AS x, repeat(md5(i::VARCHAR), 160) AS s FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+INSERT INTO a SELECT i, repeat(md5(i::VARCHAR), 160), i * 2 FROM range(1000, 1100) t(i)
+
+statement ok
+INSERT INTO b SELECT i, repeat(md5(i::VARCHAR), 160), i * 2 FROM range(1000, 1100) t(i)
+
+statement ok
+DELETE FROM m WHERE i < 300000 AND i % 10 <> 0
+
+# a snapshot from before the ALTERs
+statement ok con3
+BEGIN
+
+query II con3
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM a
+----
+1100	1100
+
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE a DROP COLUMN s
+
+# the last column
+statement ok con1
+ALTER TABLE l DROP COLUMN s
+
+statement ok con2
+BEGIN
+
+statement ok con2
+ALTER TABLE b DROP COLUMN s
+
+statement ok con4
+BEGIN
+
+statement ok con4
+ALTER TABLE m DROP COLUMN s
+
+# the open ALTERs do not hold the checkpoint back, which writes the older versions
+statement ok
+CHECKPOINT
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM a
+----
+1100	604450	1100
+
+# the ALTER's own writes, on the version without the column
+statement ok con1
+DELETE FROM a WHERE i >= 1090
+
+statement ok con1
+INSERT INTO a VALUES (5000, 7)
+
+statement ok con1
+INSERT INTO l VALUES (5000, 7)
+
+query III con1
+SELECT COUNT(*), SUM(i), SUM(x) FROM a
+----
+1091	598505	1187017
+
+statement ok con1
+COMMIT
+
+statement ok con2
+ROLLBACK
+
+statement ok con4
+COMMIT
+
+# the older snapshot still reads the dropped column
+query III con3
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM a
+----
+1100	604450	1100
+
+# a checkpoint of the newer version frees the dropped column's blocks while the older snapshot reads them
+statement ok
+CHECKPOINT
+
+query III con3
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM a
+----
+1100	604450	1100
+
+statement ok con3
+COMMIT
+
+# an update holds checkpoints back until older transactions end
+statement ok
+UPDATE a SET x = -1 WHERE i >= 1000 AND i < 1010
+
+statement error
+SELECT s FROM a
+----
+not found
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM a
+----
+1091	598505	1166917
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM b
+----
+1100	604450	1100
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM m
+----
+130000	39499800000	78999600000
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM l
+----
+1001	504500	999007
+
+# the storage info shows the version's columns
+query I
+SELECT DISTINCT column_name FROM pragma_storage_info('a') ORDER BY ALL
+----
+i
+x
+
+# a merge, and a dropped table, after a checkpoint freed the hidden column's blocks
+statement ok
+DELETE FROM m WHERE i >= 300000 AND i % 10 <> 0
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM m
+----
+40000	7999800000	15999600000
+
+statement ok
+DROP TABLE l
+
+statement ok
+CHECKPOINT
+
+# a second DROP COLUMN, and an ADD COLUMN after it
+statement ok
+ALTER TABLE a DROP COLUMN i
+
+statement ok
+ALTER TABLE a ADD COLUMN k INTEGER DEFAULT 3
+
+statement ok
+INSERT INTO a VALUES (11, 12)
+
+query III
+SELECT COUNT(*), SUM(x), SUM(k) FROM a
+----
+1092	1166928	3285
+
+statement ok
+CHECKPOINT
+
+statement ok
+UPDATE a SET k = 4 WHERE x = 11
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(x), SUM(k) FROM a
+----
+1092	1166928	3277
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM m
+----
+40000	7999800000	15999600000
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE table_name = 'a' ORDER BY column_index
+----
+x
+k
+
+statement ok
+CHECKPOINT

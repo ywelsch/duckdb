@@ -38,6 +38,8 @@ public:
 
 	//! Returns the underlying storage of the table
 	DataTable &GetStorage() override;
+	idx_t GetStoragePosition(idx_t storage_oid) const override;
+	idx_t GetStorageColumnCount() const override;
 
 	//! Get statistics of a column (physical or virtual) within the table
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, const StorageIndex &storage_index);

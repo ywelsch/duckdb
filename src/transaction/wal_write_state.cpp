@@ -257,7 +257,10 @@ void WALWriteState::WriteUpdate(UpdateInfo &info) {
 		column_indexes.push_back(current_column_data.get().column_index);
 		current_column_data = current_column_data.get().Parent();
 	}
-	column_indexes.push_back(info.column_index);
+	// the log has the table version's columns, not the positions in the row groups
+	auto logical_column = info.table->GetStorage().LogicalColumn(info.column_index);
+	D_ASSERT(logical_column.IsValid());
+	column_indexes.push_back(logical_column.GetIndex());
 	std::reverse(column_indexes.begin(), column_indexes.end());
 
 	log.WriteUpdate(*update_chunk, column_indexes);

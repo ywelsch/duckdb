@@ -56,7 +56,7 @@ PhysicalInsert::PhysicalInsert(PhysicalPlan &physical_plan, vector<LogicalType> 
 		auto &id = columns_to_fetch_p[i];
 		D_ASSERT(id < insert_types.size());
 		types_to_fetch[i] = insert_types[id];
-		columns_to_fetch.emplace_back(id);
+		columns_to_fetch.emplace_back(table.GetStoragePosition(id));
 	}
 }
 
@@ -632,8 +632,8 @@ SinkResultType PhysicalInsert::Sink(ExecutionContext &context, DataChunk &insert
 		lock_guard<mutex> l(gstate.lock);
 		lstate.optimistic_writer = make_uniq<OptimisticDataWriter>(data_table);
 		// Create the local row group collection.
-		auto optimistic_collection =
-		    lstate.optimistic_writer->CreateCollection(context.client.GetContext(), storage, insert_types);
+		auto optimistic_collection = lstate.optimistic_writer->CreateCollection(context.client.GetContext(), storage,
+		                                                                        data_table.GetPhysicalTypes());
 		auto &collection = *optimistic_collection->collection;
 		collection.InitializeEmpty();
 		collection.InitializeAppend(lstate.local_append_state);
@@ -647,7 +647,14 @@ SinkResultType PhysicalInsert::Sink(ExecutionContext &context, DataChunk &insert
 
 	auto &optimistic_collection = data_table.GetOptimisticCollection(context.client, lstate.collection_index);
 	auto &collection = *optimistic_collection.collection;
-	auto flushed_row_group_idx = collection.Append(insert_chunk, lstate.local_append_state);
+	optional_idx flushed_row_group_idx;
+	if (data_table.HasHiddenColumns()) {
+		DataChunk physical_chunk;
+		data_table.ToPhysicalChunk(insert_chunk, physical_chunk);
+		flushed_row_group_idx = collection.Append(physical_chunk, lstate.local_append_state);
+	} else {
+		flushed_row_group_idx = collection.Append(insert_chunk, lstate.local_append_state);
+	}
 	if (flushed_row_group_idx.IsValid()) {
 		lstate.optimistic_writer->WriteNewRowGroup(context.client.GetContext(), optimistic_collection,
 		                                           flushed_row_group_idx.GetIndex());

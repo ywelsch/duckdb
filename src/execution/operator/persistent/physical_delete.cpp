@@ -152,22 +152,21 @@ SinkResultType PhysicalDelete::Sink(ExecutionContext &context, DataChunk &chunk,
 	const bool fetch_by_row_id = return_columns.empty();
 	DataChunk fetch_chunk;
 	if (fetch_by_row_id) {
-		vector<StorageIndex> column_ids;
+		vector<column_t> fetched_columns;
 		if (return_chunk) {
 			for (idx_t i = 0; i < table.ColumnCount(); i++) {
-				column_ids.emplace_back(i);
+				fetched_columns.push_back(i);
 			}
 		} else {
 			auto indexed_columns = table.GetDataTableInfo()->GetIndexes().GetUniqueIndexColumns();
-			vector<column_t> sorted_columns(indexed_columns.begin(), indexed_columns.end());
-			std::sort(sorted_columns.begin(), sorted_columns.end());
-			for (auto col : sorted_columns) {
-				column_ids.emplace_back(col);
-			}
+			fetched_columns.assign(indexed_columns.begin(), indexed_columns.end());
+			std::sort(fetched_columns.begin(), fetched_columns.end());
 		}
+		vector<StorageIndex> column_ids;
 		vector<LogicalType> column_types;
-		for (auto &col : column_ids) {
-			column_types.push_back(types[col.GetPrimaryIndex()]);
+		for (auto col : fetched_columns) {
+			column_ids.emplace_back(table.PhysicalColumn(col));
+			column_types.push_back(types[col]);
 		}
 		// Also fetch the row ids, since Fetch skips rows that are no longer visible.
 		column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
@@ -186,7 +185,7 @@ SinkResultType PhysicalDelete::Sink(ExecutionContext &context, DataChunk &chunk,
 
 		idx_t fetch_idx = 0;
 		for (idx_t i = 0; i < table.ColumnCount(); i++) {
-			if (fetch_idx + 1 < column_ids.size() && column_ids[fetch_idx].GetPrimaryIndex() == i) {
+			if (fetch_idx < fetched_columns.size() && fetched_columns[fetch_idx] == i) {
 				l_state.delete_chunk.data[i].Reference(fetch_chunk.data[fetch_idx++]);
 			} else {
 				l_state.delete_chunk.data[i].Reference(Value(types[i]), count_t(delete_count));

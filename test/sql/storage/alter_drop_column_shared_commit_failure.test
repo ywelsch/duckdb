@@ -1,0 +1,86 @@
+# name: test/sql/storage/alter_drop_column_shared_commit_failure.test
+# description: A DROP COLUMN whose transaction appended rows, and whose commit fails, leaves the table as it was
+# group: [storage]
+
+# the forced commit failure crashes the alternative-verify build
+require no_alternative_verify
+
+require skip_reload
+
+load {TEST_DIR}/alter_drop_column_shared_commit_failure.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE t (i INTEGER, s VARCHAR, x INTEGER)
+
+statement ok
+INSERT INTO t SELECT i, repeat('x', 100) || i, i FROM range(100000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+BEGIN
+
+# written optimistically, the dropped column among them
+statement ok
+INSERT INTO t SELECT i, 'bulk' || i, i FROM range(200000, 400000) t(i)
+
+statement ok
+ALTER TABLE t DROP COLUMN s
+
+statement ok
+INSERT INTO t SELECT i, i FROM range(100000, 100100) t(i)
+
+statement ok
+INSERT INTO t SELECT i, i FROM range(400000, 600000) t(i)
+
+query II
+SELECT COUNT(*), SUM(x) FROM t
+----
+500100	165009754950
+
+statement ok
+SET GLOBAL debug_force_commit_failure = true
+
+statement error
+COMMIT
+----
+Forced commit failure
+
+statement ok
+SET GLOBAL debug_force_commit_failure = false
+
+query III
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = repeat('x', 100) || i) FROM t
+----
+100000	4999950000	100000
+
+statement ok
+ALTER TABLE t DROP COLUMN s
+
+statement ok
+INSERT INTO t SELECT i, i FROM range(200000, 400000) t(i)
+
+query II
+SELECT COUNT(*), SUM(x) FROM t
+----
+300000	64999850000
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query II
+SELECT COUNT(*), SUM(x) FROM t
+----
+300000	64999850000

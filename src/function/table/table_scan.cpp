@@ -397,7 +397,7 @@ private:
 			const bool supported_scan = input.max_threads > 1 && !blocks.InMemory() && !bind_data.is_create_index &&
 			                            !bind_data.order_options && !sample_options;
 			if (supported_scan &&
-			    CollectionScanState::SupportsAssignmentBlockDiscovery(storage_ids, storage.GetTypes())) {
+			    CollectionScanState::SupportsAssignmentBlockDiscovery(storage_ids, storage.GetPhysicalTypes())) {
 				const auto shard_count = BlockAllocator::Get(storage.GetAttached()).GetPoolShardCount();
 				if (shard_count > 1 || ClientConfig::GetConfig(context.client).verify_parallelism) {
 					affinity_shards = shard_count;

@@ -96,6 +96,27 @@ public:
 	vector<LogicalType> GetTypes();
 	const vector<ColumnDefinition> &Columns() const;
 
+	//! The position of a column in the row groups, which keep the columns a shared DROP COLUMN hid
+	idx_t PhysicalColumn(idx_t storage_index) const;
+	//! Maps the top-level index of a storage index to its position in the row groups
+	StorageIndex PhysicalColumn(const StorageIndex &storage_index) const;
+	//! The column at a position in the row groups, invalid for a hidden column
+	optional_idx LogicalColumn(idx_t physical_index) const;
+	//! Whether the row groups have columns this version hid
+	bool HasHiddenColumns() const {
+		return !physical_columns.empty();
+	}
+	//! The positions in the row groups of this version's columns, in order
+	vector<idx_t> PhysicalColumns() const;
+	//! The number of columns of the row groups this version uses, hidden ones included
+	idx_t PhysicalColumnCount() const;
+	//! The types of the columns of the row groups this version uses
+	vector<LogicalType> GetPhysicalTypes();
+	//! The compression type of each column of the row groups this version uses
+	vector<CompressionType> GetPhysicalCompressionTypes();
+	//! Lays out a chunk of this version's columns as the row groups' columns, NULL in the hidden ones
+	void ToPhysicalChunk(DataChunk &input, DataChunk &result);
+
 	void InitializeScan(ClientContext &context, DuckTransaction &transaction, TableScanState &state,
 	                    const vector<StorageIndex> &column_ids, optional_ptr<TableFilterSet> table_filters = nullptr);
 
@@ -215,6 +236,7 @@ public:
 
 	void SetAsMainTable() {
 		this->version = DataTableVersion::MAIN_TABLE;
+		hid_column_in_successor = false;
 	}
 
 	void SetAsDropped() {
@@ -316,6 +338,10 @@ private:
 	                         const BoundConstraint &constraint);
 	//! Throws if the parent's row groups have a column that another transaction's uncommitted ADD COLUMN added
 	static void VerifyNoUncommittedColumns(DataTable &parent);
+	//! Copies the positions of the parent's columns, and appends one for an added column
+	void InheritPhysicalColumns(DataTable &parent, bool add_column);
+	//! Keeps the segment infos of this version's columns, numbered as this version's columns
+	void RemoveOtherVersionColumns(vector<ColumnSegmentInfo> &result, idx_t start) const;
 
 	//! Verify constraints with a chunk from the Update containing only the specified column_ids
 	void VerifyUpdateConstraints(ConstraintState &state, ClientContext &context, DataChunk &chunk,
@@ -351,5 +377,11 @@ private:
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table
 	atomic<DataTableVersion> version;
+	//! The position in the row groups of each column, empty if they are the same
+	vector<idx_t> physical_columns;
+	//! The number of columns of the row groups this version uses, if physical_columns is set
+	idx_t physical_column_count = 0;
+	//! Whether a newer version hid one of this version's columns in the shared row groups
+	bool hid_column_in_successor = false;
 };
 } // namespace duckdb

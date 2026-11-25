@@ -190,12 +190,8 @@ void OptimisticWriteCollection::MergeStorage(OptimisticWriteCollection &merge_co
 void OptimisticDataWriter::FlushToDisk(Context &context, OptimisticWriteCollection &collection,
                                        const vector<const_reference<RowGroup>> &row_groups,
                                        const vector<int64_t> &segment_indexes) {
-	//! The set of column compression types (if any)
-	vector<CompressionType> compression_types;
-	D_ASSERT(compression_types.empty());
-	for (auto &column : table.Columns()) {
-		compression_types.push_back(column.CompressionType());
-	}
+	//! The set of column compression types (if any), for the columns of the table's row groups
+	auto compression_types = table.GetPhysicalCompressionTypes();
 	RowGroupWriteInfo info(context, *partial_manager, compression_types, collection.partial_block_managers);
 	auto result = RowGroup::WriteToDisk(info, row_groups);
 	// move new (checkpointed) row groups to the row group collection

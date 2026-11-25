@@ -711,6 +711,9 @@ struct BlockIdDropper : public BlockIdVisitor {
 };
 
 void RowGroup::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state) {
+	if (ColumnIsLoaded(column_index) && columns[column_index]->BlocksReleased()) {
+		return;
+	}
 	auto &column = GetColumn(column_index);
 	BlockIdDropper dropper(drop_state);
 	column.VisitBlockIds(dropper);
@@ -1744,8 +1747,20 @@ bool RowGroup::HasUnchangedColumns() const {
 	return false;
 }
 
+struct ImageBlockDropper : public BlockIdVisitor {
+	explicit ImageBlockDropper(BlockManager &manager) : manager(manager) {
+	}
+
+	void Visit(block_id_t block_id) override {
+		manager.MarkBlockAsModified(block_id);
+	}
+
+	BlockManager &manager;
+};
+
 RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
-	bool can_reuse_metadata = CanReuseMetadata(writer);
+	// a version with hidden columns writes another column layout than the image has: nothing is reused
+	bool can_reuse_metadata = CanReuseMetadata(writer) && writer.WritesColumnPrefix();
 	bool all_columns_have_metadata = true;
 	for (auto &pointer : column_pointers) {
 		// a column added since the last checkpoint has none
@@ -1807,18 +1822,41 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 		}
 	}
 
-	RowGroupWriteInfo info(writer.GetTableWriter().GetContext(), writer.GetPartialBlockManager(), compression_types,
-	                       writer.GetCheckpointOptions());
-
-	// columns past those of the table version being written belong to an uncommitted ALTER: carried, not written
+	// the columns the version being written does not have are carried, not written: those of an uncommitted
+	// ALTER, and those it hid, which leave the image
+	auto &written_columns = writer.GetWrittenColumns();
 	auto write_count = compression_types.size();
-	D_ASSERT(write_count <= GetColumnCount());
-	for (idx_t column_idx = write_count; column_idx < GetColumnCount(); column_idx++) {
+	D_ASSERT(write_count == written_columns.size() && write_count <= GetColumnCount());
+	vector<CompressionType> column_compression_types(GetColumnCount(), CompressionType::COMPRESSION_AUTO);
+	for (idx_t i = 0; i < write_count; i++) {
+		column_compression_types[written_columns[i]] = compression_types[i];
+	}
+	RowGroupWriteInfo info(writer.GetTableWriter().GetContext(), writer.GetPartialBlockManager(),
+	                       column_compression_types, writer.GetCheckpointOptions());
+
+	vector<bool> is_written(GetColumnCount(), false);
+	for (auto &position : written_columns) {
+		is_written[position] = true;
+	}
+	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
+		if (is_written[column_idx]) {
+			continue;
+		}
+		if (column_idx < writer.GetVersionColumnCount()) {
+			// a hidden column: its blocks are freed once, the loaded column stays for older readers
+			auto &column = GetColumn(column_idx);
+			if (!column.BlocksReleased()) {
+				ImageBlockDropper dropper(GetBlockManager());
+				column.VisitBlockIds(dropper);
+				column.SetBlocksReleased();
+			}
+		}
 		D_ASSERT(ColumnIsLoaded(column_idx));
 		result_row_group->columns[column_idx] = columns[column_idx];
 	}
 	vector<idx_t> reused_columns;
-	for (idx_t column_idx = 0; column_idx < write_count; column_idx++) {
+	for (idx_t written_idx = 0; written_idx < write_count; written_idx++) {
+		auto column_idx = written_columns[written_idx];
 		bool column_has_changes = true;
 		if (partial_reuse && column_pointers[column_idx].IsValid()) {
 			if (!ColumnIsLoaded(column_idx)) {
@@ -1926,9 +1964,10 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 		return row_group_pointer;
 	}
 	// write path: write column metadata to disk (with optional per-column reuse)
-	// the columns of the table version being written, an uncommitted ALTER's columns after them are not written
+	// the columns of the table version being written, at their positions in the row group
+	auto &written_columns = writer.GetWrittenColumns();
 	auto write_count = write_data.states.size();
-	D_ASSERT(write_count <= GetColumnCount());
+	D_ASSERT(write_count == written_columns.size() && write_count <= GetColumnCount());
 
 	// merge stats
 	{
@@ -1936,12 +1975,13 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 		for (idx_t column_idx = 0; column_idx < write_count; column_idx++) {
 			bool is_reused = !write_data.states[column_idx];
 			if (is_reused) {
-				if (!ColumnIsLoaded(column_idx) &&
-				    collection.get().GetTypes()[column_idx].id() != LogicalTypeId::VARIANT) {
+				auto physical_idx = written_columns[column_idx];
+				if (!ColumnIsLoaded(physical_idx) &&
+				    collection.get().GetTypes()[physical_idx].id() != LogicalTypeId::VARIANT) {
 					writer.SetHasUnloadedColumn(column_idx);
 					continue;
 				}
-				GetColumn(column_idx).MergeIntoStatistics(global_stats.GetStats(*lock, column_idx).Statistics());
+				GetColumn(physical_idx).MergeIntoStatistics(global_stats.GetStats(*lock, column_idx).Statistics());
 			} else {
 				global_stats.GetStats(*lock, column_idx).Statistics().Merge(write_data.statistics[column_idx]);
 			}
@@ -1960,7 +2000,7 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 		bool is_reused = !write_data.states[column_idx];
 		if (is_reused) {
 			// reuse existing column pointer (extras are already carried on this->per_column_metadata_blocks)
-			auto col_ptr = column_pointers[column_idx];
+			auto col_ptr = column_pointers[written_columns[column_idx]];
 			row_group_pointer.data_pointers.push_back(col_ptr);
 			reused_column_blocks.push_back(col_ptr);
 			continue;
@@ -2038,9 +2078,12 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 		metadata_manager->ClearModifiedBlocks(reused_column_blocks);
 	}
 
-	// cache metadata pointers for future checkpoint reuse
-	column_pointers = row_group_pointer.data_pointers;
+	// cache metadata pointers for future checkpoint reuse, at the positions of the written columns
+	column_pointers.clear();
 	column_pointers.resize(GetColumnCount());
+	for (idx_t column_idx = 0; column_idx < write_count; column_idx++) {
+		column_pointers[written_columns[column_idx]] = row_group_pointer.data_pointers[column_idx];
+	}
 	has_metadata_blocks = row_group_pointer.has_metadata_blocks;
 	extra_metadata_blocks = row_group_pointer.extra_metadata_blocks;
 	has_per_column_metadata_blocks = row_group_pointer.has_per_column_metadata_blocks;

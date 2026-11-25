@@ -109,6 +109,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	lock_guard<mutex> parent_lock(parent.append_lock);
 	VerifyNoUncommittedColumns(parent);
 
+	InheritPhysicalColumns(parent, true);
 	if (default_value.IsFoldable()) {
 		// a constant column: this version shares the row groups, which checkpoints of the parent keep rewriting
 		auto constant = ExpressionExecutor::EvaluateScalar(context, default_value);
@@ -150,8 +151,11 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 		}
 	}
 
-	// erase the column definitions from this DataTable
+	// the row groups keep the column, hidden from this version: older versions keep reading it
 	D_ASSERT(removed_column < column_definitions.size());
+	physical_columns = parent.PhysicalColumns();
+	physical_column_count = parent.PhysicalColumnCount();
+	physical_columns.erase_at(removed_column);
 	column_definitions.erase_at(removed_column);
 
 	storage_t storage_idx = 0;
@@ -164,12 +168,12 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_co
 		col.SetStorageOid(storage_idx++);
 	}
 
-	// alter the row_groups and remove the column from each of them
-	this->row_groups = parent.row_groups->RemoveColumn(removed_column);
+	this->row_groups = parent.row_groups;
+	// the transaction-local rows have the same columns
+	local_storage.MoveStorage(parent, *this);
 
-	// scan the original table, and fill the new column with the transformed value
-	local_storage.DropColumn(parent, *this, removed_column);
-
+	// a checkpoint of this version frees the column's blocks, not the commit
+	parent.hid_column_in_successor = true;
 	// this table replaces the previous table, hence the parent is no longer the root DataTable
 	parent.version = DataTableVersion::ALTERED;
 }
@@ -188,6 +192,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, BoundConstraint 
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
 	}
+	InheritPhysicalColumns(parent, false);
 
 	if (constraint.type != ConstraintType::UNIQUE) {
 		VerifyNewConstraint(context, local_storage, parent, constraint);
@@ -227,6 +232,12 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 
 	// change the type in this DataTable
 	column_definitions[changed_idx].SetType(target_type);
+	InheritPhysicalColumns(parent, false);
+	auto physical_idx = PhysicalColumn(changed_idx);
+	vector<StorageIndex> physical_bound_columns;
+	for (auto &column : bound_columns) {
+		physical_bound_columns.push_back(PhysicalColumn(column));
+	}
 
 	// set up the statistics for the table
 	// the column that had its type changed will have the new statistics computed during conversion
@@ -239,11 +250,11 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 		auto &transaction_manager = DuckTransactionManager::Get(db);
 		TransactionData rewrite_visibility(transaction.GetTransactionId(),
 		                                   VisibilityBound::Through(transaction_manager.GetLastCommit()));
-		row_groups = parent.row_groups->AlterType(context, changed_idx, target_type, bound_columns, cast_expr,
+		row_groups = parent.row_groups->AlterType(context, physical_idx, target_type, physical_bound_columns, cast_expr,
 		                                          rewrite_visibility);
 
 		// scan the original table, and fill the new column with the transformed value
-		local_storage.ChangeType(context, parent, *this, changed_idx, target_type, bound_columns, cast_expr);
+		local_storage.ChangeType(context, parent, *this, physical_idx, target_type, physical_bound_columns, cast_expr);
 
 		// re-verify any column constraint that the rewrite could have violated (e.g. NOT NULL)
 		if (constraint_to_verify) {
@@ -257,7 +268,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 }
 
 void DataTable::VerifyNoUncommittedColumns(DataTable &parent) {
-	if (parent.row_groups->GetTypes().size() != parent.column_definitions.size()) {
+	if (parent.row_groups->GetTypes().size() != parent.PhysicalColumnCount()) {
 		// another transaction's ADD COLUMN added a column to the row groups: its ALTER is not committed
 		throw TransactionException("Catalog write-write conflict on alter with %s", parent.GetTableName());
 	}
@@ -269,6 +280,96 @@ vector<LogicalType> DataTable::GetTypes() {
 		types.push_back(it.Type());
 	}
 	return types;
+}
+
+idx_t DataTable::PhysicalColumn(idx_t storage_index) const {
+	if (physical_columns.empty()) {
+		return storage_index;
+	}
+	D_ASSERT(storage_index < physical_columns.size());
+	return physical_columns[storage_index];
+}
+
+StorageIndex DataTable::PhysicalColumn(const StorageIndex &storage_index) const {
+	if (physical_columns.empty() || IsVirtualColumn(storage_index.GetPrimaryIndex())) {
+		return storage_index;
+	}
+	auto result = storage_index;
+	result.SetIndex(PhysicalColumn(storage_index.GetPrimaryIndex()));
+	return result;
+}
+
+optional_idx DataTable::LogicalColumn(idx_t physical_index) const {
+	if (physical_columns.empty()) {
+		return physical_index < column_definitions.size() ? optional_idx(physical_index) : optional_idx();
+	}
+	for (idx_t i = 0; i < physical_columns.size(); i++) {
+		if (physical_columns[i] == physical_index) {
+			return i;
+		}
+	}
+	return optional_idx();
+}
+
+vector<idx_t> DataTable::PhysicalColumns() const {
+	if (!physical_columns.empty()) {
+		return physical_columns;
+	}
+	vector<idx_t> result;
+	for (idx_t i = 0; i < column_definitions.size(); i++) {
+		result.push_back(i);
+	}
+	return result;
+}
+
+idx_t DataTable::PhysicalColumnCount() const {
+	return physical_columns.empty() ? column_definitions.size() : physical_column_count;
+}
+
+vector<LogicalType> DataTable::GetPhysicalTypes() {
+	if (physical_columns.empty()) {
+		return GetTypes();
+	}
+	// a shared collection never changes the type at a position
+	auto &types = row_groups->GetTypes();
+	D_ASSERT(types.size() >= physical_column_count);
+	return vector<LogicalType>(types.begin(), types.begin() + NumericCast<int64_t>(physical_column_count));
+}
+
+vector<CompressionType> DataTable::GetPhysicalCompressionTypes() {
+	vector<CompressionType> result(PhysicalColumnCount(), CompressionType::COMPRESSION_AUTO);
+	for (idx_t i = 0; i < column_definitions.size(); i++) {
+		result[PhysicalColumn(i)] = column_definitions[i].CompressionType();
+	}
+	return result;
+}
+
+void DataTable::ToPhysicalChunk(DataChunk &input, DataChunk &result) {
+	D_ASSERT(input.ColumnCount() == column_definitions.size());
+	auto types = GetPhysicalTypes();
+	result.InitializeEmpty(types);
+	vector<bool> referenced(types.size(), false);
+	for (idx_t i = 0; i < input.ColumnCount(); i++) {
+		result.data[physical_columns[i]].Reference(input.data[i]);
+		referenced[physical_columns[i]] = true;
+	}
+	for (idx_t i = 0; i < types.size(); i++) {
+		if (!referenced[i]) {
+			result.data[i].Reference(Value(types[i]), count_t(input.size()));
+		}
+	}
+	result.SetCardinalityUnsafe(input.size());
+}
+
+void DataTable::InheritPhysicalColumns(DataTable &parent, bool add_column) {
+	if (parent.physical_columns.empty()) {
+		return;
+	}
+	physical_columns = parent.physical_columns;
+	physical_column_count = parent.physical_column_count;
+	if (add_column) {
+		physical_columns.push_back(physical_column_count++);
+	}
 }
 
 bool DataTable::IsTemporary() const {
@@ -433,12 +534,12 @@ void DataTable::VacuumIndexes() {
 }
 
 void DataTable::RebuildIndexes() {
-	auto &types = row_groups->GetTypes();
+	auto types = GetTypes();
 	info->indexes.Rebuild([&](const vector<column_t> &col_ids, const IndexRebuildAppend &append) {
 		vector<StorageIndex> scan_column_ids;
 		vector<LogicalType> scan_types;
 		for (auto col_id : col_ids) {
-			scan_column_ids.emplace_back(col_id);
+			scan_column_ids.emplace_back(PhysicalColumn(col_id));
 			scan_types.push_back(types[col_id]);
 		}
 		scan_column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
@@ -1174,7 +1275,7 @@ void DataTable::ScanTableSegment(DuckTransaction &transaction, idx_t row_start, 
 	vector<LogicalType> types;
 	for (idx_t i = 0; i < this->column_definitions.size(); i++) {
 		auto &col = this->column_definitions[i];
-		column_ids.emplace_back(i);
+		column_ids.emplace_back(PhysicalColumn(i));
 		types.push_back(col.Type());
 	}
 	DataChunk chunk;
@@ -1233,7 +1334,11 @@ void DataTable::WriteToLog(DuckTransaction &transaction, WriteAheadLog &log, idx
 	}
 
 	idx_t optimistic_count = 0;
-	auto entry = commit_state->GetRowGroupData(*this, row_start, optimistic_count);
+	// row groups with hidden columns are not this version's on-disk layout: log their rows
+	optional_ptr<PersistentCollectionData> entry;
+	if (!HasHiddenColumns()) {
+		entry = commit_state->GetRowGroupData(*this, row_start, optimistic_count);
+	}
 	if (!entry) {
 		ScanTableSegment(transaction, row_start, count, [&](DataChunk &chunk) { log.WriteInsert(chunk); });
 		return;
@@ -1314,7 +1419,8 @@ void DataTable::RevertAppend(DuckTransaction &transaction, idx_t start_row, idx_
 //===--------------------------------------------------------------------===//
 void DataTable::RemoveFromIndexes(const QueryContext &context, Vector &row_identifiers, idx_t count,
                                   IndexRemovalType removal_type, optional_idx active_checkpoint) {
-	row_groups->RemoveFromIndexes(context, info->indexes, row_identifiers, count, removal_type, active_checkpoint);
+	row_groups->RemoveFromIndexes(context, *this, info->indexes, row_identifiers, count, removal_type,
+	                              active_checkpoint);
 }
 
 //===--------------------------------------------------------------------===//
@@ -1374,7 +1480,7 @@ unique_ptr<TableDeleteState> DataTable::InitializeDelete(TableCatalogEntry &tabl
 	if (result->has_delete_constraints) {
 		// initialize the chunk if there are any constraints to verify
 		for (idx_t i = 0; i < column_definitions.size(); i++) {
-			result->col_ids.emplace_back(column_definitions[i].StorageOid());
+			result->col_ids.emplace_back(PhysicalColumn(column_definitions[i].StorageOid()));
 			types.emplace_back(column_definitions[i].Type());
 		}
 		result->verify_chunk.Initialize(Allocator::Get(context), types);
@@ -1553,6 +1659,10 @@ void DataTable::Update(TableUpdateState &state, ClientContext &context, DuckTabl
 	Vector row_ids_slice(LogicalType::BIGINT);
 	DataChunk updates_slice;
 	updates_slice.InitializeEmpty(updates.GetTypes());
+	vector<PhysicalIndex> physical_column_ids;
+	for (auto &column_id : column_ids) {
+		physical_column_ids.emplace_back(PhysicalColumn(column_id.index));
+	}
 
 	SelectionVector sel_local_update(count), sel_global_update(count);
 	idx_t n_local_update = 0;
@@ -1572,7 +1682,7 @@ void DataTable::Update(TableUpdateState &state, ClientContext &context, DuckTabl
 		row_ids_slice.Slice(row_ids, sel_local_update, n_local_update);
 		row_ids_slice.Flatten();
 
-		LocalStorage::Get(context, db).Update(*this, table_entry, row_ids_slice, column_ids, updates_slice);
+		LocalStorage::Get(context, db).Update(*this, table_entry, row_ids_slice, physical_column_ids, updates_slice);
 	}
 
 	// otherwise global storage
@@ -1583,8 +1693,8 @@ void DataTable::Update(TableUpdateState &state, ClientContext &context, DuckTabl
 		row_ids_slice.Slice(row_ids, sel_global_update, n_global_update);
 		row_ids_slice.Flatten();
 
-		row_groups->Update(transaction, table_entry, FlatVector::GetDataMutable<row_t>(row_ids_slice), column_ids,
-		                   updates_slice);
+		row_groups->Update(transaction, table_entry, FlatVector::GetDataMutable<row_t>(row_ids_slice),
+		                   physical_column_ids, updates_slice);
 	}
 }
 
@@ -1608,7 +1718,9 @@ void DataTable::UpdateColumn(DuckTableEntry &table, ClientContext &context, Vect
 
 	updates.Flatten();
 	row_ids.Flatten();
-	row_groups->UpdateColumn(transaction, table, row_ids, column_path, updates);
+	auto physical_path = column_path;
+	physical_path[0] = PhysicalColumn(column_path[0]);
+	row_groups->UpdateColumn(transaction, table, row_ids, physical_path, updates);
 }
 
 //===--------------------------------------------------------------------===//
@@ -1623,10 +1735,14 @@ unique_ptr<BaseStatistics> DataTable::GetStatistics(ClientContext &context, cons
 
 void DataTable::SetDistinct(column_t column_id, unique_ptr<DistinctStatistics> distinct_stats) {
 	D_ASSERT(column_id != COLUMN_IDENTIFIER_ROW_ID);
-	row_groups->SetDistinct(column_id, std::move(distinct_stats));
+	row_groups->SetDistinct(PhysicalColumn(column_id), std::move(distinct_stats));
 }
 
 unique_ptr<BlockingSample> DataTable::GetSample() {
+	if (HasHiddenColumns()) {
+		// the sample has the row groups' columns, not this version's
+		return nullptr;
+	}
 	return row_groups->GetSample();
 }
 
@@ -1675,7 +1791,7 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	}
 
 	// checkpoint each individual row group
-	auto result = row_groups->Checkpoint(writer, global_stats, snapshot, column_definitions.size());
+	auto result = row_groups->Checkpoint(writer, global_stats, snapshot, PhysicalColumns(), PhysicalColumnCount());
 	auto publication =
 	    make_uniq<PendingRowGroupCollectionPublication>(shared_from_this(), std::move(result), std::move(global_stats));
 	const auto &checkpoint_stats = publication->GetStatistics();
@@ -1710,7 +1826,11 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 }
 
 void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state) {
-	row_groups->CommitDropColumn(column_index, drop_state);
+	if (hid_column_in_successor) {
+		// the newer version keeps the column hidden in the shared row groups: its checkpoint frees the blocks
+		return;
+	}
+	row_groups->CommitDropColumn(PhysicalColumn(column_index), drop_state);
 }
 
 void DataTable::Destroy() {
@@ -1763,12 +1883,20 @@ idx_t DataTable::GetRowGroupCountWithLocalStorage(ClientContext &context) {
 //===--------------------------------------------------------------------===//
 // Column Segment Info
 //===--------------------------------------------------------------------===//
-static void RemoveOtherVersionColumns(vector<ColumnSegmentInfo> &result, idx_t start, idx_t column_count) {
-	// the row groups can have columns of an uncommitted ADD COLUMN that this version does not have
+void DataTable::RemoveOtherVersionColumns(vector<ColumnSegmentInfo> &result, idx_t start) const {
+	// the row groups can have columns of an uncommitted ADD COLUMN, and columns this version hid
 	idx_t keep = start;
 	for (idx_t i = start; i < result.size(); i++) {
-		if (result[i].column_id >= column_count) {
+		auto column = LogicalColumn(result[i].column_id);
+		if (!column.IsValid()) {
 			continue;
+		}
+		if (column.GetIndex() != result[i].column_id) {
+			// the path starts with the position in the row groups
+			auto &path = result[i].column_path;
+			auto end_of_first = path.find_first_of(",]");
+			path = "[" + to_string(column.GetIndex()) + path.substr(end_of_first);
+			result[i].column_id = column.GetIndex();
 		}
 		if (keep != i) {
 			result[keep] = std::move(result[i]);
@@ -1781,7 +1909,7 @@ static void RemoveOtherVersionColumns(vector<ColumnSegmentInfo> &result, idx_t s
 vector<ColumnSegmentInfo> DataTable::GetColumnSegmentInfo(const QueryContext &context,
                                                           const ColumnSegmentInfoScanOptions &options) {
 	auto result = row_groups->GetColumnSegmentInfo(context, options);
-	RemoveOtherVersionColumns(result, 0, column_definitions.size());
+	RemoveOtherVersionColumns(result, 0);
 	return result;
 }
 
@@ -1793,7 +1921,7 @@ bool DataTable::ScanColumnSegmentInfo(const QueryContext &context, ColumnSegment
                                       vector<ColumnSegmentInfo> &result) {
 	auto start = result.size();
 	auto has_more = row_groups->ScanColumnSegmentInfo(context, state, result);
-	RemoveOtherVersionColumns(result, start, column_definitions.size());
+	RemoveOtherVersionColumns(result, start);
 	return has_more;
 }
 

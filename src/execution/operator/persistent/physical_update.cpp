@@ -137,9 +137,10 @@ public:
 			fetch_column_ids.reserve(sorted_columns.size());
 			fetch_types.reserve(sorted_columns.size());
 			for (auto col : sorted_columns) {
-				fetch_column_ids.emplace_back(col);
+				fetch_column_ids.emplace_back(table.PhysicalColumn(col));
 				fetch_types.push_back(table_types[col]);
 			}
+			fetch_columns = std::move(sorted_columns);
 			if (!fetch_column_ids.empty()) {
 				fetch_chunk.Initialize(allocator, fetch_types);
 			}
@@ -159,6 +160,8 @@ public:
 	DataChunk delete_chunk;
 	//! Sorted unique-index key columns fetched into fetch_chunk for the delete indexes
 	vector<StorageIndex> fetch_column_ids;
+	//! The table columns fetched into fetch_chunk, in order
+	vector<column_t> fetch_columns;
 	DataChunk fetch_chunk;
 	DataChunk combined_chunk;
 	unique_ptr<ExpressionExecutor> default_executor;
@@ -297,7 +300,7 @@ SinkResultType PhysicalUpdate::Sink(ExecutionContext &context, DataChunk &chunk,
 
 		idx_t fetch_idx = 0;
 		for (idx_t i = 0; i < delete_chunk.ColumnCount(); i++) {
-			if (fetch_idx < column_ids.size() && column_ids[fetch_idx].GetPrimaryIndex() == i) {
+			if (fetch_idx < l_state.fetch_columns.size() && l_state.fetch_columns[fetch_idx] == i) {
 				delete_chunk.data[i].Reference(fetch_chunk.data[fetch_idx++]);
 			} else {
 				delete_chunk.data[i].Reference(Value(l_state.table_types[i]), count_t(update_count));

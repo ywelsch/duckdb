@@ -1079,21 +1079,22 @@ void RowGroupCollection::Update(TransactionData transaction, DuckTableEntry &tab
 	}
 }
 
-void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableIndexList &indexes,
+void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, DataTable &table, TableIndexList &indexes,
                                            Vector &row_identifiers, idx_t count, IndexRemovalType removal_type,
                                            optional_idx active_checkpoint) {
 	// Collect all Indexed columns on the table.
 	auto indexed_column_id_set = indexes.GetIndexedColumns();
 
-	// Sorted so that the fetched columns align with the ascending physical order used when
-	// referencing them into result_chunk below.
-	vector<StorageIndex> column_ids {indexed_column_id_set.begin(), indexed_column_id_set.end()};
-	sort(column_ids.begin(), column_ids.end());
-
+	// Sorted so that the fetched columns align with the ascending order used when referencing them into
+	// result_chunk below. The positions in the row groups ascend with the columns.
+	vector<column_t> indexed_columns {indexed_column_id_set.begin(), indexed_column_id_set.end()};
+	sort(indexed_columns.begin(), indexed_columns.end());
+	vector<StorageIndex> column_ids;
 	vector<LogicalType> column_types;
-	column_types.reserve(column_ids.size());
-	for (auto &col : column_ids) {
-		column_types.push_back(GetTypes()[col.GetPrimaryIndex()]);
+	column_types.reserve(indexed_columns.size());
+	for (auto &col : indexed_columns) {
+		column_ids.emplace_back(table.PhysicalColumn(col));
+		column_types.push_back(GetTypes()[column_ids.back().GetPrimaryIndex()]);
 	}
 
 	DataChunk fetch_chunk;
@@ -1105,10 +1106,11 @@ void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableInd
 	Fetch(commit_transaction, fetch_chunk, column_ids, row_identifiers, count, state);
 
 	// Used for index value removal.
-	// Contains all columns but only initializes indexed ones.
+	// Contains all columns of the table version but only initializes indexed ones.
+	auto table_types = table.GetTypes();
 	DataChunk result_chunk;
-	auto fetched_columns = vector<bool>(GetTypes().size(), false);
-	result_chunk.Initialize(GetAllocator(), GetTypes(), fetched_columns);
+	auto fetched_columns = vector<bool>(table_types.size(), false);
+	result_chunk.Initialize(GetAllocator(), table_types, fetched_columns);
 	// Now set all to-be-fetched columns.
 	for (auto &col : indexed_column_id_set) {
 		fetched_columns[col] = true;
@@ -1116,12 +1118,12 @@ void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, TableInd
 
 	// Reference the necessary columns of the fetch_chunk.
 	idx_t fetch_idx = 0;
-	for (idx_t j = 0; j < GetTypes().size(); j++) {
+	for (idx_t j = 0; j < table_types.size(); j++) {
 		if (fetched_columns[j]) {
 			result_chunk.data[j].Reference(fetch_chunk.data[fetch_idx++]);
 			continue;
 		}
-		result_chunk.data[j].Reference(Value(GetTypes()[j]), count_t(fetch_chunk.size()));
+		result_chunk.data[j].Reference(Value(table_types[j]), count_t(fetch_chunk.size()));
 	}
 
 	indexes.RemoveFromIndexes(result_chunk, row_identifiers, removal_type, active_checkpoint);
@@ -1190,6 +1192,8 @@ struct CollectionCheckpointState {
 	RowGroupSegmentTree &row_groups;
 	//! The column types of the row groups being checkpointed
 	vector<LogicalType> types;
+	//! Whether the version being checkpointed has the first columns of the row groups, none hidden
+	bool writes_column_prefix = true;
 
 	idx_t SegmentCount() const {
 		return writers.size();
@@ -1551,6 +1555,11 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	// Index state decides whether vacuum may change surviving rowids.
 	auto &attached = checkpoint_state.writer.GetAttached();
 	state.index_strategy = GetVacuumIndexStrategy(attached, &state.remap_indexes);
+	if (!checkpoint_state.writes_column_prefix && state.index_strategy == VacuumIndexStrategy::REMAP) {
+		// the remapper reads the row groups' columns, not those of a version with hidden columns
+		state.index_strategy = VacuumIndexStrategy::KEEP_ROW_IDS;
+		state.remap_indexes.clear();
+	}
 
 	// can_change_row_ids only answers whether index state allows changing row_ids.
 	state.can_change_row_ids = state.index_strategy != VacuumIndexStrategy::KEEP_ROW_IDS;
@@ -1803,7 +1812,8 @@ CollectionCheckpointSnapshot RowGroupCollection::SnapshotForCheckpoint(TableData
 
 CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &writer, TableStatistics &global_stats,
                                                           const CollectionCheckpointSnapshot &snapshot,
-                                                          idx_t column_count) {
+                                                          const vector<idx_t> &written_columns,
+                                                          idx_t version_column_count) {
 	auto &row_groups = snapshot.row_groups;
 	// row groups past this count were appended after the checkpoint started and are taken over at install time
 	idx_t checkpointed_row_group_count = snapshot.segment_count;
@@ -1814,7 +1824,13 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	}
 	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups, checkpointed_row_group_count);
 	checkpoint_state.types = snapshot.types;
-	D_ASSERT(column_count <= snapshot.types.size());
+	// whether the version has no hidden columns: it writes the columns the image has
+	bool writes_column_prefix = written_columns.size() == version_column_count;
+	for (idx_t i = 0; i < written_columns.size(); i++) {
+		D_ASSERT(written_columns[i] < snapshot.types.size());
+		writes_column_prefix = writes_column_prefix && written_columns[i] == i;
+	}
+	checkpoint_state.writes_column_prefix = writes_column_prefix;
 
 	auto &vacuum_state = checkpoint_state.vacuum_state;
 	InitializeVacuumState(checkpoint_state, vacuum_state, writer.GetRowGroupCount());
@@ -1866,7 +1882,9 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 
 	// no errors - finalize the row groups
 	// if the table already exists on disk - check if all row groups have stayed the same
-	if (Settings::Get<ExperimentalMetadataReuseSetting>(writer.GetDatabase()) && metadata_pointer.IsValid()) {
+	// a version with hidden columns writes another column layout than the image has
+	if (Settings::Get<ExperimentalMetadataReuseSetting>(writer.GetDatabase()) && metadata_pointer.IsValid() &&
+	    writes_column_prefix) {
 		bool table_has_changes = false;
 		for (idx_t segment_idx = 0; segment_idx < checkpointed_row_group_count; segment_idx++) {
 			if (checkpoint_state.SegmentIsDropped(segment_idx)) {
@@ -1914,7 +1932,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 
 	// not all segments have stayed the same - we need to make a new segment tree with the new set of segments
 	// initialize new empty stats - before locking the new segment tree, as this takes the stats lock
-	global_stats.InitializeEmpty(stats, column_count);
+	global_stats.InitializeEmpty(stats, written_columns);
 
 	auto new_row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, row_groups->GetBaseRowId());
 	auto l = new_row_groups->Lock();
@@ -1955,10 +1973,10 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 			new_next_row_id = MaxValue<idx_t>(new_next_row_id, row_start + existing_row_group.count - base_row_id);
 
 			auto lock = global_stats.GetLock();
-			for (idx_t column_idx = 0; column_idx < column_count; column_idx++) {
+			for (idx_t column_idx = 0; column_idx < written_columns.size(); column_idx++) {
 				global_stats.GetStats(*lock, column_idx)
 				    .Statistics()
-				    .Merge(*existing_row_group.GetStatistics(column_idx));
+				    .Merge(*existing_row_group.GetStatistics(written_columns[column_idx]));
 			}
 			continue;
 		}
@@ -2034,11 +2052,13 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 					columns.emplace_back(i);
 					deserialized_extras.emplace_back();
 					vector<MetaBlockPointer> col_read_pointers;
-					MetadataReader reader(mm, column_start_ptrs[i], &col_read_pointers);
-					ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), i, reader, col_types[i]);
+					auto &start_pointer = column_start_ptrs[written_columns[i]];
+					MetadataReader reader(mm, start_pointer, &col_read_pointers);
+					ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), i, reader,
+					                        col_types[written_columns[i]]);
 					// collect extra blocks from deserialization (excluding start block)
 					for (auto &ptr : col_read_pointers) {
-						if (ptr.block_pointer != column_start_ptrs[i].block_pointer) {
+						if (ptr.block_pointer != start_pointer.block_pointer) {
 							deserialized_extras[i].emplace_back(ptr.block_pointer);
 						}
 					}
@@ -2090,8 +2110,9 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 			auto &column_types = row_group.GetCollection().GetTypes();
 			auto &metadata_manager = row_group.GetCollection().GetMetadataManager();
 			for (idx_t i = 0; i < pointer_copy.data_pointers.size(); i++) {
-				MetadataReader reader(metadata_manager, column_start_pointers[i], &all_full_read_blocks);
-				ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), i, reader, column_types[i]);
+				MetadataReader reader(metadata_manager, column_start_pointers[written_columns[i]],
+				                      &all_full_read_blocks);
+				ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), i, reader, column_types[written_columns[i]]);
 			}
 
 			// Derive sets of blocks to compare
@@ -2167,7 +2188,8 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 		{
 			auto stats_lock = stats.GetLock();
 			for (auto &column_idx : columns_with_incomplete_stats) {
-				live_column_stats.push_back(stats.GetStats(*stats_lock, column_idx).Statistics().Copy());
+				live_column_stats.push_back(
+				    stats.GetStats(*stats_lock, written_columns[column_idx]).Statistics().Copy());
 			}
 		}
 		auto lock = global_stats.GetLock();
@@ -2192,6 +2214,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	result.next_row_id = new_next_row_id;
 	result.checkpointed_row_group_count = checkpointed_row_group_count;
 	result.column_count = snapshot.types.size();
+	result.written_columns = written_columns;
 	result.live_indexes = std::move(live_indexes);
 	result.built = std::move(built);
 	return result;
@@ -2313,19 +2336,25 @@ void RowGroupCollection::InstallCheckpoint(CollectionCheckpointResult result, Ta
 		// the live statistics become those of the checkpoint plus those of the row groups appended meanwhile
 		// the two statistics locks are never nested: ALTER takes the live one before a tree lock
 		// the checkpoint has statistics for the columns it wrote, the live ones are kept for the shared columns
+		// the statistics of a hidden column stay as they are
 		vector<BaseStatistics> checkpoint_column_stats;
+		vector<idx_t> stats_columns;
 		{
 			auto checkpoint_lock = checkpoint_stats.GetLock();
-			auto stats_count = MinValue<idx_t>(checkpoint_stats.ColumnCount(*checkpoint_lock), live_types.size());
-			for (idx_t column_idx = 0; column_idx < stats_count; column_idx++) {
-				checkpoint_column_stats.push_back(
-				    checkpoint_stats.GetStats(*checkpoint_lock, column_idx).Statistics().Copy());
+			D_ASSERT(checkpoint_stats.ColumnCount(*checkpoint_lock) == result.written_columns.size());
+			for (idx_t i = 0; i < result.written_columns.size(); i++) {
+				if (result.written_columns[i] >= live_types.size()) {
+					continue;
+				}
+				stats_columns.push_back(result.written_columns[i]);
+				checkpoint_column_stats.push_back(checkpoint_stats.GetStats(*checkpoint_lock, i).Statistics().Copy());
 			}
 		}
 		auto lock = stats.GetLock();
-		for (idx_t column_idx = 0; column_idx < checkpoint_column_stats.size(); column_idx++) {
+		for (idx_t i = 0; i < checkpoint_column_stats.size(); i++) {
+			auto column_idx = stats_columns[i];
 			auto &column_stats = stats.GetStats(*lock, column_idx).Statistics();
-			column_stats = std::move(checkpoint_column_stats[column_idx]);
+			column_stats = std::move(checkpoint_column_stats[i]);
 			for (auto &row_group : appended_row_groups) {
 				column_stats.Merge(*row_group.get().GetStatistics(column_idx));
 			}
@@ -2569,7 +2598,7 @@ void RowGroupCollection::VerifyNewConstraint(const QueryContext &context, DuckTr
 	// Scan the original table for NULL values.
 	auto &not_null_constraint = constraint.Cast<BoundNotNullConstraint>();
 	vector<LogicalType> scan_types;
-	auto physical_index = not_null_constraint.index.index;
+	auto physical_index = parent.PhysicalColumn(not_null_constraint.index.index);
 	D_ASSERT(physical_index < GetTypes().size());
 
 	scan_types.push_back(GetTypes()[physical_index]);

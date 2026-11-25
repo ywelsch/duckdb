@@ -1,0 +1,183 @@
+# name: test/sql/storage/alter_drop_column_shared_paused.test_slow
+# description: DROP COLUMN while a checkpoint is paused between writing the table and publishing it
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_drop_column_shared_paused.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+# a full checkpoint merges the row groups of the older version, the dropped column among them
+statement ok
+CREATE TABLE m AS SELECT i, i::VARCHAR AS s, i * 2 AS x FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM m WHERE i < 300000 AND i % 10 <> 0
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+BEGIN
+
+onlyif threadid=1
+statement ok
+ALTER TABLE m DROP COLUMN s
+
+onlyif threadid=1
+query II
+SELECT COUNT(*), SUM(x) FROM m
+----
+130000	78999600000
+
+sleep 2500 millisecond
+
+onlyif threadid=1
+query II
+SELECT COUNT(*), SUM(x) FROM m
+----
+130000	78999600000
+
+onlyif threadid=1
+statement ok
+COMMIT
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query I
+SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('m')
+----
+2
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM m
+----
+130000	39499800000	78999600000
+
+statement ok
+INSERT INTO m SELECT i, i * 2 FROM range(400000, 400010) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM m
+----
+130010	39503800045	79007600090
+
+statement ok
+DROP TABLE m
+
+statement ok
+CHECKPOINT
+
+# a concurrent checkpoint: the DROP commits while it is paused, so it writes the dropped column once more
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+CREATE TABLE p AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i * 2 AS x FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+BEGIN
+
+query I con1
+SELECT COUNT(*) FROM p
+----
+1000
+
+statement ok
+INSERT INTO p SELECT i, repeat(md5(i::VARCHAR), 160), i * 2 FROM range(1000, 1100) t(i)
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+ALTER TABLE p DROP COLUMN s
+
+onlyif threadid=1
+statement ok
+INSERT INTO p VALUES (5000, 7)
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query II con1
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM p
+----
+1000	1000
+
+# frees the blocks the paused checkpoint wrote for the dropped column, while con1 still reads them
+statement ok
+CHECKPOINT
+
+query II con1
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)) FROM p
+----
+1000	1000
+
+statement ok con1
+COMMIT
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM p
+----
+1101	609450	1208907
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x) FROM p
+----
+1101	609450	1208907

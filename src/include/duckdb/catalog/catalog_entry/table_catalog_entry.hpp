@@ -104,6 +104,14 @@ public:
 	//! If if_column_exists is false, throws an exception
 	DUCKDB_API virtual LogicalIndex GetColumnIndex(Identifier &name, bool if_exists = false) const;
 	DUCKDB_API StorageIndex GetStorageIndex(const ColumnIndex &column_index) const;
+	//! The position of a column with the given storage oid in the table's storage
+	DUCKDB_API virtual idx_t GetStoragePosition(idx_t storage_oid) const {
+		return storage_oid;
+	}
+	//! The number of columns of the table's storage, including columns hidden from this version
+	DUCKDB_API virtual idx_t GetStorageColumnCount() const {
+		return GetColumns().PhysicalColumnCount();
+	}
 
 	//! Returns the scan function that can be used to scan the given table
 	virtual TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) = 0;

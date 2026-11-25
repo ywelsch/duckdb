@@ -91,6 +91,8 @@ struct CollectionCheckpointResult {
 	idx_t checkpointed_row_group_count = 0;
 	//! The number of columns of the rewritten row groups
 	idx_t column_count = 0;
+	//! The positions of the written columns, whose statistics the checkpoint has, in order
+	vector<idx_t> written_columns;
 	//! For each rewritten row group, the index of the live row group it replaces, invalid for merged row groups
 	vector<optional_idx> live_indexes;
 	//! For each rewritten row group, whether the checkpoint built it (else it is a row group readers can see)
@@ -169,8 +171,10 @@ public:
 	                  optional_ptr<StorageCommitState> commit_state);
 	bool IsPersistent() const;
 
-	void RemoveFromIndexes(const QueryContext &context, TableIndexList &indexes, Vector &row_identifiers, idx_t count,
-	                       IndexRemovalType removal_type, optional_idx active_checkpoint = optional_idx());
+	//! Removes the rows from the indexes, which are bound to the columns of the given table version
+	void RemoveFromIndexes(const QueryContext &context, DataTable &table, TableIndexList &indexes,
+	                       Vector &row_identifiers, idx_t count, IndexRemovalType removal_type,
+	                       optional_idx active_checkpoint = optional_idx());
 
 	//! Delete the given rows - optionally collects the ids of the rows that were deleted (excluding duplicates)
 	idx_t Delete(TransactionData transaction, DuckTableEntry &table_entry, row_t *ids, idx_t count,
@@ -181,9 +185,11 @@ public:
 	                  const vector<column_t> &column_path, DataChunk &updates);
 
 	CollectionCheckpointSnapshot SnapshotForCheckpoint(TableDataWriter &writer) const;
-	//! Writes the first column_count columns, those of the table version being checkpointed
+	//! Writes the columns at the given positions, those of the table version being checkpointed, which has
+	//! version_column_count columns of the row groups including the ones it hid
 	CollectionCheckpointResult Checkpoint(TableDataWriter &writer, TableStatistics &global_stats,
-	                                      const CollectionCheckpointSnapshot &snapshot, idx_t column_count);
+	                                      const CollectionCheckpointSnapshot &snapshot,
+	                                      const vector<idx_t> &written_columns, idx_t version_column_count);
 	//! Takes over the row groups appended meanwhile. Runs under the table's append lock
 	void InstallCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats);
 

@@ -1493,6 +1493,14 @@ DataTable &DuckTableEntry::GetStorage() {
 	return *storage;
 }
 
+idx_t DuckTableEntry::GetStoragePosition(idx_t storage_oid) const {
+	return storage->PhysicalColumn(storage_oid);
+}
+
+idx_t DuckTableEntry::GetStorageColumnCount() const {
+	return storage->PhysicalColumnCount();
+}
+
 TableFunction DuckTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	bind_data = make_uniq<TableScanBindData>(*this);
 	return TableScanFunction::GetFunction();

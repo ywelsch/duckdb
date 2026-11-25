@@ -54,7 +54,7 @@ StorageIndex TableCatalogEntry::GetStorageIndex(const ColumnIndex &column_id) co
 	// Only the top-level can have generated columns.
 	auto &col = GetColumn(column_id.ToLogical());
 	auto result = StorageIndex::FromColumnIndex(column_id);
-	result.SetIndex(col.StorageOid());
+	result.SetIndex(GetStoragePosition(col.StorageOid()));
 	return result;
 }
 

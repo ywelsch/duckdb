@@ -25,19 +25,23 @@ void TableStatistics::Initialize(const vector<LogicalType> &types, PersistentTab
 	} // LCOV_EXCL_STOP
 }
 
-void TableStatistics::InitializeEmpty(const TableStatistics &other, idx_t column_count) {
+void TableStatistics::InitializeEmpty(const TableStatistics &other, const vector<idx_t> &columns) {
 	D_ASSERT(Empty());
 	lock_guard<mutex> l(*other.stats_lock);
-	D_ASSERT(column_count <= other.column_stats.size());
 	stats_lock = make_shared_ptr<mutex>();
-	// a sample of more columns than are written is not kept
-	if (other.table_sample && column_count == other.column_stats.size()) {
+	bool all_columns = columns.size() == other.column_stats.size();
+	for (idx_t i = 0; i < columns.size(); i++) {
+		D_ASSERT(columns[i] < other.column_stats.size());
+		all_columns = all_columns && columns[i] == i;
+	}
+	// a sample of other columns than are written is not kept
+	if (other.table_sample && all_columns) {
 		table_sample = other.table_sample->Cast<ReservoirSample>().Copy();
 	} else {
 		table_sample = make_uniq<ReservoirSample>(static_cast<idx_t>(FIXED_SAMPLE_SIZE));
 	}
-	for (idx_t i = 0; i < column_count; i++) {
-		auto &stats = other.column_stats[i];
+	for (auto &column : columns) {
+		auto &stats = other.column_stats[column];
 		auto new_column_stats = ColumnStatistics::CreateEmptyStats(stats->Statistics().GetType());
 		if (stats->HasDistinctStats()) {
 			new_column_stats->SetDistinct(stats->DistinctStats().Copy());

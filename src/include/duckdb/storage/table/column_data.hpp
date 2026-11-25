@@ -208,6 +208,13 @@ public:
 	virtual unique_ptr<BaseStatistics> GetUpdateStatistics();
 
 	virtual void VisitBlockIds(BlockIdVisitor &visitor) const;
+	//! Whether a checkpoint freed the blocks of this column, which a table version hid: nothing frees them again
+	bool BlocksReleased() const {
+		return blocks_released;
+	}
+	void SetBlocksReleased() {
+		blocks_released = true;
+	}
 
 	virtual unique_ptr<ColumnCheckpointState> CreateCheckpointState(const RowGroup &row_group, Context &context,
 	                                                                PartialBlockManager &partial_block_manager);
@@ -300,6 +307,8 @@ protected:
 private:
 	//! Whether or not this column data belongs to a main table or if it is transaction local
 	atomic<ColumnDataType> data_type;
+	//! Whether a checkpoint freed the blocks of this hidden column
+	atomic<bool> blocks_released {false};
 	//! The parent column (if any)
 	optional_ptr<ColumnData> parent;
 	//!	The compression function used by the ColumnData

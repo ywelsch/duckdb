@@ -118,8 +118,9 @@ public:
 		if (!optimistic_writer) {
 			optimistic_writer = make_uniq<OptimisticDataWriter>(table_entry.GetStorage());
 		}
-		auto collection =
-		    optimistic_writer->CreateCollection(context.GetContext(), table_entry.GetStorage(), insert_types);
+		// the rows have the columns of the table's row groups, including hidden ones
+		auto collection = optimistic_writer->CreateCollection(context.GetContext(), table_entry.GetStorage(),
+		                                                      table_entry.GetStorage().GetPhysicalTypes());
 		auto &row_collection = *collection->collection;
 		row_collection.InitializeEmpty();
 		row_collection.InitializeAppend(current_append_state);
@@ -480,7 +481,14 @@ SinkResultType PhysicalBatchInsert::Sink(ExecutionContext &context, DataChunk &i
 
 	auto &optimistic_collection = table.GetStorage().GetOptimisticCollection(context.client, lstate.collection_index);
 	auto &collection = *optimistic_collection.collection;
-	auto flushed_row_group_idx = collection.Append(insert_chunk, lstate.current_append_state);
+	optional_idx flushed_row_group_idx;
+	if (storage.HasHiddenColumns()) {
+		DataChunk physical_chunk;
+		storage.ToPhysicalChunk(insert_chunk, physical_chunk);
+		flushed_row_group_idx = collection.Append(physical_chunk, lstate.current_append_state);
+	} else {
+		flushed_row_group_idx = collection.Append(insert_chunk, lstate.current_append_state);
+	}
 	if (flushed_row_group_idx.IsValid()) {
 		// we have already written to disk - flush the next row group as well
 		lstate.optimistic_writer->WriteNewRowGroup(context.client.GetContext(), optimistic_collection,
@@ -598,6 +606,11 @@ SinkFinalizeType PhysicalBatchInsert::Finalize(Pipeline &pipeline, Event &event,
 	LocalAppendState append_state;
 	data_table.InitializeLocalAppend(append_state, table, context, bound_constraints);
 	auto &transaction = DuckTransaction::Get(context, table.catalog);
+	// the collections have the columns of the table's row groups: read the table's own columns
+	vector<StorageIndex> column_ids;
+	for (idx_t i = 0; i < data_table.ColumnCount(); i++) {
+		column_ids.push_back(data_table.PhysicalColumn(StorageIndex(i)));
+	}
 	for (auto &entry : g_state.collections) {
 		if (entry.type != RowGroupBatchType::NOT_FLUSHED) {
 			throw InternalException("Encountered a flushed batch");
@@ -606,7 +619,7 @@ SinkFinalizeType PhysicalBatchInsert::Finalize(Pipeline &pipeline, Event &event,
 		memory_manager.ReduceUnflushedMemory(entry.unflushed_memory);
 		auto &optimistic_collection = data_table.GetOptimisticCollection(context, entry.collection_index);
 		auto &collection = *optimistic_collection.collection;
-		for (auto &insert_chunk : collection.Chunks(transaction)) {
+		for (auto &insert_chunk : collection.Chunks(transaction, column_ids)) {
 			data_table.LocalAppend(append_state, table, context, insert_chunk, false);
 		}
 		data_table.ResetOptimisticCollection(context, entry.collection_index);

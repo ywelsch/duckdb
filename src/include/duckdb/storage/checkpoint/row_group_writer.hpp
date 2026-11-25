@@ -30,6 +30,16 @@ public:
 	const vector<CompressionType> &GetCompressionTypes() const {
 		return compression_types;
 	}
+	//! The positions in the row groups of the columns that are written, in order
+	const vector<idx_t> &GetWrittenColumns() const {
+		return written_columns;
+	}
+	//! Whether the written version hides no column: it writes the first columns of the row groups
+	bool WritesColumnPrefix() const;
+	//! The number of columns of the row groups the written version has, including those it hid
+	idx_t GetVersionColumnCount() const {
+		return version_column_count;
+	}
 
 	virtual CheckpointOptions GetCheckpointOptions() const = 0;
 	virtual WriteStream &GetPayloadWriter() = 0;
@@ -60,6 +70,8 @@ protected:
 	TableCatalogEntry &table;
 	PartialBlockManager &partial_block_manager;
 	vector<CompressionType> compression_types;
+	vector<idx_t> written_columns;
+	idx_t version_column_count;
 	unordered_set<idx_t> has_unloaded_columns;
 };
 
