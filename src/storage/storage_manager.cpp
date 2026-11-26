@@ -750,6 +750,8 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 		// We'll construct the SingleFileBlockManager with the default block allocation size,
 		// and later adjust it when reading the file header.
 		auto sf_block_manager = make_uniq<SingleFileBlockManager>(db, path, options);
+		// the metadata that loading reads goes into the load pool
+		sf_block_manager->GetMetadataManager().BeginLoad();
 		sf_block_manager->LoadExistingDatabase(context);
 		block_manager = std::move(sf_block_manager);
 		table_io_manager = make_uniq<SingleFileTableIOManager>(*block_manager, row_group_size);
@@ -785,6 +787,7 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 		// Load the checkpoint from storage.
 		auto checkpoint_reader = SingleFileCheckpointReader(*this);
 		checkpoint_reader.LoadFromStorage();
+		block_manager->GetMetadataManager().EndLoad();
 
 		// Reset the timer (also ends it).
 		if (timer) {

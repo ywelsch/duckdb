@@ -78,10 +78,12 @@ public:
 
 	//! Allocates a sub-block, only from blocks of the pool once there are a few metadata blocks
 	MetadataHandle AllocateHandle(MetadataPool pool);
-	//! Remembers sub-blocks that loading the database read
-	void AddLoadPointers(const vector<MetaBlockPointer> &pointers);
+	//! Starts remembering the sub-blocks that loading the database reads
+	void BeginLoad();
+	//! Remembers a sub-block a MetadataReader read, while the database loads
+	void RecordLoadRead(MetaBlockPointer pointer);
 	//! Puts the blocks whose contents loading the database mostly read into the load pool
-	void ClassifyLoadBlocks();
+	void EndLoad();
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
 	MetadataHandle Pin(const QueryContext &context, const MetadataPointer &pointer);
@@ -124,7 +126,9 @@ protected:
 	mutable mutex block_lock;
 	unordered_map<block_id_t, MetadataBlock> blocks;
 	unordered_map<block_id_t, idx_t> modified_blocks;
-	//! Sub-blocks read while the database loaded, until ClassifyLoadBlocks
+	//! Whether the database is loading, between BeginLoad and EndLoad
+	atomic<bool> loading {false};
+	//! Sub-blocks read while the database loads
 	vector<MetaBlockPointer> load_pointers;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block

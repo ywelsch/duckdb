@@ -891,8 +891,7 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 		// no free list
 		return;
 	}
-	vector<MetaBlockPointer> free_list_pointers;
-	MetadataReader reader(GetMetadataManager(), free_pointer, free_list_pointers, BlockReaderType::REGISTER_BLOCKS);
+	MetadataReader reader(GetMetadataManager(), free_pointer, nullptr, BlockReaderType::REGISTER_BLOCKS);
 	auto free_list_count = reader.Read<uint64_t>(context);
 	free_list.clear();
 	for (idx_t i = 0; i < free_list_count; i++) {
@@ -908,7 +907,6 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 	}
 	GetMetadataManager().Read(reader);
 	GetMetadataManager().MarkBlocksAsModified(false);
-	GetMetadataManager().AddLoadPointers(free_list_pointers);
 }
 
 bool SingleFileBlockManager::IsRootBlock(MetaBlockPointer root) {

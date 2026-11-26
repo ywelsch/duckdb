@@ -200,15 +200,27 @@ block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock, Met
 	return new_block_id;
 }
 
-void MetadataManager::AddLoadPointers(const vector<MetaBlockPointer> &pointers) {
+void MetadataManager::BeginLoad() {
 	lock_guard<mutex> guard(block_lock);
-	load_pointers.insert(load_pointers.end(), pointers.begin(), pointers.end());
+	load_pointers.clear();
+	loading = true;
 }
 
-void MetadataManager::ClassifyLoadBlocks() {
+void MetadataManager::RecordLoadRead(MetaBlockPointer pointer) {
+	if (!loading) {
+		return;
+	}
+	lock_guard<mutex> guard(block_lock);
+	if (loading) {
+		load_pointers.push_back(pointer);
+	}
+}
+
+void MetadataManager::EndLoad() {
 	// row group pointers follow the table statistics but are read lazily, so loading reads only part of a block
 	static constexpr idx_t MIN_READ_PERCENTAGE = 25;
 	lock_guard<mutex> guard(block_lock);
+	loading = false;
 	unordered_map<block_id_t, idx_t> read_masks;
 	for (auto &pointer : load_pointers) {
 		read_masks[pointer.GetBlockId()] |= idx_t(1) << pointer.GetBlockIndex();

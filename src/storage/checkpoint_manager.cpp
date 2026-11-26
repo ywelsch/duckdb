@@ -452,13 +452,9 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 	}
 
 	// create the MetadataReader to read from the storage
-	vector<MetaBlockPointer> catalog_pointers;
-	MetadataReader reader(metadata_manager, meta_block, catalog_pointers);
+	MetadataReader reader(metadata_manager, meta_block);
 	auto transaction = CatalogTransaction::GetSystemTransaction(catalog.GetDatabase());
 	LoadCheckpoint(transaction, reader);
-	// loading read the free list, the catalog and the table statistics
-	metadata_manager.AddLoadPointers(catalog_pointers);
-	metadata_manager.ClassifyLoadBlocks();
 }
 
 void CheckpointWriter::WriteEntry(CatalogEntry &entry, Serializer &serializer) {
@@ -818,7 +814,6 @@ void CheckpointReader::ReadTableData(CatalogTransaction transaction, Deserialize
 	bound_info.data->total_rows = total_rows;
 	bound_info.data->next_row_id = next_row_id;
 	bound_info.data->read_metadata_pointers = read_pointers;
-	reader.GetMetadataManager().AddLoadPointers(read_pointers);
 }
 
 } // namespace duckdb
