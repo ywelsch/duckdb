@@ -1,0 +1,155 @@
+# name: test/sql/storage/metadata/metadata_locality_churn.test_slow
+# description: Data stays correct and loading keeps reading few metadata blocks under churn, schema changes and reloads
+# group: [metadata]
+
+statement ok
+SET storage_block_prefetch = 'never'
+
+statement ok
+SET debug_verify_blocks = true
+
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality_churn.db' AS db (BLOCK_SIZE 16384, ROW_GROUP_SIZE 2048)
+
+statement ok
+ATTACH ':memory:' AS mem
+
+loop t 0 10
+
+loop u 0 10
+
+statement ok
+CREATE TABLE db.t{t}_{u} AS SELECT range AS i, range % 7 AS a, hash(range) AS b, md5(range::VARCHAR) AS s,
+    (range % 1000)::VARCHAR AS v FROM range({t} * 100 + {u} * 10, {t} * 100 + {u} * 10 + 8000)
+
+statement ok
+CREATE TABLE mem.t{t}_{u} AS FROM db.t{t}_{u}
+
+endloop
+
+endloop
+
+statement ok
+CHECKPOINT db
+
+# every round changes five tables in db and in mem alike, and every fifth round loads db again
+loop o 0 4
+
+loop r 0 5
+
+loop t 0 5
+
+foreach target db mem
+
+statement ok
+INSERT INTO {target}.t{t}_{r} SELECT range AS i, range % 7 AS a, hash(range) AS b, md5(range::VARCHAR) AS s,
+    (range % 1000)::VARCHAR AS v FROM range(100000 + ({o} * 5 + {r}) * 100, 100000 + ({o} * 5 + {r}) * 100 + 500)
+
+statement ok
+UPDATE {target}.t{t}_{r} SET a = a + 1 WHERE i % 13 = ({o} * 5 + {r}) % 13
+
+statement ok
+DELETE FROM {target}.t{t}_{r} WHERE i % 29 = ({o} * 5 + {r}) % 29
+
+statement ok
+ALTER TABLE {target}.t{t}_{r} ADD COLUMN tmp INTEGER DEFAULT ({o} * 5 + {r})
+
+statement ok
+UPDATE {target}.t{t}_{r} SET tmp = tmp + i WHERE i % 5 = 0
+
+endloop
+
+endloop
+
+statement ok
+CHECKPOINT db
+
+loop t 0 5
+
+foreach target db mem
+
+statement ok
+ALTER TABLE {target}.t{t}_{r} DROP COLUMN tmp
+
+endloop
+
+endloop
+
+foreach target db mem
+
+statement ok
+CREATE OR REPLACE TABLE {target}.t{o}_{r} AS SELECT range AS i, range % 7 AS a, hash(range) AS b, md5(range::VARCHAR) AS s,
+    (range % 1000)::VARCHAR AS v FROM range({o} * 5 + {r}, {o} * 5 + {r} + 8000)
+
+endloop
+
+statement ok
+CHECKPOINT db
+
+endloop
+
+statement ok
+DETACH db
+
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality_churn.db' AS db (BLOCK_SIZE 16384, ROW_GROUP_SIZE 2048)
+
+endloop
+
+loop t 0 10
+
+loop u 0 10
+
+query II
+SELECT (SELECT count(*) FROM (FROM db.t{t}_{u} EXCEPT ALL FROM mem.t{t}_{u})),
+       (SELECT count(*) FROM (FROM mem.t{t}_{u} EXCEPT ALL FROM db.t{t}_{u}))
+----
+0	0
+
+endloop
+
+endloop
+
+# a freshly written copy of the same data is the reference for what loading should read
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality_churn_copy.db' AS fresh (BLOCK_SIZE 16384, ROW_GROUP_SIZE 2048)
+
+statement ok
+COPY FROM DATABASE db TO fresh
+
+statement ok
+CHECKPOINT fresh
+
+statement ok
+DETACH fresh
+
+statement ok
+DETACH db
+
+statement ok
+CALL enable_logging('FileSystem')
+
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality_churn.db' AS db (READ_ONLY)
+
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality_churn_copy.db' AS fresh (READ_ONLY)
+
+statement ok
+CALL disable_logging()
+
+query I
+SELECT count(DISTINCT (pos - 12288) // 16384) * 2 < (SELECT count(*) FROM pragma_metadata_info('fresh'))
+FROM duckdb_logs_parsed('FileSystem')
+WHERE path LIKE '%metadata_locality_churn_copy.db' AND op = 'READ' AND pos >= 12288
+----
+true
+
+# churn and reloads must not spread what loading reads much beyond the fresh copy
+query I
+SELECT count(DISTINCT (pos - 12288) // 16384) FILTER (path LIKE '%metadata_locality_churn.db') * 4 <=
+       count(DISTINCT (pos - 12288) // 16384) FILTER (path LIKE '%metadata_locality_churn_copy.db') * 5
+FROM duckdb_logs_parsed('FileSystem')
+WHERE op = 'READ' AND pos >= 12288
+----
+true

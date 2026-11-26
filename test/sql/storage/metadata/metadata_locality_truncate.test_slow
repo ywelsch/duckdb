@@ -1,0 +1,90 @@
+# name: test/sql/storage/metadata/metadata_locality_truncate.test_slow
+# description: Deleting the old row groups at the end of the file lets it shrink, also with metadata written after them
+# group: [metadata]
+
+statement ok
+SET debug_verify_blocks = true
+
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality_truncate.db' AS db (ROW_GROUP_SIZE 2048)
+
+statement ok
+ATTACH ':memory:' AS mem
+
+statement ok
+CREATE TABLE db.c AS SELECT 0 AS gen, range AS i, hash(range) AS h, md5((range * 3)::VARCHAR) AS s, (range * 7) % 1000 AS k
+FROM range(600000)
+
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE TABLE db.a AS SELECT 0 AS gen, range AS i, hash(range) AS h, md5((range * 3)::VARCHAR) AS s, (range * 7) % 1000 AS k
+FROM range(600000)
+
+statement ok
+CHECKPOINT db
+
+loop r 0 10
+
+statement ok
+UPDATE db.a SET k = k + 1 WHERE i % 97 = {r}
+
+statement ok
+INSERT INTO db.a SELECT {r} + 1 AS gen, range AS i, hash(range * ({r} + 2)) AS h, md5((range * ({r} + 4))::VARCHAR) AS s,
+    (range * 7) % 1000 AS k FROM range(600000 + {r} * 1000, 600000 + {r} * 1000 + 1000)
+
+statement ok
+CHECKPOINT db
+
+endloop
+
+# b is written last, so its old row groups end the file, followed by the metadata of this checkpoint
+statement ok
+CREATE TABLE db.b AS SELECT 0 AS gen, range AS i, hash(range) AS h, md5((range * 3)::VARCHAR) AS s, (range * 7) % 1000 AS k
+FROM range(1200000)
+
+statement ok
+CHECKPOINT db
+
+statement ok
+CREATE TABLE mem.size_before AS SELECT total_blocks FROM pragma_database_size() WHERE database_name = 'db'
+
+# new rows of b go to the space c leaves at the start of the file
+statement ok
+DROP TABLE db.c
+
+statement ok
+CHECKPOINT db
+
+statement ok
+INSERT INTO db.b SELECT 1 AS gen, range AS i, hash(range * 2) AS h, md5((range * 4)::VARCHAR) AS s, (range * 7) % 1000 AS k
+FROM range(300000)
+
+statement ok
+CHECKPOINT db
+
+statement ok
+DELETE FROM db.b WHERE gen = 0
+
+statement ok
+CHECKPOINT db
+
+statement ok
+CHECKPOINT db
+
+query I
+SELECT total_blocks * 10 < (SELECT total_blocks FROM mem.size_before) * 7 FROM pragma_database_size()
+WHERE database_name = 'db'
+----
+true
+
+query II
+SELECT count(*), sum(i) FROM db.b
+----
+300000	44999850000
+
+query II
+SELECT count(*), sum(k) FROM db.a
+----
+610000	304757324

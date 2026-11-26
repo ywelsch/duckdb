@@ -1,0 +1,63 @@
+# name: test/sql/storage/metadata/metadata_locality.test
+# description: Loading a database reads the metadata blocks of the catalog, table statistics and free list, not all of them
+# group: [metadata]
+
+statement ok
+SET storage_block_prefetch = 'never'
+
+statement ok
+SET debug_verify_blocks = true
+
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality.db' AS db (BLOCK_SIZE 16384, ROW_GROUP_SIZE 2048)
+
+loop i 0 100
+
+statement ok
+CREATE TABLE db.t{i} AS SELECT range AS i, range % 7 AS a, hash(range) AS b, md5(range::VARCHAR) AS s, range * 0.5 AS d,
+    (range % 1000)::VARCHAR AS v FROM range({i} * 10, {i} * 10 + 20000)
+
+endloop
+
+statement ok
+CHECKPOINT db
+
+statement ok
+DETACH db
+
+statement ok
+CALL enable_logging('FileSystem')
+
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality.db' AS db (READ_ONLY)
+
+statement ok
+CALL disable_logging()
+
+# with the table statistics spread over the column metadata, loading reads nearly every metadata block
+query I
+SELECT count(DISTINCT (pos - 12288) // 16384) * 2 < (SELECT count(*) FROM pragma_metadata_info('db'))
+FROM duckdb_logs_parsed('FileSystem')
+WHERE path LIKE '%metadata_locality.db' AND op = 'READ' AND pos >= 12288
+----
+true
+
+query II
+SELECT count(*), sum(i) FROM db.t99
+----
+20000	219790000
+
+# a small database keeps a single metadata block
+statement ok
+ATTACH '{TEST_DIR}/metadata_locality_small.db' AS small
+
+statement ok
+CREATE TABLE small.t AS SELECT range AS i, 'x' || range AS s FROM range(1000)
+
+statement ok
+CHECKPOINT small
+
+query I
+SELECT count(*) FROM pragma_metadata_info('small')
+----
+1
