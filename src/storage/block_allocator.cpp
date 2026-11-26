@@ -173,6 +173,24 @@ static void FreeVirtualMemory(const data_ptr_t pointer, const idx_t size) {
 	}
 }
 
+static bool ProtectVirtualMemory(const data_ptr_t pointer, const idx_t size) {
+#if defined(_WIN32)
+	MEMORY_BASIC_INFORMATION info;
+	if (!VirtualQuery(pointer, &info, sizeof(info))) {
+		return false;
+	}
+	if (info.State == MEM_RESERVE) {
+		// Uncommitted reservations are already inaccessible; keep the guards unbacked.
+		const auto offset = uintptr_t(pointer) - uintptr_t(info.BaseAddress);
+		return offset <= info.RegionSize && size <= info.RegionSize - offset;
+	}
+	DWORD old_protection;
+	return VirtualProtect(pointer, size, PAGE_NOACCESS, &old_protection) != 0;
+#else
+	return mprotect(pointer, size, PROT_NONE) == 0;
+#endif
+}
+
 static void OnFirstAllocation(const data_ptr_t pointer, const idx_t size) {
 	bool success = true;
 #if defined(_WIN32)
@@ -209,10 +227,6 @@ static idx_t AllocatorShardCount() {
 #else
 	return 1;
 #endif
-}
-
-static idx_t AllocatorLocalShard(const idx_t count) {
-	return count == 1 ? 0 : (TaskScheduler::GetEstimatedCPUId() / 4) % count;
 }
 
 struct BlockQueue {
@@ -332,8 +346,7 @@ public:
 		}
 
 		// We have also run out of global blocks, use fallback allocator
-		return RetryAfterReclaiming(
-		    *block_allocator, [&] { return block_allocator->allocator.AllocateData(block_allocator->block_size); });
+		return block_allocator->AllocateFallbackData(block_allocator->block_size);
 	}
 
 	void Free(const data_ptr_t pointer) {
@@ -355,9 +368,15 @@ public:
 
 private:
 	bool TryClear() DUCKDB_EXCLUDES(lifetime_state->lock) {
+		if (touched.empty() && untouched.empty()) {
+			// nothing to return, and the queues may not exist: a worker creates its state before the pool is ready
+			return true;
+		}
 		if (lifetime_state) {
 			annotated_lock_guard<annotated_mutex> guard(lifetime_state->lock);
 			if (lifetime_state->alive) {
+				// local blocks only come out of a ready pool, whose queues stay published until the allocator dies
+				D_ASSERT(block_allocator->IsInitialized());
 				TryReturnTouched(touched.size());
 				TryReturnBlocks(untouched, *block_allocator->untouched, untouched.size());
 				return touched.empty() && untouched.empty();
@@ -396,8 +415,7 @@ private:
 		if (count == 0) {
 			return true;
 		}
-		block_allocator->retention.Return(count, block_allocator->DivBlockSize(block_allocator->pool_size),
-		                                  RetentionTimeMillis());
+		block_allocator->retention.Return(count, block_allocator->GetUsableBlockCount(), RetentionTimeMillis());
 		if (count < touched.size() || block_allocator->touched->queues.Count() > 1) {
 			std::sort(touched.begin(), touched.end());
 		}
@@ -497,7 +515,32 @@ private:
 #ifndef __MVS__
 //! Whether this thread created its state. A bool needs no thread_local destructor, so reading it allocates nothing
 static thread_local bool thread_local_state_created = false; // NOLINT
+//! The state of the worker thread running on this thread, if any. A pointer needs no thread_local destructor either
+static thread_local BlockAllocatorThreadLocalState *worker_local_state = nullptr; // NOLINT
 #endif
+
+BlockAllocatorWorkerState::BlockAllocatorWorkerState() {
+}
+
+BlockAllocatorWorkerState::~BlockAllocatorWorkerState() {
+#ifndef __MVS__
+	if (state) {
+		worker_local_state = previous.get();
+	}
+#endif
+}
+
+bool BlockAllocatorWorkerState::IsInitialized() const {
+	return state != nullptr;
+}
+
+void BlockAllocatorWorkerState::Initialize(const BlockAllocator &block_allocator) {
+	state = make_uniq<BlockAllocatorThreadLocalState>(block_allocator);
+#ifndef __MVS__
+	previous = worker_local_state;
+	worker_local_state = state.get();
+#endif
+}
 
 BlockAllocatorThreadLocalState &GetBlockAllocatorThreadLocalState(const BlockAllocator &block_allocator) {
 #ifdef __MVS__
@@ -507,6 +550,10 @@ BlockAllocatorThreadLocalState &GetBlockAllocatorThreadLocalState(const BlockAll
 	(*local_state).TryInitialize(block_allocator);
 	return *local_state;
 #else
+	if (worker_local_state) {
+		worker_local_state->TryInitialize(block_allocator);
+		return *worker_local_state;
+	}
 	thread_local BlockAllocatorThreadLocalState local_state(block_allocator);
 	thread_local_state_created = true;
 	local_state.TryInitialize(block_allocator);
@@ -520,7 +567,7 @@ static bool ThreadHasLocalState() {
 #ifdef __MVS__
 	return true;
 #else
-	return thread_local_state_created;
+	return worker_local_state || thread_local_state_created;
 #endif
 }
 
@@ -534,11 +581,16 @@ class AllocationCache {
 	// Retain at most 1 GiB per size class, or one larger allocation.
 	static constexpr idx_t MAX_CACHED_BYTES_PER_BUCKET = 1024ULL * 1024 * 1024;
 
+	struct CachedAllocation {
+		data_ptr_t pointer = nullptr;
+		optional_idx home;
+	};
+
 	struct alignas(64) Bucket {
 		explicit Bucket(idx_t shard_count) : queues(shard_count) {
 		}
 
-		ShardedAllocatorQueue<data_ptr_t> queues;
+		ShardedAllocatorQueue<CachedAllocation> queues;
 		atomic<idx_t> last_return_ms {0};
 		// Keep queue metadata and the infrequently updated timestamp off the admission counter's cache line.
 		alignas(64) atomic<idx_t> count {0};
@@ -558,33 +610,56 @@ public:
 		return size >= (static_cast<idx_t>(1) << MIN_SHIFT) && size <= (static_cast<idx_t>(1) << MAX_SHIFT) &&
 		       IsPowerOfTwo(size);
 	}
-	data_ptr_t TryAllocate(idx_t size) {
+	idx_t GetShardCount() const {
+		return shard_count;
+	}
+	data_ptr_t Allocate(idx_t size, optional_idx &home) {
+		if (SupportsSize(size)) {
+			if (auto pointer = TryAllocate(size, home)) {
+				return pointer;
+			}
+		}
+		auto pointer = allocator.AllocateData(size);
+		home = LocalShard();
+		return pointer;
+	}
+	data_ptr_t TryAllocate(idx_t size, optional_idx &home) {
 		D_ASSERT(SupportsSize(size));
 		const auto shard = LocalShard();
 		auto &bucket = *buckets[CountZeros<idx_t>::Trailing(size) - MIN_SHIFT];
-		data_ptr_t pointer;
-		if (bucket.queues.Get(shard).TryDequeue(pointer)) {
+		CachedAllocation allocation;
+		if (bucket.queues.Get(shard).TryDequeue(allocation)) {
 			bucket.count.fetch_sub(1, std::memory_order_relaxed);
-			return pointer;
+			home = allocation.home;
+			return allocation.pointer;
 		}
 		// Share surplus buffers, leaving a few local spares without reserving the entire budget.
 		const auto reserve = MinValue<idx_t>(MAX_LOCAL_SPARES, MAX_CACHED_BYTES_PER_BUCKET / size / (2 * shard_count));
-		for (idx_t offset = 1; offset < shard_count; offset++) {
-			const auto peer = (shard + offset) % shard_count;
-			auto &queue = bucket.queues.Get(peer);
-			if ((reserve == 0 || queue.SizeApprox() > reserve) && queue.TryDequeue(pointer)) {
-				bucket.count.fetch_sub(1, std::memory_order_relaxed);
-				return pointer;
+		// Prefer neighbours in the same coarse half before borrowing from the other half.
+		const auto group = BlockAllocator::GetShardGroup(shard, shard_count);
+		for (idx_t pass = 0; pass < 2; pass++) {
+			for (idx_t offset = 1; offset < shard_count; offset++) {
+				const auto peer = (shard + offset) % shard_count;
+				if ((BlockAllocator::GetShardGroup(peer, shard_count) == group) != (pass == 0)) {
+					continue;
+				}
+				auto &queue = bucket.queues.Get(peer);
+				if ((reserve == 0 || queue.SizeApprox() > reserve) && queue.TryDequeue(allocation)) {
+					bucket.count.fetch_sub(1, std::memory_order_relaxed);
+					home = allocation.home;
+					return allocation.pointer;
+				}
 			}
 		}
 		return nullptr;
 	}
-	bool TryFree(data_ptr_t pointer, idx_t size) {
+	bool TryFree(data_ptr_t pointer, idx_t size, optional_idx home) {
 		D_ASSERT(SupportsSize(size));
 		if (!pointer) {
 			return false;
 		}
-		const auto shard = LocalShard();
+		// Raw-pointer callers cannot retain ownership across reuse; leave their home unknown.
+		const auto shard = home.IsValid() ? home.GetIndex() : LocalShard();
 		auto &bucket = *buckets[CountZeros<idx_t>::Trailing(size) - MIN_SHIFT];
 		const auto capacity = MaxValue<idx_t>(MAX_CACHED_BYTES_PER_BUCKET / size, 1);
 		if (bucket.count.fetch_add(1, std::memory_order_relaxed) < capacity) {
@@ -594,7 +669,7 @@ public:
 				while (last_return < now &&
 				       !bucket.last_return_ms.compare_exchange_weak(last_return, now, std::memory_order_relaxed)) {
 				}
-				if (bucket.queues.Get(shard).Enqueue(pointer)) {
+				if (bucket.queues.Get(shard).Enqueue(CachedAllocation {pointer, home})) {
 					return true;
 				}
 			} catch (...) {
@@ -618,17 +693,17 @@ public:
 		idx_t freed = 0;
 		for (idx_t i = buckets.size(); i > 0 && freed < byte_limit; i--) {
 			auto &bucket = *buckets[i - 1];
-			const idx_t size = static_cast<idx_t>(1) << (MIN_SHIFT + i - 1);
+			const auto size = (static_cast<idx_t>(1) << (MIN_SHIFT + i - 1));
 			// A snapshot bounds the work even if producers continue returning buffers.
 			auto remaining = Reclaimable(bucket, idle_before);
 			for (idx_t shard = 0; shard < bucket.queues.Count(); shard++) {
 				auto &queue = bucket.queues.Get(shard);
-				data_ptr_t pointer;
+				CachedAllocation allocation;
 				while (remaining > 0 && freed < byte_limit && Reclaimable(bucket, idle_before) > 0) {
-					if (!queue.TryDequeue(pointer)) {
+					if (!queue.TryDequeue(allocation)) {
 						break;
 					}
-					allocator.FreeData(pointer, size);
+					allocator.FreeData(allocation.pointer, size);
 					bucket.count.fetch_sub(1, std::memory_order_relaxed);
 					freed += size;
 					remaining--;
@@ -648,7 +723,7 @@ private:
 
 private:
 	idx_t LocalShard() const {
-		return AllocatorLocalShard(buckets[0]->queues.Count());
+		return BlockAllocator::GetLocalShard(shard_count);
 	}
 
 	Allocator &allocator;
@@ -656,14 +731,31 @@ private:
 	array<unique_ptr<Bucket>, MAX_SHIFT - MIN_SHIFT + 1> buckets;
 };
 
+idx_t BlockAllocator::GetGuardBlockCount() const {
+	// Power-of-two blocks of at least 64 KiB align to all supported OS page sizes.
+	if (touched->blocks_per_shard > 1 && block_size >= 64ULL * 1024) {
+		return touched->queues.Count() - 1;
+	}
+	return 0;
+}
+
+idx_t BlockAllocator::GetUsableBlockCount() const {
+	return DivBlockSize(pool_size) - GetGuardBlockCount();
+}
+
 BlockAllocator::BlockAllocator(Allocator &allocator_p, const idx_t block_size_p, const idx_t pool_size_p)
+    : BlockAllocator(allocator_p, block_size_p, pool_size_p, AllocatorShardCount()) {
+}
+
+BlockAllocator::BlockAllocator(Allocator &allocator_p, const idx_t block_size_p, const idx_t pool_size_p,
+                               const idx_t shard_count)
     : uuid(UUID::GenerateRandomUUID()), allocator(allocator_p), allocation_cache(make_uniq<AllocationCache>(allocator)),
       block_size(block_size_p), block_size_div_shift(CountZeros<idx_t>::Trailing(block_size)),
       pool_size(sizeof(void *) == 8 ? pool_size_p - pool_size_p % block_size : 0),
       pool_state(pool_size != 0 && DivBlockSize(pool_size) <= NumericLimits<uint32_t>::Maximum()
                      ? PoolState::UNINITIALIZED
                      : PoolState::UNAVAILABLE),
-      touched(make_unsafe_uniq<BlockQueue>(DivBlockSize(pool_size), AllocatorShardCount())),
+      touched(make_unsafe_uniq<BlockQueue>(DivBlockSize(pool_size), shard_count)),
       lifetime_state(make_shared_ptr<BlockAllocatorLifetimeState>()) {
 	D_ASSERT(IsPowerOfTwo(block_size));
 	retention.Reset(RetentionTimeMillis());
@@ -732,15 +824,24 @@ bool BlockAllocator::InitializePool() const {
 		touched->ReserveOverflow(DivBlockSize(pool_size));
 		uint32_t block_ids[STANDARD_VECTOR_SIZE];
 		const auto count = DivBlockSize(pool_size);
-		for (idx_t block_id = 0; block_id < count; block_id += STANDARD_VECTOR_SIZE) {
-			const auto next = MinValue<idx_t>(count - block_id, STANDARD_VECTOR_SIZE);
-			for (idx_t i = 0; i < next; i++) {
-				block_ids[i] = NumericCast<uint32_t>(block_id + i);
+		const auto guard_block_count = GetGuardBlockCount();
+		for (idx_t shard = 0; shard < queue->queues.Count(); shard++) {
+			const auto start = shard * queue->blocks_per_shard;
+			auto end = MinValue(count, start + queue->blocks_per_shard);
+			if (shard < guard_block_count) {
+				// Skip the last slot: ProtectPoolGuards uses it to separate adjacent shard mappings.
+				end--;
 			}
-			if (!queue->EnqueueBulk(block_ids, next)) {
-				touched->ReleaseOverflow();
-				pool_state.store(PoolState::UNAVAILABLE, std::memory_order_release);
-				return false;
+			for (idx_t block_id = start; block_id < end; block_id += STANDARD_VECTOR_SIZE) {
+				const auto next = MinValue<idx_t>(end - block_id, STANDARD_VECTOR_SIZE);
+				for (idx_t i = 0; i < next; i++) {
+					block_ids[i] = NumericCast<uint32_t>(block_id + i);
+				}
+				if (!queue->queues.Get(shard).EnqueueBulk(block_ids, next)) {
+					touched->ReleaseOverflow();
+					pool_state.store(PoolState::UNAVAILABLE, std::memory_order_release);
+					return false;
+				}
 			}
 		}
 	} catch (const std::bad_alloc &) {
@@ -750,14 +851,30 @@ bool BlockAllocator::InitializePool() const {
 	}
 
 	const auto pointer = AllocateVirtualMemory(pool_size);
-	if (!pointer) {
+	if (!pointer || !ProtectPoolGuards(pointer)) {
 		touched->ReleaseOverflow();
 		pool_state.store(PoolState::UNAVAILABLE, std::memory_order_release);
+		if (pointer) {
+			FreeVirtualMemory(pointer, pool_size);
+		}
 		return false;
 	}
 	untouched = std::move(queue);
 	pool_base = pointer;
 	pool_state.store(PoolState::READY, std::memory_order_release);
+	return true;
+}
+
+bool BlockAllocator::ProtectPoolGuards(data_ptr_t pointer) const {
+	// Separate writable VMAs reduce contention on Linux's VMA reference counter during page faults.
+	// That contention can bottleneck first-touch faults and skew NUMA placement toward one node.
+	const auto guard_block_count = GetGuardBlockCount();
+	for (idx_t shard = 0; shard < guard_block_count; shard++) {
+		const auto guard_block_id = (shard + 1) * touched->blocks_per_shard - 1;
+		if (!ProtectVirtualMemory(pointer + guard_block_id * block_size, block_size)) {
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -782,8 +899,47 @@ idx_t BlockAllocator::DivBlockSize(const idx_t n) const {
 	return n >> block_size_div_shift;
 }
 
+idx_t BlockAllocator::GetLocalShard(idx_t shard_count) {
+	D_ASSERT(shard_count > 0);
+	return shard_count == 1 ? 0 : (TaskScheduler::GetEstimatedCPUId() / 4) % shard_count;
+}
+
+idx_t BlockAllocator::GetShardGroup(idx_t shard, idx_t shard_count) {
+	D_ASSERT(shard < shard_count);
+	// Coarse halves share the allocator's CPU-order heuristic, not discovered NUMA nodes.
+	return shard * 2 / shard_count;
+}
+
+idx_t BlockAllocator::GetLocalShardGroup(idx_t shard_count) {
+	return GetShardGroup(GetLocalShard(shard_count), shard_count);
+}
+
 idx_t BlockAllocator::GetLocalPoolShard() const {
-	return AllocatorLocalShard(touched->queues.Count());
+	return GetLocalShard(GetPoolShardCount());
+}
+
+idx_t BlockAllocator::GetPoolShardCount() const {
+	return touched->queues.Count();
+}
+
+idx_t BlockAllocator::GetFallbackShardCount() const {
+	return allocation_cache->GetShardCount();
+}
+
+optional_idx BlockAllocator::GetAllocationShard(const_data_ptr_t pointer) const {
+	if (!IsInitialized()) {
+		return optional_idx();
+	}
+	const auto address = reinterpret_cast<uintptr_t>(pointer);
+	const auto base = reinterpret_cast<uintptr_t>(pool_base);
+	if (address < base || address - base >= pool_size) {
+		return optional_idx();
+	}
+	const auto block_id = NumericCast<uint32_t>(DivBlockSize(address - base));
+	if (IsGuardBlock(block_id)) {
+		return optional_idx();
+	}
+	return touched->Home(block_id);
 }
 
 uint32_t BlockAllocator::GetBlockID(const data_ptr_t pointer) const {
@@ -797,6 +953,12 @@ uint32_t BlockAllocator::GetBlockID(const data_ptr_t pointer) const {
 
 void BlockAllocator::VerifyBlockID(const uint32_t block_id) const {
 	D_ASSERT(block_id < DivBlockSize(pool_size));
+	D_ASSERT(!IsGuardBlock(block_id));
+}
+
+bool BlockAllocator::IsGuardBlock(const uint32_t block_id) const {
+	const auto home = touched->Home(block_id);
+	return home < GetGuardBlockCount() && idx_t(block_id) + 1 == (home + 1) * touched->blocks_per_shard;
 }
 
 data_ptr_t BlockAllocator::GetPointer(const uint32_t block_id) const {
@@ -806,15 +968,14 @@ data_ptr_t BlockAllocator::GetPointer(const uint32_t block_id) const {
 
 data_ptr_t BlockAllocator::AllocateData(const idx_t size) const {
 	if (size != block_size || !TryUsePool()) {
-		if (allocation_cache->SupportsSize(size)) {
-			auto pointer = allocation_cache->TryAllocate(size);
-			if (pointer) {
-				return pointer;
-			}
-		}
-		return RetryAfterReclaiming(*this, [&] { return allocator.AllocateData(size); });
+		return AllocateFallbackData(size);
 	}
 	return GetBlockAllocatorThreadLocalState(*this).Allocate();
+}
+
+data_ptr_t BlockAllocator::AllocateFallbackData(const idx_t size) const {
+	optional_idx home;
+	return RetryAfterReclaiming(*this, [&] { return allocation_cache->Allocate(size, home); });
 }
 
 idx_t BlockAllocator::GetCachedMemory() const {
@@ -840,11 +1001,7 @@ void BlockAllocator::FreeData(const data_ptr_t pointer, const idx_t size) const 
 		return;
 	}
 	if (!IsInPool(pointer)) {
-		if (allocation_cache->SupportsSize(size) && allocation_cache->TryFree(pointer, size)) {
-			return;
-		}
-		allocator.FreeData(pointer, size);
-		estimated_unflushed_memory.fetch_add(size, std::memory_order_relaxed);
+		FreeFallbackData(pointer, size, optional_idx());
 		return;
 	}
 	D_ASSERT(size == block_size);
@@ -852,11 +1009,19 @@ void BlockAllocator::FreeData(const data_ptr_t pointer, const idx_t size) const 
 		// creating the state of a thread that only frees allocates and registers a thread_local destructor, which
 		// glibc aborts on when memory is exhausted: hand the block to the global pool directly
 		UpdateCachedBlocks(1, 0);
-		retention.Return(1, DivBlockSize(pool_size), RetentionTimeMillis());
+		retention.Return(1, GetUsableBlockCount(), RetentionTimeMillis());
 		touched->Enqueue(GetBlockID(pointer));
 		return;
 	}
 	GetBlockAllocatorThreadLocalState(*this).Free(pointer);
+}
+
+void BlockAllocator::FreeFallbackData(data_ptr_t pointer, idx_t size, optional_idx home) const {
+	if (allocation_cache->SupportsSize(size) && allocation_cache->TryFree(pointer, size, home)) {
+		return;
+	}
+	allocator.FreeData(pointer, size);
+	estimated_unflushed_memory.fetch_add(size, std::memory_order_relaxed);
 }
 
 data_ptr_t BlockAllocator::ReallocateData(const data_ptr_t pointer, const idx_t old_size, const idx_t new_size) const {
@@ -912,14 +1077,21 @@ static void AdviseHugePages(data_ptr_t pointer, idx_t size) {
 #endif
 }
 
-data_ptr_t BlockAllocator::AllocateHugeData(const idx_t size) const {
-	auto pointer = AllocateData(size);
+data_ptr_t BlockAllocator::AllocateHugeData(const idx_t size, optional_idx &home) const {
+	home = optional_idx();
+	auto pointer = size == block_size && TryUsePool()
+	                   ? AllocateData(size)
+	                   : RetryAfterReclaiming(*this, [&] { return allocation_cache->Allocate(size, home); });
 	AdviseHugePages(pointer, size);
 	return pointer;
 }
 
-void BlockAllocator::FreeHugeData(data_ptr_t pointer, const idx_t size) const {
-	FreeData(pointer, size);
+void BlockAllocator::FreeHugeData(data_ptr_t pointer, const idx_t size, optional_idx home) const {
+	if (IsInPool(pointer)) {
+		FreeData(pointer, size);
+	} else {
+		FreeFallbackData(pointer, size, home);
+	}
 }
 
 bool BlockAllocator::SupportsFlush() const {
@@ -968,10 +1140,7 @@ public:
 		                                           BlockAllocator::ReclaimMode::DECAY);
 		const auto cache_freed = allocator.FlushAllocationCache(
 		    BlockAllocatorConfig::MAX_FLUSH_BLOCKS * allocator.block_size, BlockAllocator::ReclaimMode::DECAY);
-		if (cache_freed > 0) {
-			allocator.FlushFallbackAllocator(
-			    allocator.estimated_unflushed_memory.exchange(0, std::memory_order_relaxed));
-		}
+		allocator.FlushDeallocated();
 		annotated_lock_guard<annotated_mutex> guard(allocator.flush_lock);
 		const bool reschedule = allocator.flush_state == FlushState::RESCHEDULE_REQUESTED;
 		allocator.flush_state = FlushState::IDLE;
@@ -1040,9 +1209,8 @@ void BlockAllocator::ThreadIdle() const {
 		if (!scheduler_ref || !TryScheduleFlush(*scheduler_ref)) {
 			const auto mode = scheduler_ref ? ReclaimMode::DECAY : ReclaimMode::FORCE;
 			FlushPool(optional_idx(), optional_idx(), mode);
-			if (FlushAllocationCache(NumericLimits<idx_t>::Maximum(), mode) > 0) {
-				FlushFallbackAllocator(estimated_unflushed_memory.exchange(0, std::memory_order_relaxed));
-			}
+			FlushAllocationCache(NumericLimits<idx_t>::Maximum(), mode);
+			FlushDeallocated();
 		}
 	} catch (...) {
 		// Reclamation is best effort on scheduler threads.
@@ -1094,7 +1262,8 @@ static idx_t AllocationCacheIdleCutoff() {
 
 bool BlockAllocator::HasReclaimableMemory() const {
 	return GetReclaimableBlockCount(ReclaimMode::DECAY) > 0 ||
-	       allocation_cache->GetCachedMemory(AllocationCacheIdleCutoff()) > 0;
+	       allocation_cache->GetCachedMemory(AllocationCacheIdleCutoff()) > 0 ||
+	       estimated_unflushed_memory.load(std::memory_order_relaxed) > 0;
 }
 
 bool BlockAllocator::HasPendingCacheDecay() const {
@@ -1116,28 +1285,26 @@ idx_t BlockAllocator::FlushAllocationCache(idx_t byte_limit, ReclaimMode mode) c
 	return freed;
 }
 
-idx_t BlockAllocator::TrimCachedMemory(idx_t memory_headroom, optional_idx pool_block_limit) const noexcept {
+void BlockAllocator::TrimCachedMemory(idx_t memory_headroom, optional_idx pool_block_limit) const noexcept {
 	const auto cached = allocation_cache->GetCachedMemory();
 	// Avoid reading the fixed pool's per-thread counters when even its capacity fits.
-	if (cached <= memory_headroom &&
-	    (pool_size <= memory_headroom - cached || GetCachedPoolMemory() <= memory_headroom - cached)) {
-		return 0;
+	if (cached <= memory_headroom && (GetUsableBlockCount() * block_size <= memory_headroom - cached ||
+	                                  GetCachedPoolMemory() <= memory_headroom - cached)) {
+		return;
 	}
-	idx_t freed = 0;
 	idx_t pool_headroom;
 	{
 		annotated_lock_guard<annotated_mutex> guard(flush_lock);
 		const auto total = GetCachedMemory();
 		if (total <= memory_headroom) {
-			return 0;
+			return;
 		}
-		freed = allocation_cache->Flush(total - memory_headroom);
+		const auto freed = allocation_cache->Flush(total - memory_headroom);
 		estimated_unflushed_memory.fetch_add(freed, std::memory_order_relaxed);
 		const auto remaining = allocation_cache->GetCachedMemory();
 		pool_headroom = memory_headroom - MinValue(memory_headroom, remaining);
 	}
 	FlushPool(pool_block_limit, optional_idx(), ReclaimMode::FORCE, DivBlockSize(pool_headroom));
-	return freed;
 }
 
 void BlockAllocator::FlushAll() const noexcept {
@@ -1157,21 +1324,22 @@ void BlockAllocator::FlushForAllocation(const idx_t extra_memory, const idx_t me
 }
 
 bool BlockAllocator::TryFlushDeallocated(const idx_t threshold, const idx_t memory_headroom) const noexcept {
-	if (TrimCachedMemory(memory_headroom) > 0) {
-		FlushFallbackAllocator(estimated_unflushed_memory.exchange(0, std::memory_order_relaxed));
-		return true;
-	}
+	// Trimmed allocations join the other fallback frees, and are purged with them.
+	TrimCachedMemory(memory_headroom);
 	auto deallocated = estimated_unflushed_memory.load(std::memory_order_relaxed);
-	if (deallocated == 0 || deallocated < threshold || !Allocator::SupportsFlush()) {
-		return false;
-	}
-	if (deallocated <= memory_headroom && GetCachedMemory() <= memory_headroom - deallocated) {
-		return false;
-	}
-	if (!estimated_unflushed_memory.compare_exchange_strong(deallocated, 0, std::memory_order_relaxed)) {
-		return false;
-	}
-	const auto mapped_memory = allocator.GetMappedMemory();
+	do {
+		if (deallocated == 0 || deallocated < threshold || !Allocator::SupportsFlush()) {
+			return false;
+		}
+		if (deallocated <= memory_headroom && GetCachedMemory() <= memory_headroom - deallocated) {
+			return false;
+		}
+		// A failed claim reloads the estimate: frees added meanwhile do not cancel the purge, a claim by another
+		// thread does.
+	} while (!estimated_unflushed_memory.compare_exchange_weak(deallocated, 0, std::memory_order_relaxed));
+	// Allocator statistics can only defer the purge when the room next to the cached memory holds a threshold.
+	const auto room = memory_headroom - MinValue(memory_headroom, GetCachedMemory());
+	const auto mapped_memory = room >= threshold ? allocator.GetMappedMemory() : optional_idx();
 	if (mapped_memory.IsValid()) {
 		// Repeated frees of reused memory cannot retain more than the fallback allocator's mapped footprint.
 		const auto unflushed = MinValue(deallocated, mapped_memory.GetIndex());
@@ -1183,6 +1351,13 @@ bool BlockAllocator::TryFlushDeallocated(const idx_t threshold, const idx_t memo
 	}
 	FlushFallbackAllocator(deallocated);
 	return true;
+}
+
+void BlockAllocator::FlushDeallocated() const noexcept {
+	const auto deallocated = estimated_unflushed_memory.exchange(0, std::memory_order_relaxed);
+	if (deallocated > 0) {
+		FlushFallbackAllocator(deallocated);
+	}
 }
 
 void BlockAllocator::FlushFallbackAllocator(const idx_t deallocated) const noexcept {
@@ -1284,6 +1459,8 @@ idx_t BlockAllocator::FreeInternal(const optional_idx block_limit, const optiona
 }
 
 bool BlockAllocator::FreeContiguousBlocks(const uint32_t block_id_start, const uint32_t block_id_end_including) const {
+	VerifyBlockID(block_id_end_including);
+	D_ASSERT(touched->Home(block_id_start) == touched->Home(block_id_end_including));
 	const auto pointer = GetPointer(block_id_start);
 	const auto num_blocks = block_id_end_including - block_id_start + 1;
 	const auto size = num_blocks * block_size;

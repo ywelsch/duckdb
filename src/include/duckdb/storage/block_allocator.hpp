@@ -29,6 +29,31 @@ class TaskScheduler;
 struct ProducerToken;
 struct BlockQueue;
 struct BlockAllocatorLifetimeState;
+class BlockAllocator;
+class BlockAllocatorThreadLocalState;
+
+//! The block cache of a worker thread. While it is initialized, the thread allocates through it instead of through the
+//! thread_local cache, whose first use registers a destructor that glibc cannot fail to allocate without ending the
+//! process
+class BlockAllocatorWorkerState {
+public:
+	BlockAllocatorWorkerState();
+	~BlockAllocatorWorkerState();
+	BlockAllocatorWorkerState(const BlockAllocatorWorkerState &) = delete;
+	BlockAllocatorWorkerState &operator=(const BlockAllocatorWorkerState &) = delete;
+	BlockAllocatorWorkerState(BlockAllocatorWorkerState &&) = delete;
+	BlockAllocatorWorkerState &operator=(BlockAllocatorWorkerState &&) = delete;
+
+public:
+	bool IsInitialized() const;
+	//! Create the cache, this allocates
+	void Initialize(const BlockAllocator &block_allocator);
+
+private:
+	unique_ptr<BlockAllocatorThreadLocalState> state;
+	//! The state the thread allocated through before, restored when this one goes away
+	optional_ptr<BlockAllocatorThreadLocalState> previous;
+};
 
 class BlockAllocator {
 	friend class BlockAllocatorThreadLocalState;
@@ -57,6 +82,16 @@ public:
 	//! Free backing retained in global queues, thread-local caches, and ongoing reclamation.
 	idx_t GetCachedMemory() const;
 
+	//! Approximate locality of fixed-pool backing, unknown for other allocations
+	optional_idx GetAllocationShard(const_data_ptr_t pointer) const;
+	idx_t GetPoolShardCount() const;
+	idx_t GetLocalPoolShard() const;
+	idx_t GetFallbackShardCount() const;
+	//! Approximate cache locality by grouping adjacent CPUs in fours, wrapping at shard_count.
+	static idx_t GetLocalShard(idx_t shard_count);
+	static idx_t GetShardGroup(idx_t shard, idx_t shard_count);
+	static idx_t GetLocalShardGroup(idx_t shard_count);
+
 	//! Flush outstanding allocations
 	bool SupportsFlush() const;
 	optional_idx DecayDelay() const;
@@ -75,9 +110,14 @@ public:
 	bool TryFlushDeallocated(idx_t threshold, idx_t memory_headroom) const noexcept DUCKDB_EXCLUDES(flush_lock);
 
 private:
+	//! Explicit pool geometry for tests; production construction uses the CPU-count heuristic.
+	BlockAllocator(Allocator &allocator, idx_t block_size, idx_t pool_size, idx_t shard_count);
+
 	//! The buffer allocator's huge-page backend keeps matching allocation and release ownership.
-	data_ptr_t AllocateHugeData(idx_t size) const;
-	void FreeHugeData(data_ptr_t pointer, idx_t size) const;
+	data_ptr_t AllocateHugeData(idx_t size, optional_idx &home) const;
+	void FreeHugeData(data_ptr_t pointer, idx_t size, optional_idx home) const;
+	data_ptr_t AllocateFallbackData(idx_t size) const;
+	void FreeFallbackData(data_ptr_t pointer, idx_t size, optional_idx home) const;
 
 	enum class FlushState : uint8_t { IDLE, SCHEDULED, RESCHEDULE_REQUESTED };
 	enum class ReclaimMode : uint8_t { FORCE, DECAY, OPPORTUNISTIC };
@@ -85,13 +125,16 @@ private:
 
 	bool TryUsePool() const DUCKDB_EXCLUDES(pool_init_lock);
 	bool InitializePool() const DUCKDB_EXCLUDES(pool_init_lock);
+	bool ProtectPoolGuards(data_ptr_t pointer) const;
 	bool IsInitialized() const;
 	bool IsInPool(data_ptr_t pointer) const;
+	bool IsGuardBlock(uint32_t block_id) const;
+	idx_t GetGuardBlockCount() const;
+	idx_t GetUsableBlockCount() const;
 
 	idx_t ModuloBlockSize(idx_t n) const;
 	idx_t DivBlockSize(idx_t n) const;
 
-	idx_t GetLocalPoolShard() const;
 	uint32_t GetBlockID(data_ptr_t pointer) const;
 	data_ptr_t GetPointer(uint32_t block_id) const;
 
@@ -101,8 +144,10 @@ private:
 	idx_t GetCachedPoolMemory() const;
 	void ReturnThreadLocalBlocks() const;
 	void FlushFallbackAllocator(idx_t deallocated) const noexcept;
-	//! Return bytes released to the fallback allocator, which may still need a purge.
-	idx_t TrimCachedMemory(idx_t memory_headroom, optional_idx pool_block_limit = optional_idx()) const noexcept
+	//! Purge the fallback allocator if frees are waiting for it. Idle threads do this without pressure.
+	void FlushDeallocated() const noexcept;
+	//! Trim cached backing to the headroom. Bytes released to the fallback allocator join the unflushed estimate.
+	void TrimCachedMemory(idx_t memory_headroom, optional_idx pool_block_limit = optional_idx()) const noexcept
 	    DUCKDB_EXCLUDES(flush_lock);
 	idx_t FlushAllocationCache(idx_t byte_limit, ReclaimMode mode = ReclaimMode::FORCE) const noexcept
 	    DUCKDB_EXCLUDES(flush_lock);
@@ -137,7 +182,7 @@ private:
 	//! Shift for dividing by block size
 	const idx_t block_size_div_shift;
 
-	//! Fixed capacity, rounded down to whole blocks; zero on 32-bit.
+	//! Virtual reservation, including guards, rounded down to whole blocks; zero on 32-bit.
 	const idx_t pool_size;
 	//! Allocation permission is independent of the lifetime of the mapping.
 	atomic<bool> enabled {true};

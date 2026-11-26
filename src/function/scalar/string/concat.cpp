@@ -1,3 +1,4 @@
+#include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
@@ -37,10 +38,20 @@ unique_ptr<FunctionData> ConcatFunctionData::Copy() const {
 	return make_uniq<ConcatFunctionData>(return_type, is_operator);
 }
 
+struct ConcatLocalState : public FunctionLocalState {
+	vector<idx_t> lengths;
+};
+
+unique_ptr<FunctionLocalState> InitConcatState(ExpressionState &, const BoundFunctionExpression &,
+                                               optional_ptr<const FunctionData>) {
+	return make_uniq<ConcatLocalState>();
+}
+
 void StringConcatFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	// iterate over the vectors to count how large the final string will be
 	idx_t constant_lengths = 0;
-	vector<idx_t> result_lengths(args.size(), 0);
+	auto &result_lengths = ExecuteFunctionState::GetFunctionState(state)->Cast<ConcatLocalState>().lengths;
+	result_lengths.assign(args.size(), 0);
 	for (idx_t col_idx = 0; col_idx < args.ColumnCount(); col_idx++) {
 		const auto &input = args.data[col_idx];
 		D_ASSERT(input.GetType().InternalType() == PhysicalType::VARCHAR);
@@ -251,7 +262,8 @@ void ResolveListConcatTypes(ResolveScalarFunctionTypesInput &input, bool is_oper
 			throw BinderException(arg, "Cannot concatenate types %s - an explicit cast is required", type_list);
 		}
 		}
-		if (!LogicalType::TryGetMaxLogicalType(context, child_type, next_type, child_type)) {
+		if (!LogicalType::TryGetMaxLogicalType(context, child_type, next_type, child_type,
+		                                       input.GetDecimalWidthLimit())) {
 			throw BinderException(arg, "Cannot concatenate lists of types %s[] and %s[] - an explicit cast is required",
 			                      child_type.ToString(), next_type.ToString());
 		}
@@ -352,6 +364,19 @@ unique_ptr<BaseStatistics> ListConcatStats(ClientContext &context, FunctionStati
 	return stats;
 }
 
+//! The concat function and operator concatenate lists if their arguments are lists
+unique_ptr<BaseStatistics> ConcatStats(ClientContext &context, FunctionStatisticsInput &input) {
+	if (input.expr.GetReturnType().id() != LogicalTypeId::LIST) {
+		return nullptr;
+	}
+	for (auto &child : input.child_stats) {
+		if (child.GetStatsType() != StatisticsType::LIST_STATS) {
+			return nullptr;
+		}
+	}
+	return ListConcatStats(context, input);
+}
+
 } // namespace
 
 ScalarFunction ListConcatFun::GetFunction() {
@@ -361,6 +386,7 @@ ScalarFunction ListConcatFun::GetFunction() {
 	fun.GetSignature().AddArgs("args", LogicalType::LIST(LogicalType::ANY));
 	fun.SetResolveTypesCallback(ConcatFunctionResolveTypes);
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	fun.SetInitStateCallback(InitConcatState);
 	return fun;
 }
 
@@ -378,6 +404,8 @@ ScalarFunction ConcatFun::GetFunction() {
 	concat.GetSignature().AddArgs("args", LogicalType::ANY);
 	concat.SetResolveTypesCallback(ConcatFunctionResolveTypes);
 	concat.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	concat.SetInitStateCallback(InitConcatState);
+	concat.SetStatisticsCallback(ConcatStats);
 	return concat;
 }
 
@@ -385,6 +413,7 @@ ScalarFunction ConcatOperatorFun::GetFunction() {
 	ScalarFunction concat_op = ScalarFunction("||", {}, LogicalType::ANY, ConcatFunction, BindConcatOperator);
 	concat_op.GetSignature().AddParameter("arg1", LogicalType::ANY).AddParameter("arg2", LogicalType::ANY);
 	concat_op.SetResolveTypesCallback(ConcatOperatorResolveTypes);
+	concat_op.SetStatisticsCallback(ConcatStats);
 	return concat_op;
 }
 

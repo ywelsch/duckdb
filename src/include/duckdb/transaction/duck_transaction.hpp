@@ -39,8 +39,8 @@ struct CommitInfo {
 
 class DuckTransaction : public Transaction {
 public:
-	DuckTransaction(DuckTransactionManager &manager, ClientContext &context, transaction_t start_time,
-	                SnapshotView view, idx_t catalog_version);
+	DuckTransaction(DuckTransactionManager &manager, Context &context, transaction_t start_time, SnapshotView view,
+	                idx_t catalog_version);
 	~DuckTransaction() override;
 
 	//! The start timestamp of this transaction
@@ -89,7 +89,7 @@ public:
 	ErrorData WaitForVacuumSeals();
 
 	bool ShouldWriteToWAL(AttachedDatabase &db);
-	ErrorData PreFlushOptimisticBlocks(AttachedDatabase &db) noexcept;
+	ErrorData PreFlushOptimisticBlocks(ClientContext &context, AttachedDatabase &db) noexcept;
 	//! Appends the local storage to the tables; with a WAL, the commit state records the optimistically written blocks
 	ErrorData AppendLocalStorage(ClientContext &context, AttachedDatabase &db,
 	                             unique_ptr<StorageCommitState> &commit_state) noexcept;
@@ -98,7 +98,7 @@ public:
 	                     unique_ptr<StorageCommitState> &commit_state) noexcept;
 	//! Commit the current transaction with the given commit identifier. Returns an error message if the transaction
 	//! commit failed, or an empty string if the commit was successful
-	ErrorData Commit(AttachedDatabase &db, CommitInfo &commit_info,
+	ErrorData Commit(ClientContext &context, AttachedDatabase &db, CommitInfo &commit_info,
 	                 unique_ptr<StorageCommitState> commit_state) noexcept;
 	//! Returns whether or not a commit of this transaction should trigger an automatic checkpoint
 	bool AutomaticCheckpoint(AttachedDatabase &db, const UndoBufferProperties &properties);
@@ -133,6 +133,9 @@ public:
 	void SetIsCheckpointTransaction() {
 		is_checkpoint_transaction = true;
 	}
+	bool IsCheckpointTransaction() const {
+		return is_checkpoint_transaction;
+	}
 
 private:
 	void ReleaseVacuumLock();
@@ -144,10 +147,10 @@ private:
 	UndoBuffer undo_buffer;
 	//! The set of uncommitted appends for the transaction
 	unique_ptr<LocalStorage> storage;
+	//! Guards checkpoint_lock and vacuum_lock (statements of the transaction can run concurrently)
+	mutex lock_keys_lock;
 	//! Lock that prevents checkpoints from starting
 	unique_ptr<StorageLockKey> checkpoint_lock;
-	//! Lock for taking and releasing the vacuum lock
-	mutex vacuum_lock_mutex;
 	//! Lock that prevents vacuums from starting
 	unique_ptr<StorageLockKey> vacuum_lock;
 	//! Whether the vacuum lock is released when the transaction commits or rolls back, not when it is destroyed
@@ -169,7 +172,7 @@ private:
 	//! Map of all sequences that were used during the transaction and the value they had in this transaction
 	reference_map_t<SequenceCatalogEntry, reference<SequenceValue>> sequence_usage;
 	//! Flag to prevent auto-checkpointing inside a checkpoint transaction.
-	bool is_checkpoint_transaction = false;
+	atomic<bool> is_checkpoint_transaction {false};
 };
 
 } // namespace duckdb
