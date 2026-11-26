@@ -5,6 +5,7 @@
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/thread_annotation/thread_annotation.hpp"
 
+#include <chrono>
 #include <condition_variable>
 
 namespace duckdb {
@@ -50,6 +51,22 @@ public:
 			return nullptr;
 		}
 		writer_tickets++;
+		writer_active = true;
+		return make_uniq<StorageLockKey>(shared_from_this(), StorageLockType::EXCLUSIVE);
+	}
+
+	unique_ptr<StorageLockKey> TryGetExclusiveLock(idx_t timeout_ms) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		unique_lock<mutex> guard(state_lock);
+		writer_tickets++;
+		auto acquired = state_cv.wait_for(guard, std::chrono::milliseconds(timeout_ms),
+		                                  [&]() { return !writer_active && read_count == 0; });
+		if (!acquired) {
+			// give up: let the readers that queued behind this writer pass
+			writers_done++;
+			guard.unlock();
+			state_cv.notify_all();
+			return nullptr;
+		}
 		writer_active = true;
 		return make_uniq<StorageLockKey>(shared_from_this(), StorageLockType::EXCLUSIVE);
 	}
@@ -116,6 +133,10 @@ unique_ptr<StorageLockKey> StorageLock::GetExclusiveLock() {
 
 unique_ptr<StorageLockKey> StorageLock::TryGetExclusiveLock() {
 	return internals->TryGetExclusiveLock();
+}
+
+unique_ptr<StorageLockKey> StorageLock::TryGetExclusiveLock(idx_t timeout_ms) {
+	return internals->TryGetExclusiveLock(timeout_ms);
 }
 
 unique_ptr<StorageLockKey> StorageLock::GetSharedLock() {

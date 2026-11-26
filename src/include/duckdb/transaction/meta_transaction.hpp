@@ -52,6 +52,8 @@ public:
 	ValidChecker transaction_validity;
 	//! The active query number
 	atomic<transaction_t> active_query;
+	//! Whether the running statement refers to a row id column by name
+	atomic<bool> statement_reads_row_ids {false};
 
 public:
 	DUCKDB_API static MetaTransaction &Get(ClientContext &context);
@@ -70,6 +72,12 @@ public:
 
 	idx_t GetActiveQuery();
 	void SetActiveQuery(transaction_t query_number);
+	void SetStatementReadsRowIds(bool reads_row_ids) {
+		statement_reads_row_ids = reads_row_ids;
+	}
+	bool StatementReadsRowIds() const {
+		return statement_reads_row_ids;
+	}
 
 	void SetReadOnly();
 	bool IsReadOnly() const;

@@ -374,6 +374,17 @@ bool RowVersionManager::HasUncommittedChanges() {
 	return false;
 }
 
+bool RowVersionManager::HasVersionsFrom(VisibilityBound bound, idx_t row_count) {
+	lock_guard<mutex> lock(version_lock);
+	for (idx_t vector_idx = 0; vector_idx < vector_info.size(); vector_idx++) {
+		auto &info = vector_info[vector_idx];
+		if (info && info->HasVersionsFrom(bound, VectorRowCount(vector_idx, row_count))) {
+			return true;
+		}
+	}
+	return false;
+}
+
 vector<MetaBlockPointer> RowVersionManager::GetStoragePointers() {
 	lock_guard<mutex> lock(version_lock);
 	D_ASSERT(!newest_uncheckpointed_delete_commit.IsValid());

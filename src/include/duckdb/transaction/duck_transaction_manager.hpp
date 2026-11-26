@@ -18,6 +18,7 @@
 namespace duckdb {
 class DuckTransactionManager;
 class DuckTransaction;
+class VacuumSealLatch;
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -80,8 +81,25 @@ public:
 	unique_ptr<StorageLockKey> TryUpgradeCheckpointLock(StorageLockKey &lock);
 	unique_ptr<StorageLockKey> SharedVacuumLock();
 	unique_ptr<StorageLockKey> TryGetVacuumLock();
+	//! Try to obtain the exclusive vacuum lock, waiting at most `timeout_ms`
+	unique_ptr<StorageLockKey> TryGetVacuumLock(idx_t timeout_ms);
 	//! Whether a transaction that inserts has to exclude vacuuming checkpoints
 	bool InsertRequiresVacuumLock();
+	//! Whether a vacuuming checkpoint takes the vacuum lock per merge instead of for its whole duration
+	bool VacuumSealsMerges();
+	//! Starts the merges of a checkpoint; with a durable latch, commits on merged row groups wait for its header
+	void BeginVacuumSeals(bool durable_latch);
+	//! Releases the commits waiting for the running checkpoint; `durable` tells whether its header was written
+	void EndVacuumSeals(bool durable);
+	//! The latch of the running checkpoint (if any)
+	shared_ptr<VacuumSealLatch> GetVacuumSealLatch();
+	//! Whether the running checkpoint stopped merging because it could not get the vacuum lock in time
+	bool VacuumSealsAbandoned() const {
+		return seals_abandoned;
+	}
+	void AbandonVacuumSeals() {
+		seals_abandoned = true;
+	}
 
 	//! Returns the current version of the catalog (incremented whenever anything changes, not stored between restarts)
 	DUCKDB_API idx_t GetCatalogVersion(Transaction &transaction);
@@ -168,6 +186,12 @@ private:
 	StorageLock checkpoint_lock;
 	//! The vacuum lock - necessary to start vacuum operations
 	StorageLock vacuum_lock;
+	//! Protects seal_latch
+	mutex seal_lock;
+	//! Commits on row groups merged by the running checkpoint wait on this latch
+	shared_ptr<VacuumSealLatch> seal_latch;
+	//! Set once a merge of the running checkpoint timed out on the vacuum lock
+	atomic<bool> seals_abandoned = {false};
 	//! Lock necessary to start transactions only - used by FORCE CHECKPOINT to prevent new transactions from starting
 	mutex start_transaction_lock;
 

@@ -890,6 +890,44 @@ bool ChunkVectorInfo::HasUncommittedChanges() const {
 	}
 }
 
+bool ChunkVectorInfo::HasVersionsFrom(VisibilityBound bound, idx_t row_count) const {
+	if (HasConstantInsertionId()) {
+		if (ConstantInsertId() >= bound) {
+			return true;
+		}
+	} else {
+		auto insert_segment = allocator.GetHandle(GetInsertedPointer());
+		auto inserted = insert_segment.GetPtr<transaction_t>();
+		for (idx_t i = 0; i < row_count; i++) {
+			if (inserted[i] >= bound) {
+				return true;
+			}
+		}
+	}
+	// a delete id and an update marker both count by their writer
+	auto written_from = [&](transaction_t id) {
+		return id != NOT_DELETED_ID && GetWriter(id) >= bound;
+	};
+	switch (delete_state) {
+	case DeleteIdState::CONSTANT:
+		return written_from(constant_delete_id);
+	case DeleteIdState::MASKED:
+		return written_from(constant_delete_id) || written_from(mask_delete_id);
+	case DeleteIdState::ARRAY: {
+		auto delete_segment = allocator.GetHandle(GetDeletedPointer());
+		auto deleted = delete_segment.GetPtr<transaction_t>();
+		for (idx_t i = 0; i < row_count; i++) {
+			if (written_from(deleted[i])) {
+				return true;
+			}
+		}
+		return false;
+	}
+	default:
+		throw InternalException("Unknown DeleteIdState in HasVersionsFrom");
+	}
+}
+
 bool ChunkVectorInfo::AnyDeleted() const {
 	switch (delete_state) {
 	case DeleteIdState::CONSTANT:

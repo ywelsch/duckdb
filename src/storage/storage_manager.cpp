@@ -272,7 +272,7 @@ bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointO
 	// otherwise be bounded below commits whose WAL this checkpoint deletes
 	auto &transaction_manager = DuckTransactionManager::Get(db);
 	transaction_manager.WaitForDurability();
-	if (options.type == CheckpointType::FULL_CHECKPOINT &&
+	if (options.type == CheckpointType::FULL_CHECKPOINT && !transaction_manager.VacuumSealsMerges() &&
 	    transaction_manager.GetLastCommit() >= transaction_manager.LowestVisibilityBound()) {
 		// an active bounded snapshot still needs state a full checkpoint would vacuum away
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
@@ -888,14 +888,35 @@ bool SingleFileStorageManager::BindIndexesForCheckpoint(optional_ptr<ClientConte
 	return true;
 }
 
+//! Releases the commits waiting for a checkpoint that ends without writing its header
+struct VacuumSealGuard {
+	VacuumSealGuard(DuckTransactionManager &transaction_manager_p, bool active_p, bool durable_latch)
+	    : transaction_manager(transaction_manager_p), active(active_p) {
+		if (active) {
+			transaction_manager.BeginVacuumSeals(durable_latch);
+		}
+	}
+	~VacuumSealGuard() {
+		if (active) {
+			transaction_manager.EndVacuumSeals(false);
+		}
+	}
+
+	DuckTransactionManager &transaction_manager;
+	bool active;
+};
+
 void SingleFileStorageManager::CreateCheckpoint(QueryContext context, CheckpointOptions options,
                                                 optional_ptr<ClientContext> client_context) {
 	if (read_only || !load_complete) {
 		return;
 	}
+	auto &transaction_manager = GetAttached().GetTransactionManager().Cast<DuckTransactionManager>();
+	// either the checkpoint holds the vacuum lock throughout, or each of its merges takes it
+	const bool seal_merges = transaction_manager.VacuumSealsMerges();
+	VacuumSealGuard seal_guard(transaction_manager, seal_merges, !InMemory());
 	unique_ptr<StorageLockKey> vacuum_lock;
-	if (options.type != CheckpointType::CONCURRENT_CHECKPOINT) {
-		auto &transaction_manager = GetAttached().GetTransactionManager().Cast<DuckTransactionManager>();
+	if (options.type != CheckpointType::CONCURRENT_CHECKPOINT && !seal_merges) {
 		vacuum_lock = transaction_manager.TryGetVacuumLock();
 		if (!vacuum_lock) {
 			if (options.type == CheckpointType::FULL_CHECKPOINT) {

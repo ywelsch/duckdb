@@ -1033,8 +1033,16 @@ unique_ptr<GlobalTableFunctionState> TableScanInitGlobal(ClientContext &context,
 	auto &attached = storage.GetAttached();
 	const bool indexed_vacuum_may_move_rowids = attached.GetVacuumRebuildIndexThreshold() > 0 ||
 	                                            StorageCompatibility::FromDatabase(attached).CanPersistRowIdGaps();
-	if (indexed_vacuum_may_move_rowids) {
-		vacuum_lock = DuckTransactionManager::Get(attached).SharedVacuumLock();
+	auto &transaction_manager = DuckTransactionManager::Get(attached);
+	auto &transaction = DuckTransaction::Get(context, attached);
+	storage.KeepRowIds(context, transaction, input.column_indexes);
+	if (indexed_vacuum_may_move_rowids && !transaction.HoldsVacuumLock()) {
+		vacuum_lock = transaction_manager.SharedVacuumLock();
+	}
+	if (!storage.ReadsLiveRowGroups(transaction)) {
+		// the indexes hold the row ids of the live row groups, this statement reads the ones from before a merge
+		vacuum_lock.reset();
+		return DuckTableScanInitGlobal(context, input, storage, bind_data);
 	}
 
 	for (auto entry : indexes.IndexEntries()) {
@@ -1052,7 +1060,12 @@ unique_ptr<GlobalTableFunctionState> TableScanInitGlobal(ClientContext &context,
 	}
 
 	if (!index_scan) {
+		vacuum_lock.reset();
 		return DuckTableScanInitGlobal(context, input, storage, bind_data);
+	}
+	if (transaction_manager.VacuumSealsMerges()) {
+		// the rows are fetched from the row groups the statement reads, whatever is merged from here on
+		vacuum_lock.reset();
 	}
 	return DuckIndexScanInitGlobal(context, input, bind_data, row_ids.TakeRows(), std::move(vacuum_lock));
 }

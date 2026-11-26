@@ -54,6 +54,7 @@ struct RowGroupAppendState;
 struct SuballocationBlock;
 class MetadataManager;
 class RowVersionManager;
+class VacuumSealLatch;
 class CommitDropState;
 class ScanFilterInfo;
 class StorageCommitState;
@@ -113,12 +114,32 @@ public:
 		return deletes_pointers;
 	}
 
+	//! Counts the transactions that wrote deletes or update markers, and the ones that were cleaned up since
+	void RegisterWriter() {
+		registered_writers++;
+	}
+	void ReleaseWriter() {
+		released_writers++;
+	}
+	idx_t RegisteredWriters() const {
+		return registered_writers;
+	}
+	idx_t ReleasedWriters() const {
+		return released_writers;
+	}
+	//! The latch of the checkpoint that merged this row group, until that checkpoint has finished
+	void SetSealLatch(shared_ptr<VacuumSealLatch> latch);
+	shared_ptr<VacuumSealLatch> GetSealLatch();
+
 private:
 	mutex lock;
 	vector<MetaBlockPointer> deletes_pointers;
 	atomic<bool> deletes_is_loaded;
 	shared_ptr<RowVersionManager> owned_version_info;
 	atomic<optional_ptr<RowVersionManager>> version_info;
+	atomic<idx_t> registered_writers;
+	atomic<idx_t> released_writers;
+	shared_ptr<VacuumSealLatch> seal_latch;
 };
 
 //! Collects the ids of the rows that a delete actually deleted, but only once rows were skipped (e.g. because they
@@ -242,6 +263,12 @@ public:
 	RowGroupWriteData WriteToDisk(RowGroupWriteInfo &info) const;
 	//! Returns the number of committed rows (count - committed deletes)
 	idx_t GetCommittedRowCount();
+	//! Whether a snapshot at the bound sees the row group differently from the latest committed state
+	bool HasVersionsFrom(VisibilityBound bound);
+	//! The version info holder, shared with the written copies of this row group
+	RowGroupVersionInfo &GetVersionInfoHolder() {
+		return *version_info;
+	}
 	//! Returns the number of rows visible to the given transaction
 	idx_t GetVisibleRowCount(TransactionData transaction);
 	//! Count visible rows in a scan assignment starting at a vector boundary

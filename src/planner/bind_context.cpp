@@ -464,6 +464,10 @@ BindResult BindContext::BindColumn(ColumnRefExpression &colref, idx_t depth) {
 	if (!binding) {
 		return BindResult(std::move(error));
 	}
+	column_t column_index;
+	if (binding->TryGetBindingIndex(colref.GetColumnName(), column_index) && column_index == COLUMN_IDENTIFIER_ROW_ID) {
+		binder.GetStatementProperties().reads_row_ids = true;
+	}
 	return binding->Bind(colref, depth);
 }
 

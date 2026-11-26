@@ -11,6 +11,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/table/vacuum_seal_latch.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -204,8 +205,10 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 				    other_transactions);
 			}
 		}
-		// otherwise - we need to do a concurrent checkpoint
-		checkpoint_type = CheckpointType::CONCURRENT_CHECKPOINT;
+		if (!VacuumSealsMerges()) {
+			// otherwise - we need to do a concurrent checkpoint
+			checkpoint_type = CheckpointType::CONCURRENT_CHECKPOINT;
+		}
 	}
 	if (storage_manager.InMemory() && !storage_manager.CompressionIsEnabled()) {
 		if (checkpoint_type == CheckpointType::CONCURRENT_CHECKPOINT) {
@@ -256,11 +259,10 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 		}
 	}
 	CheckpointOptions options;
-	if (GetLastCommit() >= LowestVisibilityBound()) {
+	if (!VacuumSealsMerges() && GetLastCommit() >= LowestVisibilityBound()) {
 		// we cannot do a full checkpoint if any transaction needs to read old data
 		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
 	}
-
 	storage_manager.CreateCheckpoint(context, options, &context);
 }
 
@@ -284,12 +286,39 @@ unique_ptr<StorageLockKey> DuckTransactionManager::TryGetVacuumLock() {
 	return vacuum_lock.TryGetExclusiveLock();
 }
 
+unique_ptr<StorageLockKey> DuckTransactionManager::TryGetVacuumLock(idx_t timeout_ms) {
+	return vacuum_lock.TryGetExclusiveLock(timeout_ms);
+}
+
 bool DuckTransactionManager::InsertRequiresVacuumLock() {
 	// an index rebuild scans the rows appended during the checkpoint as well
 	if (db.GetVacuumRebuildIndexThreshold() > 0) {
 		return true;
 	}
 	return !StorageCompatibility::FromDatabase(db).CanPersistTrailingRowIdGaps();
+}
+
+bool DuckTransactionManager::VacuumSealsMerges() {
+	// row ids only change through merges: no index rebuild, and gaps left by dropped row groups can be stored
+	return !InsertRequiresVacuumLock();
+}
+
+void DuckTransactionManager::BeginVacuumSeals(bool durable_latch) {
+	lock_guard<mutex> guard(seal_lock);
+	seals_abandoned = false;
+	seal_latch = durable_latch ? make_shared_ptr<VacuumSealLatch>() : nullptr;
+}
+
+void DuckTransactionManager::EndVacuumSeals(bool durable) {
+	lock_guard<mutex> guard(seal_lock);
+	if (seal_latch) {
+		seal_latch->Release(durable);
+	}
+}
+
+shared_ptr<VacuumSealLatch> DuckTransactionManager::GetVacuumSealLatch() {
+	lock_guard<mutex> guard(seal_lock);
+	return seal_latch;
 }
 
 transaction_t DuckTransactionManager::GetCommitTimestamp() {
@@ -359,8 +388,12 @@ void DuckTransactionManager::CleanupTransactions() {
 
 ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
 	auto &transaction = transaction_p.Cast<DuckTransaction>();
-	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
-	ErrorData error = transaction.PreFlushOptimisticBlocks(db);
+	// commits on row groups merged by a running checkpoint wait until it is durable
+	ErrorData error = transaction.WaitForVacuumSeals();
+	if (!error.HasError()) {
+		// flush the transaction-local blocks of bulk appends before taking any commit locks
+		error = transaction.PreFlushOptimisticBlocks(db);
+	}
 	unique_lock<mutex> t_lock(transaction_lock);
 	if (!db.IsSystem() && !db.IsTemporary()) {
 		if (transaction.ChangesMade()) {

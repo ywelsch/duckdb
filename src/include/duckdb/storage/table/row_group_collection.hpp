@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/reference_map.hpp"
 #include "duckdb/storage/table/row_group.hpp"
 #include "duckdb/storage/table/segment_tree.hpp"
 #include "duckdb/storage/statistics/column_statistics.hpp"
@@ -77,6 +78,8 @@ struct CollectionCheckpointSnapshot {
 	optional_idx row_group_count;
 	//! The row id the first append after the checkpointed row groups gets
 	idx_t next_row_id = 0;
+	//! The append lock of the table
+	optional_ptr<mutex> append_lock;
 };
 
 //! The rewritten row groups, installed by InstallCheckpoint
@@ -87,6 +90,17 @@ struct CollectionCheckpointResult {
 	idx_t next_row_id = 0;
 	//! The live row groups past this count were appended while the checkpoint ran
 	idx_t checkpointed_row_group_count = 0;
+	//! Whether rows get new row ids when these row groups are installed
+	bool row_ids_changed = false;
+};
+
+//! The row groups a statement reads a table from
+struct ReaderRowGroups {
+	shared_ptr<RowGroupSegmentTree> row_groups;
+	//! Counts the checkpoints that gave rows of the table new row ids
+	idx_t row_id_version = 0;
+	//! Whether such a checkpoint ran since: these are the row groups from before it, not the live ones
+	bool stale = false;
 };
 
 class RowGroupCollection {
@@ -117,15 +131,18 @@ public:
 	void Verify();
 	void Destroy();
 
+	//! Without the row groups of a reader, the scans and fetches below read the live ones
 	void InitializeScan(const QueryContext &context, CollectionScanState &state, const vector<StorageIndex> &column_ids,
-	                    optional_ptr<TableFilterSet> table_filters);
+	                    optional_ptr<TableFilterSet> table_filters,
+	                    optional_ptr<const ReaderRowGroups> reader_row_groups = nullptr);
 	void InitializeCreateIndexScan(CreateIndexScanState &state);
 	void InitializeScanWithOffset(const QueryContext &context, CollectionScanState &state,
 	                              const vector<StorageIndex> &column_ids, idx_t start_row, idx_t end_row);
 	static bool InitializeScanInRowGroup(ClientContext &context, CollectionScanState &state,
 	                                     RowGroupCollection &collection, SegmentNode<RowGroup> &row_group,
 	                                     idx_t vector_index, idx_t max_row, bool initialize_columns = true);
-	void InitializeParallelScan(ParallelCollectionScanState &state);
+	void InitializeParallelScan(ParallelCollectionScanState &state,
+	                            optional_ptr<const ReaderRowGroups> reader_row_groups = nullptr);
 	//! Claims the next assignment and returns its rows, invalid once none is left, deferring column setup when asked
 	optional_idx NextParallelScan(ClientContext &context, ParallelCollectionScanState &state,
 	                              CollectionScanState &scan_state, bool initialize_columns = true);
@@ -134,7 +151,8 @@ public:
 	RowGroupIterationHelper Chunks(DuckTransaction &transaction, const vector<StorageIndex> &column_ids);
 
 	void Fetch(TransactionData transaction, DataChunk &result, const vector<StorageIndex> &column_ids,
-	           const Vector &row_identifiers, idx_t fetch_count, ColumnFetchState &state);
+	           const Vector &row_identifiers, idx_t fetch_count, ColumnFetchState &state,
+	           optional_ptr<const ReaderRowGroups> reader_row_groups = nullptr);
 
 	//! Returns true, if the row group can fetch the row id for the transaction.
 	bool CanFetch(TransactionData, const row_t row_id);
@@ -175,6 +193,10 @@ public:
 	                                      const CollectionCheckpointSnapshot &snapshot);
 	//! Takes over the row groups appended meanwhile. Runs under the table's append lock
 	void InstallCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats);
+	//! Puts merged row groups (row start, row group) in place of the ones they were merged from, and returns how
+	//! many were taken out. Runs under the table's append lock
+	idx_t ReplaceRowGroups(const reference_set_t<RowGroup> &removed,
+	                       const vector<pair<idx_t, shared_ptr<RowGroup>>> &replacements);
 
 	//! Decides how vacuum handles this table's indexes.
 	VacuumIndexStrategy
@@ -195,7 +217,9 @@ public:
 	//! Drops every row group and immediately marks the blocks as modified.
 	void CommitDropTable();
 
-	vector<PartitionStatistics> GetPartitionStats(TransactionData transaction) const;
+	vector<PartitionStatistics>
+	GetPartitionStats(TransactionData transaction,
+	                  optional_ptr<const ReaderRowGroups> reader_row_groups = nullptr) const;
 	vector<ColumnSegmentInfo>
 	GetColumnSegmentInfo(const QueryContext &context,
 	                     const ColumnSegmentInfoScanOptions &options = ColumnSegmentInfoScanOptions {}) const;
@@ -248,6 +272,13 @@ public:
 
 	//! Get a ptr to the raw segment tree. This can be useful for some extensions to have directly exposed.
 	shared_ptr<RowGroupSegmentTree> GetRowGroups() const;
+	//! The live row groups together with the version of their row ids
+	ReaderRowGroups GetLiveRowGroups() const;
+	//! Registers a statement that reads the table, and returns the row id version it reads from then on
+	idx_t RegisterReader();
+	void UnregisterReader(idx_t version);
+	//! The row groups a registered reader reads: the live ones, or the ones from before a checkpoint moved rows
+	ReaderRowGroups GetReaderRowGroups(idx_t version) const;
 
 	//! The metadata blocks of the table data of this collection, as read from disk or written by the last checkpoint
 	const vector<MetaBlockPointer> &GetMetadataPointers() const {
@@ -258,7 +289,9 @@ private:
 	optional_ptr<SegmentNode<RowGroup>> NextUpdateRowGroup(RowGroupSegmentTree &row_groups, row_t *ids, idx_t &pos,
 	                                                       idx_t count) const;
 
-	void SetRowGroups(shared_ptr<RowGroupSegmentTree> row_groups);
+	void SetRowGroups(shared_ptr<RowGroupSegmentTree> row_groups, bool row_ids_changed = false);
+	//! The end of the rows that a scan of the row groups reads
+	idx_t GetScanEnd(RowGroupSegmentTree &row_groups, bool stale) const;
 
 private:
 	//! BlockManager
@@ -278,6 +311,12 @@ private:
 	mutable mutex row_group_pointer_lock;
 	//! The owning pointer of the segment tree
 	shared_ptr<RowGroupSegmentTree> owned_row_groups;
+	//! Counts the checkpoints that gave rows new row ids, guarded by the lock above like the two maps below
+	idx_t row_id_version = 0;
+	//! The number of running statements that read the table, per row id version
+	unordered_map<idx_t, idx_t> readers;
+	//! The row groups from before a checkpoint moved rows, per row id version that still has readers
+	unordered_map<idx_t, shared_ptr<RowGroupSegmentTree>> replaced_row_groups;
 	//! Table statistics
 	TableStatistics stats;
 	//! Allocation size, only tracked for appends

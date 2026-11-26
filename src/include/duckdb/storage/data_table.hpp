@@ -114,6 +114,10 @@ public:
 	//! Fetch data from the specific row identifiers from the base table
 	void Fetch(DuckTransaction &transaction, DataChunk &result, const vector<StorageIndex> &column_ids,
 	           const Vector &row_ids, idx_t fetch_count, ColumnFetchState &state);
+	//! Whether the running statement reads the live row groups of the table: their row ids are those in the indexes
+	bool ReadsLiveRowGroups(DuckTransaction &transaction);
+	//! Keeps checkpoints from moving rows until the transaction ends, if the statement can hand out the row ids
+	void KeepRowIds(ClientContext &context, DuckTransaction &transaction, const vector<ColumnIndex> &column_indexes);
 	void FetchCommitted(DataChunk &result, const vector<StorageIndex> &column_ids, const Vector &row_identifiers,
 	                    idx_t fetch_count, ColumnFetchState &state);
 	//! Returns true, if the transaction can fetch the row ID.
@@ -325,6 +329,7 @@ private:
 	void VerifyDeleteForeignKeyConstraint(optional_ptr<LocalTableStorage> storage,
 	                                      const BoundForeignKeyConstraint &bound_foreign_key, ClientContext &context,
 	                                      DataChunk &chunk);
+	void KeepRowIds(ClientContext &context, DuckTransaction &transaction, bool scans_row_ids);
 
 private:
 	//! The table info

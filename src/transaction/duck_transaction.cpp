@@ -25,6 +25,8 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
+#include "duckdb/storage/table/row_group.hpp"
+#include "duckdb/storage/table/vacuum_seal_latch.hpp"
 
 namespace duckdb {
 
@@ -39,7 +41,7 @@ DuckTransaction::DuckTransaction(DuckTransactionManager &manager, ClientContext 
                                  SnapshotView view_p, idx_t catalog_version_p)
     : Transaction(manager, context_p), start_time(start_time), view(view_p), commit_id(0),
       catalog_version(catalog_version_p), awaiting_cleanup(false), undo_buffer(*this, context_p),
-      storage(make_uniq<LocalStorage>(context_p.GetContext(), *this)) {
+      storage(make_uniq<LocalStorage>(context_p.GetContext(), *this)), transaction_holds_vacuum_lock(false) {
 	D_ASSERT(IsCommitted(start_time) && !IsCommitted(view.transaction_id));
 }
 
@@ -48,6 +50,96 @@ SnapshotView DuckTransaction::GetSnapshotView() const {
 }
 
 DuckTransaction::~DuckTransaction() {
+	for (auto &entry : written_row_groups) {
+		entry.second->ReleaseWriter();
+	}
+	ReleaseRowGroups(true);
+}
+
+void DuckTransaction::RegisterRowGroupWrite(const shared_ptr<RowGroupVersionInfo> &version_info) {
+	lock_guard<mutex> guard(row_group_write_lock);
+	if (!written_row_groups.emplace(*version_info, version_info).second) {
+		return;
+	}
+	version_info->RegisterWriter();
+	auto latch = version_info->GetSealLatch();
+	if (latch) {
+		// one checkpoint runs at a time: an earlier latch was released before this one was created
+		seal_latch = std::move(latch);
+	}
+}
+
+ErrorData DuckTransaction::WaitForVacuumSeals() {
+	ReleaseRowGroups(true);
+	if (transaction_holds_vacuum_lock) {
+		// the transaction runs no further statement
+		ReleaseVacuumLock();
+	}
+	shared_ptr<VacuumSealLatch> latch;
+	{
+		lock_guard<mutex> guard(row_group_write_lock);
+		latch = std::move(seal_latch);
+	}
+	if (latch && !latch->Wait()) {
+		return ErrorData(ExceptionType::TRANSACTION,
+		                 "Cannot commit: the checkpoint that merged row groups this transaction wrote to failed");
+	}
+	return ErrorData();
+}
+
+void DuckTransaction::ReleaseVacuumLock() {
+	lock_guard<mutex> guard(vacuum_lock_mutex);
+	vacuum_lock.reset();
+	transaction_holds_vacuum_lock = false;
+}
+
+bool DuckTransaction::HoldsVacuumLock() {
+	lock_guard<mutex> guard(vacuum_lock_mutex);
+	return vacuum_lock != nullptr;
+}
+
+void DuckTransaction::KeepVacuumLockForTransaction() {
+	lock_guard<mutex> guard(vacuum_lock_mutex);
+	if (vacuum_lock) {
+		return;
+	}
+	vacuum_lock = GetTransactionManager().SharedVacuumLock();
+	transaction_holds_vacuum_lock = true;
+}
+
+ReaderRowGroups DuckTransaction::GetRowGroups(const shared_ptr<RowGroupCollection> &collection) {
+	lock_guard<mutex> guard(read_tables_lock);
+	if (reads_live_row_groups) {
+		return collection->GetLiveRowGroups();
+	}
+	auto entry = read_tables.find(*collection);
+	if (entry == read_tables.end()) {
+		entry = read_tables.emplace(*collection, make_pair(collection, collection->RegisterReader())).first;
+	}
+	return collection->GetReaderRowGroups(entry->second.second);
+}
+
+ReaderRowGroups DuckTransaction::PeekRowGroups(const shared_ptr<RowGroupCollection> &collection) {
+	lock_guard<mutex> guard(read_tables_lock);
+	auto entry = read_tables.find(*collection);
+	if (entry == read_tables.end()) {
+		return collection->GetLiveRowGroups();
+	}
+	return collection->GetReaderRowGroups(entry->second.second);
+}
+
+void DuckTransaction::ReleaseStatementState() {
+	// the next statement reads the live row groups
+	ReleaseRowGroups(false);
+}
+
+void DuckTransaction::ReleaseRowGroups(bool transaction_ends) {
+	lock_guard<mutex> guard(read_tables_lock);
+	for (auto &entry : read_tables) {
+		entry.second.first->UnregisterReader(entry.second.second);
+	}
+	read_tables.clear();
+	reads_live_row_groups = reads_live_row_groups || transaction_ends;
 }
 
 DuckTransaction &DuckTransaction::Get(ClientContext &context, AttachedDatabase &db) {
@@ -341,9 +433,13 @@ ErrorData DuckTransaction::Commit(AttachedDatabase &db, CommitInfo &commit_info,
 }
 
 ErrorData DuckTransaction::Rollback() {
+	ReleaseRowGroups(true);
 	try {
 		storage->Rollback();
 		undo_buffer.Rollback();
+		if (transaction_holds_vacuum_lock) {
+			ReleaseVacuumLock();
+		}
 		return ErrorData();
 	} catch (std::exception &ex) {
 		return ErrorData(ex);
@@ -376,15 +472,18 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 			checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
 		}
 	}
-	if (!vacuum_lock) {
-		bool require_vacuum_lock = false;
-		require_vacuum_lock =
-		    require_vacuum_lock || (type.InsertData() && GetTransactionManager().InsertRequiresVacuumLock());
-		require_vacuum_lock = require_vacuum_lock || type.DeleteData();
+	bool require_vacuum_lock = false;
+	require_vacuum_lock =
+	    require_vacuum_lock || (type.InsertData() && GetTransactionManager().InsertRequiresVacuumLock());
+	require_vacuum_lock = require_vacuum_lock || type.DeleteData();
 
-		if (require_vacuum_lock) {
+	if (require_vacuum_lock) {
+		lock_guard<mutex> guard(vacuum_lock_mutex);
+		if (!vacuum_lock) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
 		}
+		// with merges that take the lock themselves, it is given back when the transaction ends
+		transaction_holds_vacuum_lock = GetTransactionManager().VacuumSealsMerges();
 	}
 }
 

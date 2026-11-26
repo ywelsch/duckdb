@@ -61,6 +61,9 @@ public:
 	DUCKDB_API virtual void SetReadWrite();
 	//! Sets the database modifications that are planned to be performed in this transaction
 	DUCKDB_API virtual void SetModifications(DatabaseModificationType type);
+	//! Called before and after every statement: releases what is only kept while a statement runs
+	virtual void ReleaseStatementState() {
+	}
 
 	virtual bool IsDuckTransaction() const {
 		return false;

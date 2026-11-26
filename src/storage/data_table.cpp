@@ -39,6 +39,7 @@
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
@@ -274,11 +275,35 @@ TableIOManager &TableIOManager::Get(DataTable &table) {
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
+template <class T>
+static bool ScansRowIds(const vector<T> &columns) {
+	for (auto &column : columns) {
+		if (column.IsRowIdColumn()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void DataTable::KeepRowIds(ClientContext &context, DuckTransaction &transaction, bool scans_row_ids) {
+	// row ids that only serve the statement itself, as in a delete, do not outlive it
+	if (scans_row_ids && MetaTransaction::Get(context).StatementReadsRowIds()) {
+		transaction.KeepVacuumLockForTransaction();
+	}
+}
+
+void DataTable::KeepRowIds(ClientContext &context, DuckTransaction &transaction,
+                           const vector<ColumnIndex> &column_indexes) {
+	KeepRowIds(context, transaction, ScansRowIds(column_indexes));
+}
+
 void DataTable::InitializeScan(ClientContext &context, DuckTransaction &transaction, TableScanState &state,
                                const vector<StorageIndex> &column_ids, optional_ptr<TableFilterSet> table_filters) {
 	auto &local_storage = LocalStorage::Get(transaction);
 	state.Initialize(column_ids, context, table_filters);
-	row_groups->InitializeScan(context, state.table_state, column_ids, table_filters);
+	KeepRowIds(context, transaction, ScansRowIds(column_ids));
+	auto reader_row_groups = transaction.GetRowGroups(row_groups);
+	row_groups->InitializeScan(context, state.table_state, column_ids, table_filters, reader_row_groups);
 	local_storage.InitializeScan(context, *this, state.local_state, table_filters);
 }
 
@@ -294,7 +319,8 @@ idx_t DataTable::GetRowGroupSize() const {
 
 vector<PartitionStatistics> DataTable::GetPartitionStats(ClientContext &context) {
 	auto &transaction = DuckTransaction::Get(context, db);
-	auto result = row_groups->GetPartitionStats(transaction);
+	auto reader_row_groups = transaction.PeekRowGroups(row_groups);
+	auto result = row_groups->GetPartitionStats(transaction, reader_row_groups);
 	auto &local_storage = LocalStorage::Get(context, db);
 	auto local_partitions = local_storage.GetPartitionStats(*this, transaction);
 	result.insert(result.end(), local_partitions.begin(), local_partitions.end());
@@ -320,7 +346,10 @@ idx_t DataTable::MaxThreads(ClientContext &context) const {
 void DataTable::InitializeParallelScan(ClientContext &context, ParallelTableScanState &state,
                                        const vector<ColumnIndex> &column_indexes) {
 	auto &local_storage = LocalStorage::Get(context, db);
-	row_groups->InitializeParallelScan(state.scan_state);
+	auto &transaction = DuckTransaction::Get(context, db);
+	KeepRowIds(context, transaction, column_indexes);
+	auto reader_row_groups = transaction.GetRowGroups(row_groups);
+	row_groups->InitializeParallelScan(state.scan_state, reader_row_groups);
 
 	local_storage.InitializeParallelScan(*this, state.local_state);
 }
@@ -481,10 +510,15 @@ TableStorageInfo DataTable::GetStorageInfo() const {
 //===--------------------------------------------------------------------===//
 // Fetch
 //===--------------------------------------------------------------------===//
+bool DataTable::ReadsLiveRowGroups(DuckTransaction &transaction) {
+	return !transaction.GetRowGroups(row_groups).stale;
+}
+
 void DataTable::Fetch(DuckTransaction &transaction, DataChunk &result, const vector<StorageIndex> &column_ids,
                       const Vector &row_identifiers, idx_t fetch_count, ColumnFetchState &state) {
 	D_ASSERT(row_identifiers.GetVectorType() == VectorType::FLAT_VECTOR);
 	auto row_ids = FlatVector::GetData<row_t>(row_identifiers);
+	auto reader_row_groups = transaction.GetRowGroups(row_groups);
 
 	// Quick scan to check for transaction-local row IDs (>= MAX_ROW_ID).
 	bool has_local = false;
@@ -497,7 +531,7 @@ void DataTable::Fetch(DuckTransaction &transaction, DataChunk &result, const vec
 
 	if (!has_local) {
 		// All committed rows — fast path (common case).
-		row_groups->Fetch(transaction, result, column_ids, row_identifiers, fetch_count, state);
+		row_groups->Fetch(transaction, result, column_ids, row_identifiers, fetch_count, state, reader_row_groups);
 		return;
 	}
 
@@ -523,7 +557,7 @@ void DataTable::Fetch(DuckTransaction &transaction, DataChunk &result, const vec
 
 	// Mixed: some rows are committed, some are local.
 	// row_groups->Fetch silently skips local row IDs, packing committed rows at 0..committed_count-1.
-	row_groups->Fetch(transaction, result, column_ids, row_identifiers, fetch_count, state);
+	row_groups->Fetch(transaction, result, column_ids, row_identifiers, fetch_count, state, reader_row_groups);
 	D_ASSERT(result.size() == committed_count);
 
 	// Fetch local rows into a separate chunk.
@@ -1107,6 +1141,12 @@ optional_idx DataTableInfo::CheckpointRowGroupCount(const CheckpointOptions &opt
 	return checkpoint_row_group_count;
 }
 
+void DataTableInfo::ReduceCheckpointRowGroupCount(const CheckpointOptions &options, idx_t count) {
+	if (CheckpointRowGroupCount(options).IsValid()) {
+		checkpoint_row_group_count = checkpoint_row_group_count.GetIndex() - count;
+	}
+}
+
 void DataTable::InitializeAppend(DuckTransaction &transaction, TableAppendState &state) {
 	// obtain the append lock for this table
 	if (!state.append_lock) {
@@ -1628,6 +1668,7 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	{
 		lock_guard<mutex> lock(append_lock);
 		snapshot = row_groups->SnapshotForCheckpoint(writer);
+		snapshot.append_lock = &append_lock;
 	}
 
 	// checkpoint each individual row group
