@@ -9,6 +9,8 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/array.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/storage/block.hpp"
 #include "duckdb/storage/block_manager.hpp"
 #include "duckdb/common/atomic.hpp"
@@ -128,12 +130,20 @@ protected:
 	unordered_map<block_id_t, idx_t> modified_blocks;
 	//! Whether the database is loading, between BeginLoad and EndLoad
 	atomic<bool> loading {false};
+	//! Per pool, the blocks that have free sub-blocks, so that allocation can take the lowest one
+	array<set<block_id_t>, 2> blocks_with_free_space;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;
 
 protected:
 	block_id_t AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool);
+	//! Updates blocks_with_free_space after the free sub-blocks or the pool of a block changed
+	void UpdateFreeSpace(const MetadataBlock &block);
+	//! Removes a block that is no longer a metadata block from blocks_with_free_space
+	void ForgetFreeSpace(block_id_t block_id);
+	//! Whether blocks_with_free_space matches the blocks, for assertions
+	bool FreeSpaceIsConsistent() const;
 	block_id_t PeekNextBlockId() const;
 	block_id_t GetNextBlockId() const;
 

@@ -60,8 +60,8 @@ MetadataManager::~MetadataManager() {
 }
 
 MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
-	// check if there is any free space left in an existing block (of the pool, with metadata locality)
-	// if not allocate a new block
+	// take the lowest block with free space (of the pool, with metadata locality)
+	// if there is none, or a new block would have a lower id, allocate a new block
 	MetadataPointer pointer;
 	unique_lock<mutex> guard(block_lock);
 	auto locality = blocks.size() >= METADATA_LOCALITY_MIN_BLOCKS;
@@ -69,18 +69,18 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 		pool = MetadataPool::DEFAULT;
 	}
 	block_id_t free_block = INVALID_BLOCK;
-	for (auto &kv : blocks) {
-		auto &block = kv.second;
-		D_ASSERT(kv.first == block.block_id);
-		if (!block.free_blocks.empty() && (!locality || block.pool == pool)) {
-			free_block = kv.first;
-			break;
+	for (idx_t pool_idx = 0; pool_idx < blocks_with_free_space.size(); pool_idx++) {
+		auto &candidates = blocks_with_free_space[pool_idx];
+		if (candidates.empty() || (locality && pool_idx != static_cast<idx_t>(pool))) {
+			continue;
+		}
+		if (free_block == INVALID_BLOCK || *candidates.begin() < free_block) {
+			free_block = *candidates.begin();
 		}
 	}
 	guard.unlock();
 	// with metadata locality each pool refills its own holes rather than taking a new block with a lower id
-	auto prefer_lower_block_id = !locality;
-	if (free_block == INVALID_BLOCK || (prefer_lower_block_id && free_block > PeekNextBlockId())) {
+	if (free_block == INVALID_BLOCK || (!locality && free_block > PeekNextBlockId())) {
 		free_block = AllocateNewBlock(guard, pool);
 	} else {
 		guard.lock();
@@ -103,6 +103,7 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 	pointer.index = block.free_blocks.back();
 	// mark the block as used
 	block.free_blocks.pop_back();
+	UpdateFreeSpace(block);
 	D_ASSERT(pointer.index < METADATA_BLOCK_COUNT);
 	guard.unlock();
 	// pin the block
@@ -211,6 +212,7 @@ void MetadataManager::RecordLoadRead(const MetadataPointer &pointer) {
 	auto entry = blocks.find(UnsafeNumericCast<block_id_t>(pointer.block_index));
 	if (entry != blocks.end()) {
 		entry->second.pool = MetadataPool::LOAD;
+		UpdateFreeSpace(entry->second);
 	}
 }
 
@@ -226,7 +228,32 @@ void MetadataManager::AddBlock(unique_lock<mutex> &block_lock, MetadataBlock new
 		}
 		throw InternalException("Block id with id %llu already exists", new_block.block_id);
 	}
-	blocks[new_block.block_id] = std::move(new_block);
+	auto block_id = new_block.block_id;
+	blocks[block_id] = std::move(new_block);
+	UpdateFreeSpace(blocks[block_id]);
+}
+
+void MetadataManager::UpdateFreeSpace(const MetadataBlock &block) {
+	ForgetFreeSpace(block.block_id);
+	if (!block.free_blocks.empty()) {
+		blocks_with_free_space[static_cast<idx_t>(block.pool)].insert(block.block_id);
+	}
+}
+
+void MetadataManager::ForgetFreeSpace(block_id_t block_id) {
+	for (auto &candidates : blocks_with_free_space) {
+		candidates.erase(block_id);
+	}
+}
+
+bool MetadataManager::FreeSpaceIsConsistent() const {
+	array<set<block_id_t>, 2> expected;
+	for (auto &kv : blocks) {
+		if (!kv.second.free_blocks.empty()) {
+			expected[static_cast<idx_t>(kv.second.pool)].insert(kv.first);
+		}
+	}
+	return expected == blocks_with_free_space;
 }
 
 void MetadataManager::AddAndRegisterBlock(unique_lock<mutex> &block_lock, MetadataBlock block) {
@@ -385,6 +412,7 @@ void MetadataManager::Read(ReadStream &source) {
 		} else {
 			// block was already created - only copy over the free list
 			entry->second.free_blocks = std::move(block.free_blocks);
+			UpdateFreeSpace(entry->second);
 		}
 	}
 }
@@ -459,6 +487,7 @@ unordered_map<block_id_t, idx_t> MetadataManager::MarkBlocksAsModified(bool has_
 		if (new_free_blocks == NumericLimits<idx_t>::Maximum()) {
 			// if new free_blocks is all blocks - mark entire block as modified
 			blocks.erase(entry);
+			ForgetFreeSpace(block_id);
 
 			guard.unlock();
 			block_manager.MarkBlockAsModified(block_id);
@@ -466,6 +495,7 @@ unordered_map<block_id_t, idx_t> MetadataManager::MarkBlocksAsModified(bool has_
 		} else {
 			// set the new set of free blocks
 			block.FreeBlocksFromInteger(new_free_blocks);
+			UpdateFreeSpace(block);
 		}
 	}
 
@@ -477,6 +507,7 @@ unordered_map<block_id_t, idx_t> MetadataManager::MarkBlocksAsModified(bool has_
 		idx_t occupied_list = ~free_list;
 		modified_blocks[block.block_id] = occupied_list;
 	}
+	D_ASSERT(FreeSpaceIsConsistent());
 	return freed_blocks;
 }
 
@@ -490,6 +521,7 @@ void MetadataManager::ReuseFreedBlocks(const unordered_map<block_id_t, idx_t> &f
 		auto &block = entry->second;
 		block.FreeBlocksFromInteger(block.FreeBlocksToInteger() | freed.second);
 		block.pending_reuse &= ~freed.second;
+		UpdateFreeSpace(block);
 	}
 }
 
