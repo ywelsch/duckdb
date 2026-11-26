@@ -78,11 +78,11 @@ public:
 
 	//! Allocates a sub-block, only from blocks of the pool once there are a few metadata blocks
 	MetadataHandle AllocateHandle(MetadataPool pool);
-	//! Starts remembering the sub-blocks that loading the database reads
+	//! Starts putting the blocks that loading the database reads into the load pool
 	void BeginLoad();
-	//! Remembers a sub-block a MetadataReader read, while the database loads
-	void RecordLoadRead(MetaBlockPointer pointer);
-	//! Puts the blocks whose contents loading the database mostly read into the load pool
+	//! Puts the block a MetadataReader read into the load pool, while the database loads
+	void RecordLoadRead(const MetadataPointer &pointer);
+	//! Stops putting the blocks that are read into the load pool
 	void EndLoad();
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
@@ -128,8 +128,6 @@ protected:
 	unordered_map<block_id_t, idx_t> modified_blocks;
 	//! Whether the database is loading, between BeginLoad and EndLoad
 	atomic<bool> loading {false};
-	//! Sub-blocks read while the database loads
-	vector<MetaBlockPointer> load_pointers;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;

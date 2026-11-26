@@ -68,8 +68,8 @@ void MetadataReader::ReadNextBlock(QueryContext context) {
 	if (read_pointers) {
 		read_pointers->push_back(next_pointer);
 	}
-	manager.RecordLoadRead(next_pointer);
 	auto next_disk_pointer = FromDiskPointer(next_pointer);
+	manager.RecordLoadRead(next_disk_pointer);
 	block = manager.Pin(context, next_disk_pointer);
 	index = next_disk_pointer.index;
 
