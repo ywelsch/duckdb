@@ -502,8 +502,9 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 	}
 	// with merges that are sealed, a deleting statement keeps merges out of its table while it runs (HoldRowIds)
 	// and the row groups it wrote to are kept by their writer count
+	// (the storage version is only asked for writes: the system catalog has no storage)
 	bool require_vacuum_lock =
-	    GetTransactionManager().InsertRequiresVacuumLock() && (type.InsertData() || type.DeleteData());
+	    (type.InsertData() || type.DeleteData()) && GetTransactionManager().InsertRequiresVacuumLock();
 	if (require_vacuum_lock) {
 		if (!vacuum_lock) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
