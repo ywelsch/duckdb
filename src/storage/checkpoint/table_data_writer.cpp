@@ -69,9 +69,9 @@ Context &TableDataWriter::GetContext() const {
 
 SingleFileTableDataWriter::SingleFileTableDataWriter(SingleFileCheckpointWriter &checkpoint_manager,
                                                      TableCatalogEntry &table, MetadataWriter &table_data_writer,
-                                                     MetadataWriter &stats_writer)
+                                                     MetadataWriter &row_group_pointer_writer)
     : TableDataWriter(table, checkpoint_manager.GetContext()), checkpoint_manager(checkpoint_manager),
-      table_data_writer(table_data_writer), stats_writer(stats_writer) {
+      table_data_writer(table_data_writer), row_group_pointer_writer(row_group_pointer_writer) {
 }
 
 unique_ptr<RowGroupWriter> SingleFileTableDataWriter::GetRowGroupWriter() {
@@ -126,18 +126,18 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 		// write the metadata
 		// store the current position in the metadata writer
 		// this is where the row groups for this table start
-		pointer = stats_writer.GetMetaBlockPointer();
+		pointer = row_group_pointer_writer.GetMetaBlockPointer();
 		vector<MetaBlockPointer> written_pointers;
-		stats_writer.SetWrittenPointers(written_pointers);
+		row_group_pointer_writer.SetWrittenPointers(written_pointers);
 
 		// Serialize statistics as a single unit
-		BinarySerializer stats_serializer(stats_writer, serializer.GetOptions());
+		BinarySerializer stats_serializer(row_group_pointer_writer, serializer.GetOptions());
 		stats_serializer.Begin();
 		global_stats.Serialize(stats_serializer);
 		stats_serializer.End();
 
 		// now start writing the row group pointers to disk
-		stats_writer.Write<uint64_t>(row_group_pointers.size());
+		row_group_pointer_writer.Write<uint64_t>(row_group_pointers.size());
 		total_rows = 0;
 		next_row_id = 0;
 		for (auto &row_group_pointer : row_group_pointers) {
@@ -148,12 +148,12 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 			}
 
 			// Each RowGroup is its own unit
-			BinarySerializer row_group_serializer(stats_writer, serializer.GetOptions());
+			BinarySerializer row_group_serializer(row_group_pointer_writer, serializer.GetOptions());
 			row_group_serializer.Begin();
 			RowGroup::Serialize(row_group_pointer, row_group_serializer, supports_per_column_writes);
 			row_group_serializer.End();
 		}
-		stats_writer.SetWrittenPointers(nullptr);
+		row_group_pointer_writer.SetWrittenPointers(nullptr);
 		collection.FinalizeCheckpoint(pointer, written_pointers);
 	} else {
 		// we have existing metadata and the table is unchanged - write a pointer to the existing metadata

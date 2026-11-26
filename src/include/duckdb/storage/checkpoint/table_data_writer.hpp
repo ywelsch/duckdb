@@ -107,7 +107,7 @@ protected:
 class SingleFileTableDataWriter : public TableDataWriter {
 public:
 	SingleFileTableDataWriter(SingleFileCheckpointWriter &checkpoint_manager, TableCatalogEntry &table,
-	                          MetadataWriter &table_data_writer, MetadataWriter &stats_writer);
+	                          MetadataWriter &table_data_writer, MetadataWriter &row_group_pointer_writer);
 
 public:
 	void WriteUnchangedTable(MetaBlockPointer pointer, const vector<MetaBlockPointer> &metadata_pointers,
@@ -131,8 +131,8 @@ private:
 	SingleFileCheckpointWriter &checkpoint_manager;
 	//! Writes the actual table data
 	MetadataWriter &table_data_writer;
-	//! Writes the table statistics and row group pointers, which loading the database reads
-	MetadataWriter &stats_writer;
+	//! Writes what the table pointer points to: the table statistics, then the row group pointers
+	MetadataWriter &row_group_pointer_writer;
 	//! The root pointer, if we are re-using metadata of the table
 	MetaBlockPointer existing_pointer;
 	optional_idx existing_rows;
