@@ -1,0 +1,216 @@
+# name: test/sql/storage/alter_drop_column_shared_metadata_reuse.test
+# description: Metadata reuse around a hidden column: unchanged columns are not loaded, freed blocks are reused
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_drop_column_shared_metadata_reuse.db readwrite latest
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE t AS SELECT i, repeat(md5(i::VARCHAR), 8) AS s, i * 2 AS x, i % 7 AS y FROM range(60000) t(i)
+
+statement ok
+CREATE TABLE u (s VARCHAR)
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CHECKPOINT
+
+# an older snapshot that reads the column, so it stays loaded through a concurrent checkpoint
+statement ok con1
+BEGIN
+
+query I con1
+SELECT COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 8)) FROM t
+----
+60000
+
+statement ok
+ALTER TABLE t DROP COLUMN s
+
+statement ok
+CHECKPOINT
+
+query I con1
+SELECT COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 8)) FROM t
+----
+60000
+
+statement ok con1
+COMMIT
+
+# non-concurrent checkpoints of row groups that are otherwise unchanged: they still give up the loaded column
+# (a WAL write first: a checkpoint of an empty WAL does nothing)
+statement ok
+INSERT INTO tick VALUES (1)
+
+statement ok
+CHECKPOINT
+
+statement ok
+INSERT INTO tick VALUES (2)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE size_before AS SELECT total_blocks FROM pragma_database_size()
+
+# about as much data as the dropped column had: its freed blocks are reused
+statement ok
+INSERT INTO u SELECT repeat(md5((i + 1000000)::VARCHAR), 8) FROM range(60000) t(i)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT CASE WHEN current.total_blocks <= size_before.total_blocks + 10 THEN NULL ELSE {'current': current.total_blocks, 'before': size_before.total_blocks} END
+FROM pragma_database_size() AS current, size_before
+----
+NULL
+
+query III
+SELECT COUNT(*), SUM(x), SUM(y) FROM t
+----
+60000	3599940000	179994
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+# a DROP of a middle column, then an UPDATE of a column after it: only that column is loaded and written
+statement ok
+CREATE TABLE w AS SELECT i AS c0, i AS c1, i AS c2, i AS c3, i AS c4 FROM range(200000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+# block verification would load every column
+statement ok
+SET debug_verify_blocks=false
+
+statement ok
+ALTER TABLE w DROP COLUMN c1
+
+statement ok
+UPDATE w SET c4 = c4 + 1 WHERE c4 < 100
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT DISTINCT column_name FROM pragma_storage_info('w', loaded_segments_only=true)
+----
+c4
+
+query IIII
+SELECT SUM(c0), SUM(c2), SUM(c3), SUM(c4) FROM w
+----
+19999900000	19999900000	19999900000	19999900100
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+UPDATE w SET c3 = c3 + 1 WHERE c3 < 10
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT SUM(c0), SUM(c2), SUM(c3), SUM(c4) FROM w
+----
+19999900000	19999900000	19999900010	19999900100
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE table_name = 'w' ORDER BY column_index
+----
+c0
+c2
+c3
+c4
+
+# columns whose metadata spans several metadata blocks, dropped in the middle: the reused columns' blocks are
+# keyed by their order on disk
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+ATTACH '{TEST_DIR}/alter_drop_column_shared_metadata_reuse_small.db' AS b (BLOCK_SIZE 16384, STORAGE_VERSION 'latest')
+
+statement ok
+CREATE TABLE b.w AS SELECT i AS c0, md5(i::VARCHAR) || repeat('x', 200) AS c1, md5(i::VARCHAR) || repeat('y', 200) AS c2, md5(i::VARCHAR) || repeat('z', 200) AS c3, i AS c4 FROM range(20000) t(i)
+
+statement ok
+CHECKPOINT b
+
+statement ok
+DETACH b
+
+statement ok
+ATTACH '{TEST_DIR}/alter_drop_column_shared_metadata_reuse_small.db' AS b
+
+statement ok
+ALTER TABLE b.w DROP COLUMN c1
+
+statement ok
+UPDATE b.w SET c4 = c4 + 1 WHERE c4 < 100
+
+statement ok
+CHECKPOINT b
+
+statement ok
+UPDATE b.w SET c0 = c0 + 1 WHERE c0 < 10
+
+statement ok
+CHECKPOINT b
+
+statement ok
+DETACH b
+
+statement ok
+ATTACH '{TEST_DIR}/alter_drop_column_shared_metadata_reuse_small.db' AS b
+
+statement ok
+CREATE TEMP TABLE ref AS SELECT i AS c0, md5(i::VARCHAR) || repeat('y', 200) AS c2, md5(i::VARCHAR) || repeat('z', 200) AS c3, i AS c4 FROM range(20000) t(i)
+
+statement ok
+UPDATE ref SET c4 = c4 + 1 WHERE c4 < 100
+
+statement ok
+UPDATE ref SET c0 = c0 + 1 WHERE c0 < 10
+
+query II
+SELECT (SELECT COUNT(*) FROM (SELECT * FROM b.w EXCEPT ALL SELECT * FROM ref)), (SELECT COUNT(*) FROM (SELECT * FROM ref EXCEPT ALL SELECT * FROM b.w))
+----
+0	0
+
+statement ok
+UPDATE b.w SET c2 = 'changed' WHERE c4 = 5000
+
+statement ok
+CHECKPOINT b
+
+query I
+SELECT COUNT(*) FROM b.w WHERE c2 = 'changed'
+----
+1

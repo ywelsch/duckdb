@@ -307,6 +307,8 @@ private:
 	atomic<const vector<LogicalType> *> current_types;
 	//! The constant of each shared column, to fill it for row groups a running checkpoint merged
 	unordered_map<idx_t, Value> shared_column_constants;
+	//! The positions of the columns the table's metadata on disk has, in order
+	vector<idx_t> image_columns;
 	//! Lock held when accessing or modifying the owned_row_groups pointer
 	mutable mutex row_group_pointer_lock;
 	//! The owning pointer of the segment tree

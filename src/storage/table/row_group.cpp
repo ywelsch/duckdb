@@ -1698,6 +1698,10 @@ PerColumnMetadataBlocks RowGroup::ComputePerColumnMetadataBlocks() const {
 
 	for (idx_t i = 0; i < column_pointers.size(); i++) {
 		auto &start = column_pointers[i];
+		if (!start.IsValid()) {
+			// not in the image: added since, or hidden and freed
+			continue;
+		}
 		vector<MetaBlockPointer> col_read_pointers;
 		MetadataReader col_reader(metadata_manager, start, &col_read_pointers);
 		ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), i, col_reader, types[i]);
@@ -1714,6 +1718,14 @@ PerColumnMetadataBlocks RowGroup::ComputePerColumnMetadataBlocks() const {
 
 const vector<MetaBlockPointer> &RowGroup::GetColumnStartPointers() const {
 	return column_pointers;
+}
+
+vector<MetaBlockPointer> RowGroup::GetColumnStartPointers(const vector<idx_t> &columns) const {
+	vector<MetaBlockPointer> result;
+	for (auto &position : columns) {
+		result.push_back(column_pointers[position]);
+	}
+	return result;
 }
 
 vector<MetaBlockPointer> RowGroup::GetExtraMetadataBlockPointers() const {
@@ -1771,15 +1783,33 @@ struct ImageBlockDropper : public BlockIdVisitor {
 	BlockManager &manager;
 };
 
-RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
-	// a version with hidden columns writes another column layout than the image has: nothing is reused
-	bool can_reuse_metadata = CanReuseMetadata(writer) && writer.WritesColumnPrefix();
-	bool all_columns_have_metadata = true;
-	for (auto &pointer : column_pointers) {
-		// a column added since the last checkpoint has none
-		all_columns_have_metadata = all_columns_have_metadata && pointer.IsValid();
+bool RowGroup::ImageHasWrittenColumns(RowGroupWriter &writer) const {
+	// the image has the columns with a metadata pointer
+	auto &written_columns = writer.GetWrittenColumns();
+	vector<bool> is_written(GetColumnCount(), false);
+	for (auto &position : written_columns) {
+		is_written[position] = true;
 	}
-	if (can_reuse_metadata && all_columns_have_metadata &&
+	for (idx_t c = 0; c < GetColumnCount(); c++) {
+		bool in_image = c < column_pointers.size() && column_pointers[c].IsValid();
+		if (in_image != is_written[c]) {
+			return false;
+		}
+	}
+	// a non-concurrent checkpoint rebuilds a row group that still has data in a hidden column
+	if (writer.GetCheckpointOptions().type != CheckpointType::CONCURRENT_CHECKPOINT) {
+		for (idx_t c = 0; c < writer.GetVersionColumnCount(); c++) {
+			if (!is_written[c] && ColumnIsLoaded(c) && !columns[c]->IsHiddenPlaceholder()) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
+	bool can_reuse_metadata = CanReuseMetadata(writer);
+	if (can_reuse_metadata && ImageHasWrittenColumns(writer) &&
 	    !HasChanges(writer.GetCheckpointOptions().visibility_bound)) {
 		RowGroupWriteData result;
 		result.write_action = RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA;
@@ -1953,6 +1983,46 @@ void IncrementSegmentStart(PersistentColumnData &data, idx_t start_increment) {
 	}
 }
 
+//! In memory, the per-column metadata blocks are keyed by the position in the row group; on disk by the order of
+//! the written columns. Columns that are not written are left out
+static PerColumnMetadataBlocks RemapColumns(const PerColumnMetadataBlocks &blocks,
+                                            const vector<optional_idx> &key_map) {
+	PerColumnMetadataBlocks result;
+	bool keep = false;
+	for (auto &entry : blocks.data) {
+		if (entry.is_column_index) {
+			keep = entry.index < key_map.size() && key_map[entry.index].IsValid();
+			if (keep) {
+				PerColumnMetadataBlock marker;
+				marker.is_column_index = true;
+				marker.index = key_map[entry.index].GetIndex();
+				result.data.push_back(marker);
+			}
+		} else if (keep) {
+			result.data.push_back(entry);
+		}
+	}
+	return result;
+}
+
+PerColumnMetadataBlocks RowGroup::ToWrittenOrder(const PerColumnMetadataBlocks &blocks,
+                                                 const vector<idx_t> &written_columns) const {
+	vector<optional_idx> key_map(GetColumnCount());
+	for (idx_t i = 0; i < written_columns.size(); i++) {
+		key_map[written_columns[i]] = i;
+	}
+	return RemapColumns(blocks, key_map);
+}
+
+PerColumnMetadataBlocks RowGroup::FromWrittenOrder(const PerColumnMetadataBlocks &blocks,
+                                                   const vector<idx_t> &written_columns) {
+	vector<optional_idx> key_map;
+	for (auto &position : written_columns) {
+		key_map.emplace_back(position);
+	}
+	return RemapColumns(blocks, key_map);
+}
+
 RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWriter &writer,
                                      TableStatistics &global_stats, idx_t row_group_start) {
 	RowGroupPointer row_group_pointer;
@@ -1961,14 +2031,16 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 	// construct the row group pointer and write the column meta data to disk
 	row_group_pointer.row_start = row_group_start;
 	row_group_pointer.tuple_count = count;
+	auto &written_columns = writer.GetWrittenColumns();
 	if (write_data.write_action == RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA) {
-		// we are re-using the previous metadata
-		D_ASSERT(writer.GetCompressionTypes().size() == GetColumnCount());
-		row_group_pointer.data_pointers = column_pointers;
+		// we are re-using the previous metadata: the image has exactly the written columns
+		for (auto &position : written_columns) {
+			row_group_pointer.data_pointers.push_back(column_pointers[position]);
+		}
 		row_group_pointer.has_metadata_blocks = has_metadata_blocks;
 		row_group_pointer.extra_metadata_blocks = extra_metadata_blocks;
 		row_group_pointer.has_per_column_metadata_blocks = has_per_column_metadata_blocks;
-		row_group_pointer.per_column_metadata_blocks = per_column_metadata_blocks;
+		row_group_pointer.per_column_metadata_blocks = ToWrittenOrder(per_column_metadata_blocks, written_columns);
 		if (metadata_manager) {
 			row_group_pointer.deletes_pointers = CheckpointDeletes(writer);
 
@@ -1982,24 +2054,24 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 					metadata_block_pointers_to_be_cleared.emplace_back(block_pointer, 0);
 				}
 			}
-			metadata_manager->ClearModifiedBlocks(column_pointers);
+			metadata_manager->ClearModifiedBlocks(row_group_pointer.data_pointers);
 			metadata_manager->ClearModifiedBlocks(metadata_block_pointers_to_be_cleared);
 		}
 		// merge row group stats into the global stats
 		auto lock = global_stats.GetLock();
-		for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
-			if (!ColumnIsLoaded(column_idx) && collection.get().GetTypes()[column_idx].id() != LogicalTypeId::VARIANT) {
+		for (idx_t column_idx = 0; column_idx < written_columns.size(); column_idx++) {
+			auto position = written_columns[column_idx];
+			if (!ColumnIsLoaded(position) && collection.get().GetTypes()[position].id() != LogicalTypeId::VARIANT) {
 				// column is not loaded from disk - don't load just to update stats
 				writer.SetHasUnloadedColumn(column_idx);
 				continue;
 			}
-			GetColumn(column_idx).MergeIntoStatistics(global_stats.GetStats(*lock, column_idx).Statistics());
+			GetColumn(position).MergeIntoStatistics(global_stats.GetStats(*lock, column_idx).Statistics());
 		}
 		return row_group_pointer;
 	}
 	// write path: write column metadata to disk (with optional per-column reuse)
 	// the columns of the table version being written, at their positions in the row group
-	auto &written_columns = writer.GetWrittenColumns();
 	auto write_count = write_data.states.size();
 	D_ASSERT(write_count == written_columns.size() && write_count <= GetColumnCount());
 
@@ -2084,8 +2156,8 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 		if (write_data.write_action == RowGroupWriteAction::PARTIALLY_REUSE_COLUMN_METADATA) {
 			// merge reused-column extras (on this) with newly-written-column extras
 			D_ASSERT(has_per_column_metadata_blocks);
-			row_group_pointer.per_column_metadata_blocks =
-			    PerColumnMetadataBlocks::Merge(per_column_metadata_blocks, written_column_blocks);
+			row_group_pointer.per_column_metadata_blocks = PerColumnMetadataBlocks::Merge(
+			    ToWrittenOrder(per_column_metadata_blocks, written_columns), written_column_blocks);
 
 			// reused column blocks must be preserved by ClearModifiedBlocks
 			per_column_metadata_blocks.ForEachBlock(
@@ -2121,7 +2193,7 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 	has_metadata_blocks = row_group_pointer.has_metadata_blocks;
 	extra_metadata_blocks = row_group_pointer.extra_metadata_blocks;
 	has_per_column_metadata_blocks = row_group_pointer.has_per_column_metadata_blocks;
-	per_column_metadata_blocks = row_group_pointer.per_column_metadata_blocks;
+	per_column_metadata_blocks = FromWrittenOrder(row_group_pointer.per_column_metadata_blocks, written_columns);
 
 	Verify();
 	return row_group_pointer;

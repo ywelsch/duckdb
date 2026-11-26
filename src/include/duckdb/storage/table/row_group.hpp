@@ -163,6 +163,8 @@ public:
 	PerColumnMetadataBlocks ComputePerColumnMetadataBlocks() const;
 
 	const vector<MetaBlockPointer> &GetColumnStartPointers() const;
+	//! The start pointers of the given columns, in order
+	vector<MetaBlockPointer> GetColumnStartPointers(const vector<idx_t> &columns) const;
 
 	vector<MetaBlockPointer> GetExtraMetadataBlockPointers() const;
 
@@ -347,6 +349,14 @@ private:
 	void UnloadColumn(storage_t c);
 	//! Reads a column from disk without keeping it loaded
 	shared_ptr<ColumnData> ReadColumn(storage_t c) const;
+	//! Whether the image has exactly the columns the writer writes, so the row group's metadata can be reused
+	bool ImageHasWrittenColumns(RowGroupWriter &writer) const;
+	//! Keys per-column metadata blocks by the order of the written columns instead of the position
+	PerColumnMetadataBlocks ToWrittenOrder(const PerColumnMetadataBlocks &blocks,
+	                                       const vector<idx_t> &written_columns) const;
+	//! Keys per-column metadata blocks by the position instead of the order of the written columns
+	static PerColumnMetadataBlocks FromWrittenOrder(const PerColumnMetadataBlocks &blocks,
+	                                                const vector<idx_t> &written_columns);
 	bool HasUnchangedColumns() const;
 	static shared_ptr<ColumnData> CheckpointColumn(const RowGroup &row_group, idx_t column_idx, RowGroupWriteInfo &info,
 	                                               RowGroupWriteData &write_data);

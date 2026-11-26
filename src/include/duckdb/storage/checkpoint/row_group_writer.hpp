@@ -34,8 +34,6 @@ public:
 	const vector<idx_t> &GetWrittenColumns() const {
 		return written_columns;
 	}
-	//! Whether the written version hides no column: it writes the first columns of the row groups
-	bool WritesColumnPrefix() const;
 	//! The number of columns of the row groups the written version has, including those it hid
 	idx_t GetVersionColumnCount() const {
 		return version_column_count;

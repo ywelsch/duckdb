@@ -231,6 +231,10 @@ void RowGroupCollection::Initialize(PersistentTableData &data) {
 	D_ASSERT(this->next_row_id >= this->total_rows);
 	metadata_pointer = data.base_table_pointer;
 	metadata_pointers = data.read_metadata_pointers;
+	image_columns.clear();
+	for (idx_t c = 0; c < GetTypes().size(); c++) {
+		image_columns.push_back(c);
+	}
 	owned_row_groups->Initialize(data, metadata_pointers);
 	stats.Initialize(GetTypes(), data);
 }
@@ -1192,8 +1196,8 @@ struct CollectionCheckpointState {
 	RowGroupSegmentTree &row_groups;
 	//! The column types of the row groups being checkpointed
 	vector<LogicalType> types;
-	//! Whether the version being checkpointed has the first columns of the row groups, none hidden
-	bool writes_column_prefix = true;
+	//! The positions of the columns of the version being checkpointed
+	vector<idx_t> written_columns;
 	//! For each column of the row groups, whether the version being checkpointed hid it
 	vector<bool> hidden_columns;
 
@@ -1275,10 +1279,28 @@ private:
 //! TableIndexList::InitializeIndexChunk, followed by the old and new rowid.
 class VacuumIndexRemapper {
 public:
-	VacuumIndexRemapper(const vector<shared_ptr<IndexEntry>> &entries, RowGroupCollection &collection)
-	    : index_entries(entries), table_types(collection.GetTypes()) {
+	//! version_columns are the positions of the columns of the table version, whose columns the indexes are bound
+	//! to; scanned_columns are the positions the merge scans (all but the ones the version hid)
+	VacuumIndexRemapper(const vector<shared_ptr<IndexEntry>> &entries, RowGroupCollection &collection,
+	                    const vector<LogicalType> &row_group_types, const vector<idx_t> &version_columns,
+	                    const vector<StorageIndex> &scanned_columns)
+	    : index_entries(entries) {
+		for (auto &position : version_columns) {
+			table_types.push_back(row_group_types[position]);
+		}
 		DataChunk index_chunk;
 		TableIndexList::InitializeIndexChunk(index_chunk, table_types, mapped_column_ids, collection.GetTableInfo());
+		// the slot of each indexed column in the scan chunk
+		for (auto &column : mapped_column_ids) {
+			auto position = version_columns[column.GetPrimaryIndex()];
+			for (idx_t slot = 0; slot < scanned_columns.size(); slot++) {
+				if (scanned_columns[slot].GetPrimaryIndex() == position) {
+					scan_slots.push_back(slot);
+					break;
+				}
+			}
+		}
+		D_ASSERT(scan_slots.size() == mapped_column_ids.size());
 		old_rowid_idx = mapped_column_ids.size();
 		new_rowid_idx = old_rowid_idx + 1;
 
@@ -1289,24 +1311,25 @@ public:
 		    make_uniq<ColumnDataCollection>(BufferManager::GetBufferManager(collection.GetAttached()), buffer_types);
 		buffer->InitializeAppend(buffer_append_state);
 		buffer_chunk.InitializeEmpty(buffer_types);
-		for (idx_t c = 0; c < table_types.size(); c++) {
-			table_column_ids.emplace_back(c);
+		for (idx_t slot = 0; slot < scanned_columns.size(); slot++) {
+			scan_types.push_back(row_group_types[scanned_columns[slot].GetPrimaryIndex()]);
+			scanned_column_ids.emplace_back(slot);
 		}
-		append_chunk.InitializeEmpty(table_types);
+		append_chunk.InitializeEmpty(scan_types);
 	}
 
-	//! Initialize the merge scan chunk with the table columns plus a trailing rowid column.
+	//! Initialize the merge scan chunk with the scanned columns plus a trailing rowid column.
 	void InitializeMergeScan(DataChunk &scan_chunk, vector<StorageIndex> &column_ids) const {
 		column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
-		auto scan_types = table_types;
-		scan_types.push_back(LogicalType::ROW_TYPE);
-		scan_chunk.Initialize(Allocator::DefaultAllocator(), scan_types);
+		auto types = scan_types;
+		types.push_back(LogicalType::ROW_TYPE);
+		scan_chunk.Initialize(Allocator::DefaultAllocator(), types);
 	}
 
-	//! Buffer the chunk's shifted rows and return the table columns to append (stripping the rowid column).
+	//! Buffer the chunk's shifted rows and return the scanned columns to append (stripping the rowid column).
 	DataChunk &ProcessScanChunk(DataChunk &scan_chunk, idx_t new_rowid_start) {
 		BufferShiftedRows(scan_chunk, new_rowid_start);
-		append_chunk.ReferenceColumns(scan_chunk, table_column_ids);
+		append_chunk.ReferenceColumns(scan_chunk, scanned_column_ids);
 		return append_chunk;
 	}
 
@@ -1341,7 +1364,7 @@ public:
 private:
 	void BufferShiftedRows(DataChunk &scan_chunk, idx_t new_rowid_start) {
 		const auto count = scan_chunk.size();
-		const auto rowid_column_index = table_types.size();
+		const auto rowid_column_index = scan_types.size();
 
 		SelectionVector shifted_sel(STANDARD_VECTOR_SIZE);
 		idx_t shifted_count = 0;
@@ -1360,7 +1383,9 @@ private:
 		new_rowids.Sequence(UnsafeNumericCast<int64_t>(new_rowid_start), 1, count);
 
 		buffer_chunk.Reset();
-		TableIndexList::ReferenceIndexChunk(scan_chunk, buffer_chunk, mapped_column_ids);
+		for (idx_t i = 0; i < scan_slots.size(); i++) {
+			buffer_chunk.data[i].Reference(scan_chunk.data[scan_slots[i]]);
+		}
 		buffer_chunk.data[old_rowid_idx].Reference(scan_chunk.data[rowid_column_index]);
 		buffer_chunk.data[new_rowid_idx].Reference(new_rowids);
 		buffer_chunk.Slice(shifted_sel, shifted_count);
@@ -1370,9 +1395,14 @@ private:
 private:
 	//! The stable index entries selected for row ID remapping.
 	vector<shared_ptr<IndexEntry>> index_entries;
-	const vector<LogicalType> &table_types;
+	//! The types of the columns of the table version, which the indexes are bound to
+	vector<LogicalType> table_types;
+	//! The types of the scanned columns
+	vector<LogicalType> scan_types;
 	//! Buffer slot -> table column id for the indexed key columns.
 	vector<StorageIndex> mapped_column_ids;
+	//! Buffer slot -> scan chunk slot for the indexed key columns.
+	vector<idx_t> scan_slots;
 	//! Buffer column indexes of the old and new rowid.
 	idx_t old_rowid_idx;
 	idx_t new_rowid_idx;
@@ -1380,9 +1410,9 @@ private:
 	ColumnDataAppendState buffer_append_state;
 	//! Buffer-layout chunk used to append shifted rows.
 	DataChunk buffer_chunk;
-	//! The scan chunk's table columns (excludes the trailing rowid column).
-	vector<column_t> table_column_ids;
-	//! Table-column view of the scan chunk handed back to the merge append.
+	//! The scan chunk's scanned columns (excludes the trailing rowid column).
+	vector<column_t> scanned_column_ids;
+	//! View of the scanned columns of the scan chunk handed back to the merge append.
 	DataChunk append_chunk;
 };
 
@@ -1404,10 +1434,6 @@ public:
 		auto &collection = checkpoint_state.collection;
 		const idx_t row_group_size = collection.GetRowGroupSize();
 		auto &types = checkpoint_state.types;
-		unique_ptr<VacuumIndexRemapper> remapper;
-		if (vacuum_state.index_strategy == VacuumIndexStrategy::REMAP && !vacuum_state.remap_indexes.empty()) {
-			remapper = make_uniq<VacuumIndexRemapper>(vacuum_state.remap_indexes, collection);
-		}
 
 		// create the new set of target row groups (initially empty)
 		vector<unique_ptr<SegmentNode<RowGroup>>> new_row_groups;
@@ -1439,9 +1465,13 @@ public:
 			scan_types.push_back(types[c]);
 		}
 		bool has_hidden_columns = column_ids.size() != types.size();
+		unique_ptr<VacuumIndexRemapper> remapper;
+		if (vacuum_state.index_strategy == VacuumIndexStrategy::REMAP && !vacuum_state.remap_indexes.empty()) {
+			remapper = make_uniq<VacuumIndexRemapper>(vacuum_state.remap_indexes, collection, types,
+			                                          checkpoint_state.written_columns, column_ids);
+		}
 		DataChunk scan_chunk;
 		if (remapper) {
-			D_ASSERT(!has_hidden_columns);
 			remapper->InitializeMergeScan(scan_chunk, column_ids);
 		} else {
 			scan_chunk.Initialize(Allocator::DefaultAllocator(), scan_types);
@@ -1501,10 +1531,10 @@ public:
 					full_chunk.SetCardinalityUnsafe(chunk_count);
 				}
 				// Buffer shifted rows and strip the scanned rowid column before appending to the new row groups.
-				auto &append_chunk =
+				auto &scanned_chunk =
 				    remapper ? remapper->ProcessScanChunk(scan_chunk, row_start.GetIndex() + live_row_offset)
-				    : has_hidden_columns ? full_chunk
-				                         : scan_chunk;
+				             : scan_chunk;
+				auto &append_chunk = has_hidden_columns ? full_chunk : scanned_chunk;
 				idx_t remaining = append_chunk.size();
 				while (remaining > 0) {
 					auto &current_append_row_group = new_row_groups[current_append_idx]->GetNode();
@@ -1592,11 +1622,6 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	// Index state decides whether vacuum may change surviving rowids.
 	auto &attached = checkpoint_state.writer.GetAttached();
 	state.index_strategy = GetVacuumIndexStrategy(attached, &state.remap_indexes);
-	if (!checkpoint_state.writes_column_prefix && state.index_strategy == VacuumIndexStrategy::REMAP) {
-		// the remapper reads the row groups' columns, not those of a version with hidden columns
-		state.index_strategy = VacuumIndexStrategy::KEEP_ROW_IDS;
-		state.remap_indexes.clear();
-	}
 
 	// can_change_row_ids only answers whether index state allows changing row_ids.
 	state.can_change_row_ids = state.index_strategy != VacuumIndexStrategy::KEEP_ROW_IDS;
@@ -1861,13 +1886,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	}
 	CollectionCheckpointState checkpoint_state(*this, writer, global_stats, *row_groups, checkpointed_row_group_count);
 	checkpoint_state.types = snapshot.types;
-	// whether the version has no hidden columns: it writes the columns the image has
-	bool writes_column_prefix = written_columns.size() == version_column_count;
-	for (idx_t i = 0; i < written_columns.size(); i++) {
-		D_ASSERT(written_columns[i] < snapshot.types.size());
-		writes_column_prefix = writes_column_prefix && written_columns[i] == i;
-	}
-	checkpoint_state.writes_column_prefix = writes_column_prefix;
+	checkpoint_state.written_columns = written_columns;
 	checkpoint_state.hidden_columns.resize(version_column_count, true);
 	for (auto &position : written_columns) {
 		checkpoint_state.hidden_columns[position] = false;
@@ -1923,9 +1942,9 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 
 	// no errors - finalize the row groups
 	// if the table already exists on disk - check if all row groups have stayed the same
-	// a version with hidden columns writes another column layout than the image has
+	// the table's metadata can be reused if it has the columns this version writes
 	if (Settings::Get<ExperimentalMetadataReuseSetting>(writer.GetDatabase()) && metadata_pointer.IsValid() &&
-	    writes_column_prefix) {
+	    image_columns == written_columns) {
 		bool table_has_changes = false;
 		for (idx_t segment_idx = 0; segment_idx < checkpointed_row_group_count; segment_idx++) {
 			if (checkpoint_state.SegmentIsDropped(segment_idx)) {
@@ -1946,7 +1965,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 			for (idx_t segment_idx = 0; segment_idx < checkpointed_row_group_count; segment_idx++) {
 				auto entry = checkpoint_state.GetSegment(segment_idx);
 				auto &row_group = entry->GetNode();
-				metadata_manager.ClearModifiedBlocks(row_group.GetColumnStartPointers());
+				metadata_manager.ClearModifiedBlocks(row_group.GetColumnStartPointers(written_columns));
 				D_ASSERT(checkpoint_state.write_data[segment_idx].write_action ==
 				         RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA);
 				vector<MetaBlockPointer> extra_metadata_block_pointers = row_group.GetExtraMetadataBlockPointers();
@@ -2077,7 +2096,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 				throw InternalException("Partially reusing column metadata should only be done when supporting it");
 			}
 			if (write_action == RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA &&
-			    pointer_copy.data_pointers != row_group.GetColumnStartPointers()) {
+			    pointer_copy.data_pointers != row_group.GetColumnStartPointers(written_columns)) {
 				throw InternalException("Column start pointers changed during full metadata reuse");
 			}
 
@@ -2256,6 +2275,7 @@ CollectionCheckpointResult RowGroupCollection::Checkpoint(TableDataWriter &write
 	result.checkpointed_row_group_count = checkpointed_row_group_count;
 	result.column_count = snapshot.types.size();
 	result.written_columns = written_columns;
+	image_columns = written_columns;
 	result.live_indexes = std::move(live_indexes);
 	result.built = std::move(built);
 	return result;

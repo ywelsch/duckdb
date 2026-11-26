@@ -72,7 +72,52 @@ SELECT COUNT(*), SUM(a), SUM(c) FROM t
 399999	49999899995	450330899995
 
 statement ok
+CREATE TABLE row_groups_before AS SELECT COUNT(DISTINCT row_group_id) AS c FROM pragma_storage_info('t')
+
+statement ok
 CHECKPOINT
+
+# the vacuum merged row groups and moved rows: their index entries were remapped
+query I
+SELECT (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t')) < c FROM row_groups_before
+----
+true
+
+query II
+SELECT a, c FROM t WHERE c IN (2, 1000001, 299999, 2150000, 2199999) ORDER BY c
+----
+2	2
+299999	299999
+1	1000001
+150000	2150000
+199999	2199999
+
+statement error
+INSERT INTO t VALUES (8, 2150000, 1)
+----
+Duplicate key
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+query II
+SELECT a, c FROM t WHERE c IN (2, 1000001, 299999, 2150000, 2199999) ORDER BY c
+----
+2	2
+299999	299999
+1	1000001
+150000	2150000
+199999	2199999
+
+statement error
+INSERT INTO t VALUES (8, 299999, 1)
+----
+Duplicate key
 
 # writes after the checkpoint, replayed from the WAL, with an index created after the DROP COLUMN
 statement ok

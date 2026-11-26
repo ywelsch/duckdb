@@ -15,19 +15,6 @@ RowGroupWriter::RowGroupWriter(TableDataWriter &writer, TableCatalogEntry &table
 	}
 }
 
-bool RowGroupWriter::WritesColumnPrefix() const {
-	if (written_columns.size() != version_column_count) {
-		// a hidden column after the written ones
-		return false;
-	}
-	for (idx_t i = 0; i < written_columns.size(); i++) {
-		if (written_columns[i] != i) {
-			return false;
-		}
-	}
-	return true;
-}
-
 DatabaseInstance &RowGroupWriter::GetDatabase() {
 	return table.ParentCatalog().GetDatabase();
 }
