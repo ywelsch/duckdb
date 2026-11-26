@@ -14,7 +14,7 @@ statement ok
 CREATE TABLE tick (i BIGINT);
 
 # five row groups each, of which the last three keep a tenth of their rows once thinned
-foreach tbl held free deleted planned scanned
+foreach tbl held free deleted planned scanned selfref
 
 statement ok
 CREATE TABLE {tbl} (i BIGINT, s VARCHAR);
@@ -174,9 +174,6 @@ DELETE FROM scanned WHERE i = 450000 OR (i = 100 AND sleep_ms(4000) IS NULL)
 
 endloop
 
-statement ok
-SET debug_checkpoint_seal_sleep_ms=0
-
 query III
 SELECT COUNT(*), SUM(i), (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('scanned')) FROM scanned
 ----
@@ -187,9 +184,52 @@ SELECT COUNT(*) FROM scanned WHERE i IN (100, 450000)
 ----
 0
 
-# once nothing holds them, the row groups are merged
+statement ok
+SET debug_checkpoint_seal_sleep_ms=0
+
 statement ok
 INSERT INTO tick VALUES (2)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('scanned')
+----
+3
+
+# a delete that scans its table without row ids first (the subquery) and with row ids after the merge was due
+statement ok
+DELETE FROM selfref WHERE i >= 245760 AND i % 10 <> 0
+
+statement ok
+SET debug_checkpoint_seal_sleep_ms=3000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 500 millisecond
+
+onlyif threadid=1
+statement ok
+DELETE FROM selfref WHERE i = 450000 AND i IN (SELECT i FROM selfref WHERE i = 450000 OR (i = 100 AND sleep_ms(4000) IS NULL))
+
+endloop
+
+statement ok
+SET debug_checkpoint_seal_sleep_ms=0
+
+query III
+SELECT COUNT(*), SUM(i), (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('selfref')) FROM selfref
+----
+282623	46052700720	5
+
+# once nothing holds them, the row groups are merged
+statement ok
+INSERT INTO tick VALUES (3)
 
 statement ok
 CHECKPOINT
