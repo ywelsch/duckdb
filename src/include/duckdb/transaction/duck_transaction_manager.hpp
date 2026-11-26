@@ -137,9 +137,26 @@ private:
 
 	bool CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction,
 	                               optional_ptr<const InterruptState> interrupt_state, ErrorData &result);
-	//! Finish a parked commit; without an interrupt state, or with no sync running, sync on this thread
-	bool FinishParkedCommit(DuckTransaction &transaction, optional_ptr<const InterruptState> interrupt_state,
-	                        ErrorData &error);
+	//! The automatic checkpoint a commit decided on, carried to the end of the commit
+	struct CommitCheckpoint {
+		explicit CommitCheckpoint(CheckpointDecision decision_p) : decision(std::move(decision_p)) {
+		}
+		CheckpointDecision decision;
+		unique_ptr<StorageLockKey> lock;
+		//! The commit had updates or dropped entries, which snapshots bounded below it may still need
+		bool needs_pre_commit_state = false;
+		//! Held through a checkpoint that replaces the commit's WAL write
+		optional_ptr<unique_lock<mutex>> commit_lock;
+		//! A failed checkpoint is reported apart from a commit that reached the WAL
+		bool wal_written = false;
+		//! Decided when the commit finishes, as it gave up its decision when it parked
+		bool decide_on_finish = false;
+	};
+	//! The end of a commit, with the transaction lock held: park while another thread syncs, or sync, then leave the
+	//! active transactions and run the automatic checkpoint. Returns false while parked
+	bool FinishCommit(ClientContext &context, DuckTransaction &transaction, unique_lock<mutex> &t_lock,
+	                  optional_ptr<const InterruptState> interrupt_state, bool store_transaction,
+	                  CommitCheckpoint &checkpoint, ErrorData &error);
 	//! Sync as one of the running syncs, wake parked commits and remove committer; releases the caller's lock
 	ErrorData SyncCommits(unique_lock<mutex> &t_lock, WriteAheadLog &wal, idx_t offset,
 	                      optional_ptr<DuckTransaction> committer, bool store_committer);

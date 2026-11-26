@@ -64,8 +64,7 @@ private:
 };
 
 struct GatedDatabase {
-	explicit GatedDatabase(const string &name) {
-		auto path = TestCreatePath(name);
+	explicit GatedDatabase(const string &name) : path(TestCreatePath(name)) {
 		DeleteDatabase(path);
 		auto fs = make_uniq<GatedFsyncFileSystem>();
 		gate = fs.get();
@@ -101,6 +100,7 @@ struct GatedDatabase {
 		return !writer_failed;
 	}
 
+	string path;
 	unique_ptr<DuckDB> db;
 	GatedFsyncFileSystem *gate;
 	unique_ptr<Connection> holder;
@@ -314,4 +314,28 @@ TEST_CASE("A parked COMMIT resumes the commit of the remaining databases", "[api
 	// the temp database committed after the resume
 	REQUIRE(ScalarValue(committer, "SELECT i FROM tt") == 7);
 	REQUIRE(ScalarValue(committer, "SELECT count(*) FROM other.o") == 1);
+}
+
+TEST_CASE("A parked COMMIT runs the automatic checkpoint it gave up", "[api][group_commit]") {
+	GatedDatabase gated("group_commit_parked_autocheckpoint.db");
+	Connection setup(*gated.db);
+	Setup(setup);
+
+	Connection committer(*gated.db);
+	REQUIRE_NO_FAIL(committer.Query("BEGIN"));
+	REQUIRE_NO_FAIL(committer.Query("INSERT INTO t VALUES (1000)"));
+
+	gated.StartWriter("INSERT INTO t SELECT * FROM range(10000)");
+	auto commit = SubmitParkedCommit(committer);
+	// past the threshold only now: neither commit decided on a checkpoint when it started
+	REQUIRE_NO_FAIL(setup.Query("SET checkpoint_threshold='1KB'"));
+
+	REQUIRE(gated.FinishWriter());
+	auto &fs = FileSystem::GetFileSystem(*gated.db->instance);
+	REQUIRE(fs.FileExists(gated.path + ".wal"));
+	commit->Complete();
+	REQUIRE_NO_FAIL(*commit);
+	// the resumed commit checkpointed, which removes the WAL
+	REQUIRE(!fs.FileExists(gated.path + ".wal"));
+	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 10001);
 }
