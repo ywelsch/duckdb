@@ -1,7 +1,7 @@
 #include "duckdb/function/table/range.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/storage_manager.hpp"
-#include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/function/function_set.hpp"
@@ -61,6 +61,14 @@ static void TemplatedCheckpointFunction(ClientContext &context, TableFunctionInp
 	transaction_manager.Checkpoint(context, FORCE);
 }
 
+static void SyncWALFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->Cast<CheckpointBindData>();
+	auto &transaction_manager = TransactionManager::Get(*bind_data.db);
+	if (transaction_manager.IsDuckTransactionManager()) {
+		transaction_manager.Cast<DuckTransactionManager>().SyncDeferredCommits();
+	}
+}
+
 void CheckpointFunction::RegisterFunction(BuiltinFunctions &set) {
 	// a checkpoint is a side effect per execution
 	TableFunctionSet checkpoint("checkpoint");
@@ -77,6 +85,14 @@ void CheckpointFunction::RegisterFunction(BuiltinFunctions &set) {
 	force_checkpoint.ApplyToFunctions(
 	    [](TableFunction &function) { function.stability = FunctionStability::VOLATILE; });
 	set.AddFunction(force_checkpoint);
+
+	// makes the commits that deferred their sync (defer_commit_sync) durable and visible
+	TableFunctionSet sync_wal("sync_wal");
+	sync_wal.AddFunction(TableFunction({}, SyncWALFunction, CheckpointBind));
+	sync_wal.AddFunction(TableFunction(FunctionSignature().AddPositionalOnly("database", LogicalType::VARCHAR),
+	                                   SyncWALFunction, CheckpointBind));
+	sync_wal.ApplyToFunctions([](TableFunction &function) { function.stability = FunctionStability::VOLATILE; });
+	set.AddFunction(sync_wal);
 }
 
 } // namespace duckdb

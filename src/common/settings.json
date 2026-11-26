@@ -755,6 +755,13 @@
         "default_value": "ALL_ERRORS_INVALIDATE_TRANSACTION"
     },
     {
+        "name": "defer_commit_sync",
+        "description": "Whether a commit returns without syncing the WAL. The commit stays invisible to new transactions until sync_wal(), a checkpoint, or another commit's sync makes it durable.",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
+    },
+    {
         "name": "delim_join_as_cte",
         "description": "Rewrite delim joins to materialized CTEs during dependent join flattening.",
         "type": "BOOLEAN",

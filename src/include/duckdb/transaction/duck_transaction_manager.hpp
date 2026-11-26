@@ -18,6 +18,7 @@
 namespace duckdb {
 class DuckTransactionManager;
 class DuckTransaction;
+class WriteAheadLog;
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -59,6 +60,8 @@ public:
 	//! Wait until every published commit is durable. Called under the commit lock, so no new commit can
 	//! enter its sync window and the wait is bounded by the syncs in flight
 	void WaitForDurability();
+	//! Make the deferred commits durable (defer_commit_sync); throws if the WAL cannot be synced
+	void SyncDeferredCommits();
 	optional_idx GetActiveCheckpoint() const {
 		auto id = active_checkpoint.load();
 		return id == 0 ? optional_idx() : optional_idx(id);
@@ -133,6 +136,10 @@ private:
 
 	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
 	bool HasUnsyncedCommits();
+	//! Sync for the deferred commits that are not durable; false if there are none. Holds the lock again on return
+	bool SyncDeferredCommitsLocked(unique_lock<mutex> &t_lock, ErrorData &error);
+	//! A sync up to the offset ended: advance the durable bound and remove the deferred commits it covered
+	void CompleteSync(WriteAheadLog &wal, idx_t offset, const ErrorData &sync_error);
 	struct DurableSnapshot {
 		//! Every commit before this bound is durable
 		VisibilityBound visibility_bound = VisibilityBound::IncludingUncommitted();
@@ -175,6 +182,11 @@ private:
 	VisibilityBound durable_bound;
 	//! Signalled (under transaction_lock) when no active transaction awaits its WAL sync
 	std::condition_variable durability_cv;
+	//! Threads syncing the WAL for deferred commits
+	idx_t deferred_syncs = 0;
+	//! A commit below this bound that is not durable never will be: its WAL failed to sync with sync_failure
+	VisibilityBound failed_bound;
+	ErrorData sync_failure;
 
 	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START};
 	idx_t last_committed_version = 0;

@@ -1350,6 +1350,20 @@ struct DefaultTransactionInvalidationPolicySetting {
 	static void OnSet(SettingCallbackInfo &info, Value &input);
 };
 
+struct DeferCommitSyncSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "defer_commit_sync";
+	static constexpr const char *Description =
+	    "Whether a commit returns without syncing the WAL. The commit stays invisible to new transactions until "
+	    "sync_wal(), a checkpoint, or another commit's sync makes it durable.";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr bool IsDebug = false;
+	static constexpr bool IsDeprecated = false;
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct DelimJoinAsCteSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "delim_join_as_cte";

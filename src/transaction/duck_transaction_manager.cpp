@@ -231,6 +231,8 @@ void DuckTransactionManager::Checkpoint(ClientContext &context, bool force) {
 			}
 		}
 	}
+	// a deferred commit holds its shared checkpoint lock until a sync removes it
+	SyncDeferredCommits();
 
 	unique_ptr<StorageLockKey> lock;
 	if (!force) {
@@ -288,7 +290,7 @@ transaction_t DuckTransactionManager::GetCommitTimestamp() {
 
 bool DuckTransactionManager::HasUnsyncedCommits() {
 	for (auto &active_transaction : active_transactions) {
-		if (active_transaction->wal_sync_offset != 0) {
+		if (active_transaction->wal_sync_offset != 0 && !active_transaction->sync_deferred) {
 			return true;
 		}
 	}
@@ -318,7 +320,85 @@ DuckTransactionManager::DurableSnapshot DuckTransactionManager::GetDurableSnapsh
 
 void DuckTransactionManager::WaitForDurability() {
 	unique_lock<mutex> guard(transaction_lock);
-	durability_cv.wait(guard, [&]() { return !HasUnsyncedCommits(); });
+	while (true) {
+		durability_cv.wait(guard, [&]() { return !HasUnsyncedCommits() && deferred_syncs == 0; });
+		// nobody waits for a deferred commit: sync it here
+		ErrorData error;
+		if (!SyncDeferredCommitsLocked(guard, error)) {
+			return;
+		}
+	}
+}
+
+void DuckTransactionManager::SyncDeferredCommits() {
+	unique_lock<mutex> t_lock(transaction_lock);
+	ErrorData error;
+	SyncDeferredCommitsLocked(t_lock, error);
+	if (!error.HasError()) {
+		// a WAL that failed to sync is never synced again
+		error = sync_failure;
+	}
+	t_lock.unlock();
+	if (error.HasError()) {
+		error.Throw();
+	}
+}
+
+bool DuckTransactionManager::SyncDeferredCommitsLocked(unique_lock<mutex> &t_lock, ErrorData &error) {
+	idx_t offset = 0;
+	for (auto &active_transaction : active_transactions) {
+		if (active_transaction->sync_deferred && active_transaction->commit_id >= durable_bound &&
+		    active_transaction->commit_id >= failed_bound) {
+			offset = MaxValue(offset, active_transaction->wal_sync_offset);
+		}
+	}
+	if (offset == 0) {
+		return false;
+	}
+	// not replaced while a deferred commit is not durable: the drain syncs it first
+	auto &wal = *db.GetStorageManager().GetWAL();
+	deferred_syncs++;
+	t_lock.unlock();
+	try {
+		wal.SyncUpTo(offset);
+	} catch (std::exception &ex) {
+		error = ErrorData(ex);
+		db.Invalidate("syncing the WAL after a commit failed", error.RawMessage());
+	}
+	t_lock.lock();
+	deferred_syncs--;
+	CompleteSync(wal, offset, error);
+	if (!HasUnsyncedCommits() && deferred_syncs == 0) {
+		durability_cv.notify_all();
+	}
+	return true;
+}
+
+void DuckTransactionManager::CompleteSync(WriteAheadLog &wal, idx_t offset, const ErrorData &sync_error) {
+	// after a failure, earlier syncs may still have covered more than their own offsets
+	auto covered_offset = sync_error.HasError() ? wal.GetDurableOffset() : offset;
+	vector<reference<DuckTransaction>> covered_deferred;
+	for (auto &active_transaction : active_transactions) {
+		if (active_transaction->wal_sync_offset == 0 || active_transaction->wal_sync_offset > covered_offset) {
+			continue;
+		}
+		if (active_transaction->commit_id >= durable_bound) {
+			// advance the durable bound over every commit the sync covered
+			durable_bound = VisibilityBound::Through(active_transaction->commit_id);
+		}
+		if (active_transaction->sync_deferred) {
+			covered_deferred.push_back(*active_transaction);
+		}
+	}
+	if (sync_error.HasError()) {
+		// the WAL is never synced again: the commits published to it that are not durable now never will be
+		failed_bound = VisibilityBound::Through(last_commit);
+		sync_failure = sync_error;
+	}
+	// nobody waits for a deferred commit: the sync that covers it removes it
+	for (auto &transaction : covered_deferred) {
+		QueueCleanup(RemoveTransaction(transaction, transaction.get().store_after_commit, CreateCleanupInfo()));
+	}
 }
 
 void DuckTransactionManager::CleanupTransactions() {
@@ -439,6 +519,8 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	// obtain a commit id for the transaction
 	CommitInfo info;
 	info.commit_id = GetCommitTimestamp();
+	// a commit that checkpoints syncs as usual
+	info.defer_sync = !checkpoint_decision.can_checkpoint && Settings::Get<DeferCommitSyncSetting>(context);
 
 	// commit the UndoBuffer of the transaction
 	if (!error.HasError()) {
@@ -500,6 +582,11 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		// Remove the transaction from the list of active transactions and gather cleanup information.
 		// A commit that needs a WAL sync stays active until the sync below has completed.
 		QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
+	} else if (info.defer_sync) {
+		// returns without its sync, invisible to new snapshots until a sync covers it and removes it
+		transaction.sync_deferred = true;
+		transaction.store_after_commit = store_transaction;
+		commit_wal = nullptr;
 	}
 
 	// We do not need to hold the transaction lock during cleanup of transactions,
@@ -529,18 +616,9 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		}
 		// durable, or durability has failed: now leave the list of active transactions
 		t_lock.lock();
-		if (synced) {
-			// advance the durable bound over every commit the sync covered
-			for (auto &active_transaction : active_transactions) {
-				if (active_transaction->wal_sync_offset != 0 &&
-				    active_transaction->wal_sync_offset <= info.wal_sync_offset &&
-				    active_transaction->commit_id >= durable_bound) {
-					durable_bound = VisibilityBound::Through(active_transaction->commit_id);
-				}
-			}
-		}
+		CompleteSync(*commit_wal, info.wal_sync_offset, synced ? ErrorData() : error);
 		QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
-		bool notify_others = !HasUnsyncedCommits();
+		bool notify_others = !HasUnsyncedCommits() && deferred_syncs == 0;
 		t_lock.unlock();
 		if (notify_others) {
 			durability_cv.notify_all();

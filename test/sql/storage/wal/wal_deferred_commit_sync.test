@@ -1,0 +1,102 @@
+# name: test/sql/storage/wal/wal_deferred_commit_sync.test
+# description: A commit that defers its WAL sync stays invisible until a sync makes it durable
+# group: [wal]
+
+load __TEST_DIR__/wal_deferred_commit_sync.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok con1
+SET defer_commit_sync=true
+
+statement ok con1
+INSERT INTO t VALUES (1)
+
+# returned, but not durable: no new snapshot sees it, also not one of its own connection
+query I con1
+SELECT count(*) FROM t
+----
+0
+
+query I con2
+SELECT count(*) FROM t
+----
+0
+
+statement ok con2
+CALL sync_wal()
+
+query I con1
+SELECT count(*) FROM t
+----
+1
+
+# a checkpoint syncs the deferred commits first
+statement ok con1
+INSERT INTO t VALUES (2)
+
+query I con2
+SELECT count(*) FROM t
+----
+1
+
+statement ok con2
+CHECKPOINT
+
+query I con2
+SELECT count(*) FROM t
+----
+2
+
+# a commit that syncs makes the deferred commits before it durable as well
+statement ok con1
+INSERT INTO t VALUES (3)
+
+statement ok con2
+INSERT INTO t VALUES (4)
+
+query I con2
+SELECT count(*) FROM t
+----
+4
+
+# deferred catalog changes and updates
+statement ok con1
+CREATE TABLE u AS SELECT 42 AS j
+
+statement error con2
+SELECT * FROM u
+----
+does not exist
+
+statement ok con1
+UPDATE t SET i = i + 10
+
+query I con2
+SELECT sum(i) FROM t
+----
+10
+
+statement ok con2
+CALL sync_wal()
+
+query I con2
+SELECT sum(i) FROM t
+----
+50
+
+query I con2
+SELECT j FROM u
+----
+42
+
+restart
+
+query I
+SELECT sum(i) FROM t
+----
+50

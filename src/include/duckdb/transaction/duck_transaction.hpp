@@ -32,6 +32,8 @@ struct CommitInfo {
 	optional_ptr<CommitDropState> drop_state;
 	//! WAL offset covering the commit's flush marker (0 if no WAL was written)
 	idx_t wal_sync_offset = 0;
+	//! The committer does not sync the WAL (defer_commit_sync)
+	bool defer_sync = false;
 };
 
 class DuckTransaction : public Transaction {
@@ -51,6 +53,10 @@ public:
 	idx_t wal_sync_offset = 0;
 	//! The committed catalog version just before this commit published
 	idx_t catalog_version_before_commit = 0;
+	//! The commit returned without its sync: the sync that covers it removes it from the active transactions
+	bool sync_deferred = false;
+	//! Passed to RemoveTransaction for a deferred commit
+	bool store_after_commit = false;
 
 	atomic<idx_t> catalog_version;
 
