@@ -1,0 +1,162 @@
+# name: test/sql/storage/alter_type_shared_paused.test_slow
+# description: ALTER TYPE and a computed ADD COLUMN while a checkpoint is paused between writing the table and publishing it
+# group: [storage]
+
+require skip_reload
+
+load {TEST_DIR}/alter_type_shared_paused.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+# a full checkpoint merges the row groups: the ALTER waits until it has published them
+statement ok
+CREATE TABLE m AS SELECT i, i::VARCHAR AS s FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM m WHERE i < 300000 AND i % 10 <> 0
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+BEGIN
+
+onlyif threadid=1
+statement ok
+ALTER TABLE m ALTER s TYPE BIGINT
+
+onlyif threadid=1
+statement ok
+ALTER TABLE m ADD COLUMN k BIGINT DEFAULT (random() * 0)::BIGINT + 1
+
+onlyif threadid=1
+query III
+SELECT COUNT(*), SUM(s), SUM(k) FROM m
+----
+130000	39499800000	130000
+
+onlyif threadid=1
+statement ok
+COMMIT
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query I
+SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('m')
+----
+2
+
+query IIII
+SELECT COUNT(*), SUM(i), SUM(s), SUM(k) FROM m
+----
+130000	39499800000	39499800000	130000
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), SUM(s), SUM(k) FROM m
+----
+130000	39499800000	39499800000	130000
+
+statement ok
+DROP TABLE m
+
+statement ok
+CHECKPOINT
+
+# a concurrent checkpoint: the ALTER computes its column while the checkpoint is paused and commits before it
+# publishes, which carries the computed column over
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+CREATE TABLE p AS SELECT i, i::VARCHAR AS s FROM range(1000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok con1
+BEGIN
+
+query I con1
+SELECT COUNT(*) FROM p
+----
+1000
+
+statement ok
+INSERT INTO p SELECT i, i::VARCHAR FROM range(1000, 1100) t(i)
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 2
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 700 millisecond
+
+onlyif threadid=1
+statement ok
+ALTER TABLE p ALTER s TYPE BIGINT USING s::BIGINT * 2
+
+onlyif threadid=1
+statement ok
+INSERT INTO p VALUES (5000, 7)
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query II con1
+SELECT COUNT(*), COUNT(*) FILTER (s = i::VARCHAR) FROM p
+----
+1000	1000
+
+statement ok con1
+COMMIT
+
+query III
+SELECT COUNT(*), SUM(i), SUM(s) FROM p
+----
+1101	609450	1208907
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query III
+SELECT COUNT(*), SUM(i), SUM(s) FROM p
+----
+1101	609450	1208907

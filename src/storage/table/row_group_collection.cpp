@@ -1090,7 +1090,7 @@ void RowGroupCollection::RemoveFromIndexes(const QueryContext &context, DataTabl
 	auto indexed_column_id_set = indexes.GetIndexedColumns();
 
 	// Sorted so that the fetched columns align with the ascending order used when referencing them into
-	// result_chunk below. The positions in the row groups ascend with the columns.
+	// result_chunk below.
 	vector<column_t> indexed_columns {indexed_column_id_set.begin(), indexed_column_id_set.end()};
 	sort(indexed_columns.begin(), indexed_columns.end());
 	vector<StorageIndex> column_ids;
@@ -2309,7 +2309,12 @@ shared_ptr<RowGroupSegmentTree> RowGroupCollection::AlignCheckpointColumns(Colle
 		} else {
 			// a merged row group: the shared columns hold a constant
 			for (idx_t c = result.column_count; c < live_types.size(); c++) {
-				row_group->AddConstantColumn(live_types[c], shared_column_constants.at(c));
+				auto constant = shared_column_constants.find(c);
+				if (constant == shared_column_constants.end()) {
+					// a computed column: its ALTER holds vacuums back until it commits
+					throw InternalException("A checkpoint merged row groups of a table whose ALTER computed a column");
+				}
+				row_group->AddConstantColumn(live_types[c], constant->second);
 			}
 		}
 		aligned->AppendSegment(aligned_lock, std::move(row_group), entry->GetRowStart());
@@ -2337,6 +2342,59 @@ void RowGroupCollection::AddSharedColumn(ColumnDefinition &new_column, Expressio
 	auto new_types = GetTypes();
 	new_types.push_back(new_column.GetType());
 	SetRowGroups(std::move(new_row_groups));
+	SetTypes(std::move(new_types));
+}
+
+ComputedColumn RowGroupCollection::ComputeSharedColumn(ClientContext &context, const LogicalType &type,
+                                                       const vector<StorageIndex> &source_columns,
+                                                       Expression &expression, TransactionData transaction) {
+	ComputedColumn result;
+	result.type = type;
+	result.source_row_groups = GetRowGroups();
+	result.row_groups = make_shared_ptr<RowGroupSegmentTree>(*this, result.source_row_groups->GetBaseRowId());
+	result.stats = ColumnStatistics::CreateEmptyStats(type);
+
+	vector<LogicalType> scan_types;
+	for (auto &column : source_columns) {
+		if (column.IsRowIdColumn()) {
+			scan_types.emplace_back(LogicalType::ROW_TYPE);
+		} else {
+			scan_types.push_back(GetTypes()[column.GetPrimaryIndex()]);
+		}
+	}
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(GetAllocator(), scan_types);
+	ExpressionExecutor executor(context);
+	executor.AddExpression(expression);
+	TableScanState scan_state;
+	scan_state.Initialize(source_columns);
+	scan_state.table_state.Initialize(context, GetTypes());
+	scan_state.table_state.max_row = result.source_row_groups->GetBaseRowId() + next_row_id.load();
+
+	for (auto &node : result.source_row_groups->SegmentNodes()) {
+		auto new_row_group = node.GetNode().AddComputedColumn(*this, type, executor, scan_state.table_state, node,
+		                                                      scan_chunk, transaction, *result.stats);
+		new_row_group->MergeIntoStatistics(new_row_group->GetColumnCount() - 1, result.stats->Statistics());
+		result.row_groups->AppendSegment(std::move(new_row_group), node.GetRowStart());
+	}
+	return result;
+}
+
+void RowGroupCollection::AddComputedSharedColumn(ComputedColumn column) {
+	D_ASSERT(RefersToSameObject(*column.source_row_groups, *GetRowGroups()));
+	auto new_column_idx = GetTypes().size();
+	{
+		auto lock = stats.GetLock();
+		stats.AddColumn(*lock, column.type);
+		auto &new_column_stats = stats.GetStats(*lock, new_column_idx);
+		new_column_stats.Statistics().Merge(column.stats->Statistics());
+		if (column.stats->HasDistinctStats()) {
+			new_column_stats.SetDistinct(column.stats->DistinctStats().Copy());
+		}
+	}
+	auto new_types = GetTypes();
+	new_types.push_back(column.type);
+	SetRowGroups(std::move(column.row_groups));
 	SetTypes(std::move(new_types));
 }
 
@@ -2690,7 +2748,7 @@ void RowGroupCollection::VerifyNewConstraint(const QueryContext &context, DuckTr
 
 		// Verify the NOT NULL constraint.
 		if (VectorOperations::HasNull(scan_chunk.data[0])) {
-			auto name = parent.Columns()[physical_index].GetName();
+			auto name = parent.Columns()[not_null_constraint.index.index].GetName();
 			throw ConstraintException("NOT NULL constraint failed: %s.%s", SQLIdentifier(info->GetTableName()),
 			                          SQLIdentifier(name));
 		}

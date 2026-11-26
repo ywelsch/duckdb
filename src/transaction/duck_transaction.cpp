@@ -397,6 +397,13 @@ void DuckTransaction::LockCheckpointsUntilCommit() {
 	}
 }
 
+void DuckTransaction::LockVacuumsUntilCommit() {
+	lock_guard<mutex> guard(lock_keys_lock);
+	if (!vacuum_lock) {
+		vacuum_lock = GetTransactionManager().SharedVacuumLock();
+	}
+}
+
 void DuckTransaction::AddSharedColumns(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection,
                                        idx_t column_count) {
 	lock_guard<mutex> guard(shared_columns_lock);

@@ -99,6 +99,16 @@ struct CollectionCheckpointResult {
 	vector<bool> built;
 };
 
+//! A column computed for every row group of a collection, not yet added to it
+struct ComputedColumn {
+	LogicalType type;
+	//! The row groups of the collection with the column appended
+	shared_ptr<RowGroupSegmentTree> row_groups;
+	shared_ptr<ColumnStatistics> stats;
+	//! The row groups the column was computed for
+	shared_ptr<RowGroupSegmentTree> source_row_groups;
+};
+
 class RowGroupCollection {
 public:
 	RowGroupCollection(shared_ptr<DataTableInfo> info, TableIOManager &io_manager, vector<LogicalType> types,
@@ -231,6 +241,13 @@ public:
 	//! Adds a column holding a constant to this collection, which the older table version keeps using: the row
 	//! groups are replaced, not changed. Runs under the table's append lock
 	void AddSharedColumn(ColumnDefinition &new_column, ExpressionExecutor &default_executor, Value constant);
+	//! Computes a column from the source columns of every row, read with the given visibility; adds nothing yet.
+	//! Runs under the table's append lock until the column is added
+	ComputedColumn ComputeSharedColumn(ClientContext &context, const LogicalType &type,
+	                                   const vector<StorageIndex> &source_columns, Expression &expression,
+	                                   TransactionData transaction);
+	//! Adds a computed column, which the older table version keeps not using. Runs under the table's append lock
+	void AddComputedSharedColumn(ComputedColumn column);
 	//! Removes the shared columns past column_count again, returns the row groups that had them. Runs under the
 	//! table's append lock
 	shared_ptr<RowGroupSegmentTree> RemoveSharedColumns(idx_t column_count);

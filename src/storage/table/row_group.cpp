@@ -1,5 +1,6 @@
 #include "duckdb/storage/table/row_group.hpp"
 #include "duckdb/storage/table/hidden_column_data.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/transaction/commit_state.hpp"
@@ -455,38 +456,9 @@ unique_ptr<RowGroup> RowGroup::AlterType(RowGroupCollection &new_collection, con
                                          ColumnStatistics &changed_stats) {
 	Verify();
 
-	// construct a new column data for this type
-	auto column_data = ColumnData::CreateColumn(GetBlockManager(), GetTableInfo(), changed_idx, target_type);
-
-	ColumnAppendState append_state;
-	column_data->InitializeAppend(append_state);
-
-	// scan the original table, and fill the new column with the transformed value
-	InitializeScan(scan_state, node);
-
-	DataChunk append_chunk;
-	vector<LogicalType> append_types;
-	append_types.push_back(target_type);
-	append_chunk.Initialize(Allocator::DefaultAllocator(), append_types);
-	auto &append_vector = append_chunk.data[0];
-	Vector hashes(LogicalType::HASH);
-	ScanOptions options(transaction);
-	options.insert_type = InsertedScanType::ALL_ROWS;
-	options.delete_type = DeletedScanType::INCLUDE_ALL_DELETED;
-	while (true) {
-		// scan the table
-		scan_chunk.Reset();
-		Scan(options, scan_state, scan_chunk);
-		if (scan_chunk.size() == 0) {
-			break;
-		}
-		// execute the expression
-		append_chunk.Reset();
-		executor.ExecuteExpression(scan_chunk, append_vector);
-		changed_stats.UpdateDistinctStatistics(append_vector, scan_chunk.size(), hashes);
-		column_data->Append(append_state, append_vector, scan_chunk.size());
-	}
-	column_data->FinalizeAppend(nullptr, append_state);
+	// construct a new column data for this type, filled with the transformed value
+	auto column_data =
+	    ComputeColumn(changed_idx, target_type, executor, scan_state, node, scan_chunk, transaction, changed_stats);
 
 	auto supports_per_column_writes = new_collection.SupportsPerColumnWrites();
 	if (!supports_per_column_writes) {
@@ -517,6 +489,83 @@ unique_ptr<RowGroup> RowGroup::AlterType(RowGroupCollection &new_collection, con
 	if (has_per_column_metadata_blocks) {
 		row_group->per_column_metadata_blocks = per_column_metadata_blocks;
 		row_group->per_column_metadata_blocks.ClearColumn(changed_idx);
+	}
+	lock.unlock();
+	row_group->Verify();
+	return row_group;
+}
+
+shared_ptr<ColumnData> RowGroup::ComputeColumn(idx_t column_index, const LogicalType &type,
+                                               ExpressionExecutor &executor, CollectionScanState &scan_state,
+                                               SegmentNode<RowGroup> &node, DataChunk &scan_chunk,
+                                               TransactionData transaction, ColumnStatistics &column_stats) {
+	auto column_data = ColumnData::CreateColumn(GetBlockManager(), GetTableInfo(), column_index, type);
+
+	ColumnAppendState append_state;
+	column_data->InitializeAppend(append_state);
+
+	// scan the original table, and fill the new column with the transformed value
+	InitializeScan(scan_state, node);
+
+	DataChunk append_chunk;
+	vector<LogicalType> append_types;
+	append_types.push_back(type);
+	append_chunk.Initialize(Allocator::DefaultAllocator(), append_types);
+	auto &append_vector = append_chunk.data[0];
+	Vector hashes(LogicalType::HASH);
+	ScanOptions options(transaction);
+	options.insert_type = InsertedScanType::ALL_ROWS;
+	options.delete_type = DeletedScanType::INCLUDE_ALL_DELETED;
+	while (true) {
+		// scan the table
+		scan_chunk.Reset();
+		Scan(options, scan_state, scan_chunk);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		// execute the expression
+		append_chunk.Reset();
+		executor.ExecuteExpression(scan_chunk, append_vector);
+		column_stats.UpdateDistinctStatistics(append_vector, scan_chunk.size(), hashes);
+		column_data->Append(append_state, append_vector, scan_chunk.size());
+	}
+	column_data->FinalizeAppend(nullptr, append_state);
+	return column_data;
+}
+
+unique_ptr<RowGroup> RowGroup::AddComputedColumn(RowGroupCollection &new_collection, const LogicalType &type,
+                                                 ExpressionExecutor &executor, CollectionScanState &scan_state,
+                                                 SegmentNode<RowGroup> &node, DataChunk &scan_chunk,
+                                                 TransactionData transaction, ColumnStatistics &column_stats) {
+	Verify();
+	auto column =
+	    ComputeColumn(GetColumnCount(), type, executor, scan_state, node, scan_chunk, transaction, column_stats);
+	return AppendColumnCopy(new_collection, std::move(column));
+}
+
+unique_ptr<RowGroup> RowGroup::AppendColumnCopy(RowGroupCollection &new_collection, shared_ptr<ColumnData> column) {
+	if (!new_collection.SupportsPerColumnWrites()) {
+		// ensure all columns are loaded, as checkpointing will need to load them anyway, and it's better to fail-fast
+		// in case these don't fit in memory here
+		GetColumns();
+	}
+	unique_lock<mutex> lock(row_group_lock);
+	auto row_group = CreateNewRowGroupCopy(new_collection, columns.size() + 1);
+	for (idx_t i = 0; i < columns.size(); i++) {
+		row_group->columns[i] = columns[i];
+		if (row_group->is_loaded) {
+			row_group->is_loaded[i] = is_loaded[i].load();
+		}
+		if (!row_group->column_pointers.empty()) {
+			row_group->column_pointers[i] = column_pointers[i];
+		}
+	}
+	if (has_per_column_metadata_blocks) {
+		row_group->per_column_metadata_blocks = per_column_metadata_blocks;
+	}
+	row_group->columns[columns.size()] = std::move(column);
+	if (row_group->is_loaded) {
+		row_group->is_loaded[columns.size()] = true;
 	}
 	lock.unlock();
 	row_group->Verify();
@@ -1962,7 +2011,8 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 
 	if (partial_reuse) {
 		// carry forward the extras for reused columns onto the new row group, so RowGroup::Checkpoint
-		// can look them up via this->per_column_metadata_blocks
+		// can look them up via this->per_column_metadata_blocks (in the order of their positions)
+		std::sort(reused_columns.begin(), reused_columns.end());
 		auto extras = per_column_metadata_blocks.GetBlocksForColumns(reused_columns);
 		for (idx_t i = 0; i < reused_columns.size(); i++) {
 			result_row_group->per_column_metadata_blocks.AddColumn(reused_columns[i], extras[i]);
@@ -1987,20 +2037,19 @@ void IncrementSegmentStart(PersistentColumnData &data, idx_t start_increment) {
 //! the written columns. Columns that are not written are left out
 static PerColumnMetadataBlocks RemapColumns(const PerColumnMetadataBlocks &blocks,
                                             const vector<optional_idx> &key_map) {
-	PerColumnMetadataBlocks result;
-	bool keep = false;
+	// an ALTER TYPE gives a column a position after the ones of later columns: the new keys need sorting
+	map<idx_t, vector<idx_t>> remapped;
+	optional_idx current;
 	for (auto &entry : blocks.data) {
 		if (entry.is_column_index) {
-			keep = entry.index < key_map.size() && key_map[entry.index].IsValid();
-			if (keep) {
-				PerColumnMetadataBlock marker;
-				marker.is_column_index = true;
-				marker.index = key_map[entry.index].GetIndex();
-				result.data.push_back(marker);
-			}
-		} else if (keep) {
-			result.data.push_back(entry);
+			current = entry.index < key_map.size() ? key_map[entry.index] : optional_idx();
+		} else if (current.IsValid()) {
+			remapped[current.GetIndex()].push_back(entry.index);
 		}
+	}
+	PerColumnMetadataBlocks result;
+	for (auto &entry : remapped) {
+		result.AddColumn(entry.first, entry.second);
 	}
 	return result;
 }

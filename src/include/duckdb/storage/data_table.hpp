@@ -340,6 +340,11 @@ private:
 	static void VerifyNoUncommittedColumns(DataTable &parent);
 	//! Copies the positions of the parent's columns, and appends one for an added column
 	void InheritPhysicalColumns(DataTable &parent, bool add_column);
+	//! Adds a column, computed from the source columns of every row, to the row groups the parent shares, and to
+	//! the transaction-local rows
+	void AddComputedSharedColumn(ClientContext &context, DataTable &parent, const LogicalType &type,
+	                             const vector<StorageIndex> &source_columns, Expression &expression,
+	                             optional_ptr<BoundConstraint> constraint_to_verify);
 	//! Keeps the segment infos of this version's columns, numbered as this version's columns
 	void RemoveOtherVersionColumns(vector<ColumnSegmentInfo> &result, idx_t start) const;
 

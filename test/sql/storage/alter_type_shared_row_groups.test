@@ -1,0 +1,253 @@
+# name: test/sql/storage/alter_type_shared_row_groups.test
+# description: ALTER TYPE and ADD COLUMN with a computed default add a column to the row groups the versions share
+# group: [storage]
+
+# the forced commit failure crashes the alternative-verify build
+require no_alternative_verify
+
+require skip_reload
+
+load {TEST_DIR}/alter_type_shared_row_groups_main.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+ATTACH '{TEST_DIR}/alter_type_shared_row_groups.db' AS d (ROW_GROUP_SIZE 2048)
+
+statement ok
+CREATE TABLE d.t AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s, i AS v FROM range(20000) t(i)
+
+statement ok
+CREATE TABLE d.u (s VARCHAR)
+
+statement ok
+CREATE TABLE d.tick (i INTEGER)
+
+statement ok
+CHECKPOINT d
+
+# no overflow block of the strings is held by a handle
+statement ok
+DETACH d
+
+statement ok
+ATTACH '{TEST_DIR}/alter_type_shared_row_groups.db' AS d (ROW_GROUP_SIZE 2048)
+
+# a snapshot from before the ALTERs, which has not read the strings yet
+statement ok con3
+BEGIN
+
+query I con3
+SELECT COUNT(*) FROM d.t
+----
+20000
+
+# rows appended to the last row group: a checkpoint rewrites it while the ALTER is open
+statement ok
+INSERT INTO d.t SELECT i, repeat(md5(i::VARCHAR), 160), i FROM range(20000, 20100) t(i)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+ALTER TABLE d.t ALTER s TYPE VARCHAR USING upper(s)
+
+statement ok con1
+ALTER TABLE d.t ALTER v TYPE BIGINT USING v * 10
+
+# twice in one transaction
+statement ok con1
+ALTER TABLE d.t ALTER v TYPE VARCHAR USING v::VARCHAR || 'x'
+
+query II con1
+SELECT COUNT(*) FILTER (s = upper(repeat(md5(i::VARCHAR), 160))), COUNT(*) FILTER (v = (i * 10)::VARCHAR || 'x') FROM d.t
+----
+20100	20100
+
+# the open ALTERs do not hold the checkpoint back
+statement ok
+CHECKPOINT d
+
+statement ok con1
+INSERT INTO d.t VALUES (-1, 'new', 'w')
+
+statement ok con1
+COMMIT
+
+query III
+SELECT COUNT(*), COUNT(*) FILTER (s = upper(repeat(md5(i::VARCHAR), 160))), COUNT(*) FILTER (v = (i * 10)::VARCHAR || 'x')
+FROM d.t
+----
+20101	20100	20100
+
+# frees the old columns' blocks, which the older snapshot can still read after they are reused
+statement ok
+CHECKPOINT d
+
+loop k 0 3
+
+statement ok
+INSERT INTO d.u SELECT repeat(md5((i + 1000000 * {k})::VARCHAR), 160) FROM range(20000) t(i)
+
+statement ok
+CHECKPOINT d
+
+endloop
+
+query III con3
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5(i::VARCHAR), 160)), SUM(v)
+FROM d.t
+----
+20000	20000	199990000
+
+statement ok con3
+COMMIT
+
+# a rolled back ALTER, and one whose commit fails
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE d.t ALTER i TYPE VARCHAR
+
+statement ok
+ROLLBACK
+
+statement ok
+SET GLOBAL debug_force_commit_failure = true
+
+statement error
+ALTER TABLE d.t ALTER i TYPE DOUBLE
+----
+Forced commit failure
+
+statement ok
+SET GLOBAL debug_force_commit_failure = false
+
+query I
+SELECT typeof(i) FROM d.t LIMIT 1
+----
+BIGINT
+
+# rows the transaction appended, in bulk and not, get the new values too
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO d.t SELECT i, 'bulk', i::VARCHAR FROM range(100000, 300000) t(i)
+
+statement ok
+INSERT INTO d.t VALUES (-2, 'one', '-2')
+
+statement ok
+ALTER TABLE d.t ALTER i TYPE DOUBLE USING i + 0.5
+
+statement ok
+COMMIT
+
+query II
+SELECT COUNT(*), SUM(i) FROM d.t
+----
+220102	40202004998.0
+
+# a computed default: each row keeps the value it got
+statement ok
+CREATE SEQUENCE d.seq
+
+statement ok
+ALTER TABLE d.t ADD COLUMN n BIGINT DEFAULT nextval('d.seq')
+
+statement ok
+ALTER TABLE d.t ADD COLUMN r DOUBLE DEFAULT random()
+
+statement ok
+CREATE TABLE d.snapshot AS SELECT i, n, r FROM d.t
+
+query II
+SELECT COUNT(DISTINCT n), MAX(n) FROM d.t
+----
+220102	220102
+
+statement ok
+INSERT INTO d.tick VALUES (1)
+
+statement ok
+CHECKPOINT d
+
+statement ok
+INSERT INTO d.tick VALUES (2)
+
+statement ok
+CHECKPOINT d
+
+# writes after the last checkpoint, replayed from the WAL
+statement ok
+ALTER TABLE d.t ALTER v TYPE VARCHAR USING v || 'y'
+
+statement ok
+ALTER TABLE d.t ADD COLUMN q INTEGER DEFAULT (random() * 0)::INTEGER + 3
+
+statement ok
+UPDATE d.t SET s = 'updated' WHERE i = 5.5
+
+statement ok
+DETACH d
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+ATTACH '{TEST_DIR}/alter_type_shared_row_groups.db' AS d
+
+query IIIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (v LIKE '%y'), SUM(q), COUNT(*) FILTER (s = 'updated')
+FROM d.t
+----
+220102	40202004998.0	220102	660306	1
+
+query I
+SELECT COUNT(*) FROM d.t JOIN d.snapshot USING (i) WHERE t.n = snapshot.n AND t.r = snapshot.r
+----
+220102
+
+statement ok
+CHECKPOINT d
+
+statement ok
+DETACH d
+
+statement ok
+ATTACH '{TEST_DIR}/alter_type_shared_row_groups.db' AS d
+
+query IIIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (v LIKE '%y'), SUM(q), COUNT(*) FILTER (s = 'updated')
+FROM d.t
+----
+220102	40202004998.0	220102	660306	1
+
+query I
+SELECT COUNT(*) FROM d.t JOIN d.snapshot USING (i) WHERE t.n = snapshot.n AND t.r = snapshot.r
+----
+220102
+
+query I
+SELECT column_name || ':' || data_type FROM duckdb_columns() WHERE table_name = 't' AND database_name = 'd' ORDER BY column_index
+----
+i:DOUBLE
+s:VARCHAR
+v:VARCHAR
+n:BIGINT
+r:DOUBLE
+q:INTEGER

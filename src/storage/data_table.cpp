@@ -109,24 +109,25 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 	lock_guard<mutex> parent_lock(parent.append_lock);
 	VerifyNoUncommittedColumns(parent);
 
+	// this version shares the row groups, which checkpoints of the parent keep rewriting
 	InheritPhysicalColumns(parent, true);
 	if (default_value.IsFoldable()) {
-		// a constant column: this version shares the row groups, which checkpoints of the parent keep rewriting
+		// a constant column
 		auto constant = ExpressionExecutor::EvaluateScalar(context, default_value);
 		this->row_groups = parent.row_groups;
 		auto column_count = row_groups->GetTypes().size();
 		row_groups->AddSharedColumn(new_column, default_executor, std::move(constant));
 		DuckTransaction::Get(context, db).AddSharedColumns(info, row_groups, column_count);
 		parent.successor_shares_row_groups = true;
-	} else {
-		this->row_groups = parent.row_groups->AddColumn(context, new_column, default_executor);
+		// also add this column to client local storage
+		local_storage.AddColumn(context, parent, *this, new_column, default_executor);
+		// this table replaces the previous table, hence the parent is no longer the root DataTable
+		parent.version = DataTableVersion::ALTERED;
+		return;
 	}
-
-	// also add this column to client local storage
-	local_storage.AddColumn(context, parent, *this, new_column, default_executor);
-
-	// this table replaces the previous table, hence the parent is no longer the root DataTable
-	parent.version = DataTableVersion::ALTERED;
+	// the default is evaluated for every row
+	vector<StorageIndex> source_columns {StorageIndex(COLUMN_IDENTIFIER_ROW_ID)};
+	AddComputedSharedColumn(context, parent, new_column.Type(), source_columns, default_value, nullptr);
 }
 
 DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_column)
@@ -213,8 +214,6 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
                      const vector<StorageIndex> &bound_columns, Expression &cast_expr,
                      optional_ptr<BoundConstraint> constraint_to_verify)
     : db(parent.db), info(parent.info), append_lock(info->append_lock), version(DataTableVersion::MAIN_TABLE) {
-	auto &transaction = DuckTransaction::Get(context, db);
-	auto &local_storage = LocalStorage::Get(transaction);
 	// prevent any tuples from being added to the parent
 	lock_guard<mutex> parent_lock(parent.append_lock);
 	VerifyNoUncommittedColumns(parent);
@@ -234,39 +233,70 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
 
 	// change the type in this DataTable
 	column_definitions[changed_idx].SetType(target_type);
-	InheritPhysicalColumns(parent, false);
-	auto physical_idx = PhysicalColumn(changed_idx);
-	vector<StorageIndex> physical_bound_columns;
-	for (auto &column : bound_columns) {
-		physical_bound_columns.push_back(PhysicalColumn(column));
-	}
 
-	// set up the statistics for the table
-	// the column that had its type changed will have the new statistics computed during conversion
+	// the transformed values go to a new column of the shared row groups; the old column stays, hidden from this
+	// version, for older ones
+	vector<StorageIndex> source_columns;
+	for (auto &column : bound_columns) {
+		source_columns.push_back(parent.PhysicalColumn(column));
+	}
+	physical_columns = parent.PhysicalColumns();
+	physical_column_count = parent.PhysicalColumnCount();
+	physical_columns[changed_idx] = physical_column_count++;
+	AddComputedSharedColumn(context, parent, target_type, source_columns, cast_expr, constraint_to_verify);
+}
+
+void DataTable::AddComputedSharedColumn(ClientContext &context, DataTable &parent, const LogicalType &type,
+                                        const vector<StorageIndex> &source_columns, Expression &expression,
+                                        optional_ptr<BoundConstraint> constraint_to_verify) {
+	auto &transaction = DuckTransaction::Get(context, db);
+	auto &local_storage = LocalStorage::Get(transaction);
 	// mark the parent altered before reading, so a concurrent modification conflicts instead of
-	// being dropped by the rewrite
+	// being dropped by the computation
 	auto previous_version = parent.version.load();
 	parent.version = DataTableVersion::ALTERED;
+	this->row_groups = parent.row_groups;
+	auto column_count = row_groups->GetTypes().size();
+	auto local = local_storage.GetStorage(parent);
+	idx_t local_column_count = local ? local->GetCollection().GetTypes().size() : 0;
+	bool added = false;
 	try {
 		// read at the commits seen so far, not at this transaction's older snapshot
 		auto &transaction_manager = DuckTransactionManager::Get(db);
-		TransactionData rewrite_visibility(transaction.GetTransactionId(),
+		TransactionData compute_visibility(transaction.GetTransactionId(),
 		                                   VisibilityBound::Through(transaction_manager.GetLastCommit()));
-		row_groups = parent.row_groups->AlterType(context, physical_idx, target_type, physical_bound_columns, cast_expr,
-		                                          rewrite_visibility);
+		auto computed = row_groups->ComputeSharedColumn(context, type, source_columns, expression, compute_visibility);
+		unique_ptr<ComputedColumn> local_computed;
+		if (local) {
+			local_computed = make_uniq<ComputedColumn>(local->GetCollection().ComputeSharedColumn(
+			    context, type, source_columns, expression, TransactionData(transaction)));
+		}
+		// nothing failed: add the column
+		row_groups->AddComputedSharedColumn(std::move(computed));
+		if (local) {
+			local->GetCollection().AddComputedSharedColumn(std::move(*local_computed));
+		}
+		local_storage.MoveStorage(parent, *this);
+		added = true;
 
-		// scan the original table, and fill the new column with the transformed value
-		local_storage.ChangeType(context, parent, *this, physical_idx, target_type, physical_bound_columns, cast_expr);
-
-		// re-verify any column constraint that the rewrite could have violated (e.g. NOT NULL)
+		// re-verify any column constraint that the computation could have violated (e.g. NOT NULL)
 		if (constraint_to_verify) {
 			VerifyNewConstraint(context, local_storage, *this, *constraint_to_verify);
 		}
 	} catch (...) {
-		// nothing reached the catalog, so no undo entry will restore the parent
+		// nothing reached the catalog, so no undo entry restores the parent or removes the column
+		if (added) {
+			row_groups->RemoveSharedColumns(column_count);
+			if (local) {
+				local->GetCollection().RemoveSharedColumns(local_column_count);
+				local_storage.MoveStorage(*this, parent);
+			}
+		}
 		parent.version = previous_version;
 		throw;
 	}
+	transaction.AddSharedColumns(info, row_groups, column_count);
+	parent.successor_shares_row_groups = true;
 }
 
 void DataTable::VerifyNoUncommittedColumns(DataTable &parent) {

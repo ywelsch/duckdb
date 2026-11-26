@@ -177,6 +177,12 @@ public:
 	                               ColumnStatistics &changed_stats);
 	unique_ptr<RowGroup> AddColumn(RowGroupCollection &collection, ColumnDefinition &new_column,
 	                               ExpressionExecutor &executor, ColumnStatistics &new_column_stats);
+	//! A copy of this row group with an added column, which the executor computes from the scanned columns of every
+	//! row
+	unique_ptr<RowGroup> AddComputedColumn(RowGroupCollection &collection, const LogicalType &type,
+	                                       ExpressionExecutor &executor, CollectionScanState &scan_state,
+	                                       SegmentNode<RowGroup> &node, DataChunk &scan_chunk,
+	                                       TransactionData transaction, ColumnStatistics &column_stats);
 	unique_ptr<RowGroup> RemoveColumn(RowGroupCollection &collection, idx_t removed_column);
 	//! A copy of this row group with only its first column_count columns
 	unique_ptr<RowGroup> CopyColumns(RowGroupCollection &collection, idx_t column_count);
@@ -363,6 +369,13 @@ private:
 
 	bool HasUnloadedDeletes() const;
 	unique_ptr<RowGroup> CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count);
+	//! Computes a column from the scanned columns of every row of the row group
+	shared_ptr<ColumnData> ComputeColumn(idx_t column_index, const LogicalType &type, ExpressionExecutor &executor,
+	                                     CollectionScanState &scan_state, SegmentNode<RowGroup> &node,
+	                                     DataChunk &scan_chunk, TransactionData transaction,
+	                                     ColumnStatistics &column_stats);
+	//! A copy of this row group with the column appended
+	unique_ptr<RowGroup> AppendColumnCopy(RowGroupCollection &new_collection, shared_ptr<ColumnData> column);
 	//! Marks the columns past old_count as loaded and gives them an empty metadata pointer
 	void ExtendLoadedState(idx_t old_count);
 

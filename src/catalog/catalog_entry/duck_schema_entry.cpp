@@ -324,16 +324,38 @@ static bool AlterCopiesRowGroups(AlterInfo &info) {
 	switch (table_info.alter_table_type) {
 	case AlterTableType::SET_NOT_NULL:
 	case AlterTableType::REMOVE_COLUMN:
-		// the versions share the row groups, a dropped column stays in them hidden
+	case AlterTableType::ADD_COLUMN:
+	case AlterTableType::ALTER_COLUMN_TYPE:
+	case AlterTableType::ADD_FIELD:
+	case AlterTableType::REMOVE_FIELD:
+	case AlterTableType::RENAME_FIELD:
+		// the versions share the row groups: a dropped or retyped column stays in them hidden, an added or retyped
+		// column is added to them
 		return false;
+	default:
+		return true;
+	}
+}
+
+//! Whether the ALTER computes a column of the shared row groups, which a merge cannot refill
+static bool AlterComputesColumn(AlterInfo &info) {
+	if (info.type != AlterType::ALTER_TABLE || !info.GetModifications().AlterTable()) {
+		return false;
+	}
+	auto &table_info = info.Cast<AlterTableInfo>();
+	switch (table_info.alter_table_type) {
 	case AlterTableType::ADD_COLUMN: {
-		// a constant column is added to row groups the versions share
 		auto &column = table_info.Cast<AddColumnInfo>().new_column;
 		return !column.Generated() && column.HasDefaultValue() &&
 		       column.DefaultValue().GetExpressionClass() != ExpressionClass::CONSTANT;
 	}
-	default:
+	case AlterTableType::ALTER_COLUMN_TYPE:
+	case AlterTableType::ADD_FIELD:
+	case AlterTableType::REMOVE_FIELD:
+	case AlterTableType::RENAME_FIELD:
 		return true;
+	default:
+		return false;
 	}
 }
 
@@ -348,6 +370,10 @@ void DuckSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	} else {
 		if (transaction.transaction && AlterCopiesRowGroups(info)) {
 			transaction.transaction->Cast<DuckTransaction>().LockCheckpointsUntilCommit();
+		}
+		if (transaction.transaction && AlterComputesColumn(info)) {
+			// before any table lock: a vacuuming checkpoint that runs finishes its publish first
+			transaction.transaction->Cast<DuckTransaction>().LockVacuumsUntilCommit();
 		}
 		auto &name = info.GetQualifiedName().Name();
 		if (!set.AlterEntry(transaction, name, info)) {

@@ -118,6 +118,8 @@ public:
 	unique_ptr<StorageLockKey> TakeCommitScopedCheckpointLock();
 	//! Holds checkpoints back until this transaction's commit is resolved, for ALTERs that copy row groups
 	void LockCheckpointsUntilCommit();
+	//! Holds vacuums back until this transaction ends, for ALTERs that compute a column of the shared row groups
+	void LockVacuumsUntilCommit();
 	//! Registers the columns past column_count that an ADD COLUMN added to row groups an older version shares
 	void AddSharedColumns(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection,
 	                      idx_t column_count);
