@@ -1,0 +1,150 @@
+# name: test/sql/storage/alter_drop_column_shared_nested.test
+# description: Nested columns that a DROP COLUMN hides, read by an older snapshot, then stored as nothing
+# group: [storage]
+
+# the forced commit failure crashes the alternative-verify build
+require no_alternative_verify
+
+require skip_reload
+
+load {TEST_DIR}/alter_drop_column_shared_nested.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+CREATE TABLE t AS SELECT i,
+	{'a': i, 'b': md5(i::VARCHAR)} AS st,
+	[i, i + 1, i + 2] AS li,
+	(CASE WHEN i % 2 = 0 THEN i::VARIANT ELSE md5(i::VARCHAR)::VARIANT END) AS va,
+	[i::DOUBLE, 2.0, 3.0]::DOUBLE[3] AS ar,
+	MAP {md5(i::VARCHAR): i} AS ma,
+	i * 2 AS x
+FROM range(150000) t(i)
+
+statement ok
+CHECKPOINT
+
+# a snapshot from before the DROP COLUMNs, which has not read the nested columns yet
+statement ok con1
+BEGIN
+
+query I con1
+SELECT COUNT(*) FROM t
+----
+150000
+
+statement ok
+ALTER TABLE t DROP COLUMN st
+
+statement ok
+ALTER TABLE t DROP COLUMN li
+
+statement ok
+ALTER TABLE t DROP COLUMN va
+
+statement ok
+ALTER TABLE t DROP COLUMN ar
+
+statement ok
+ALTER TABLE t DROP COLUMN ma
+
+# a concurrent checkpoint: the hidden columns are freed but stay readable for the older snapshot
+statement ok
+INSERT INTO t VALUES (-1, -2)
+
+statement ok
+CHECKPOINT
+
+query IIIIII con1
+SELECT COUNT(*) FILTER (st.a = i AND st.b = md5(i::VARCHAR)), SUM(li[3]), COUNT(*) FILTER (va::VARCHAR = CASE WHEN i % 2 = 0 THEN i::VARCHAR ELSE md5(i::VARCHAR) END), SUM(ar[1]), COUNT(*) FILTER (ma[md5(i::VARCHAR)] = i), SUM(x)
+FROM t
+----
+150000	11250225000	150000	11249925000.0	150000	22499850000
+
+statement ok con1
+COMMIT
+
+# non-concurrent checkpoints: the hidden columns store nothing from now on
+statement ok
+INSERT INTO t VALUES (-3, -4)
+
+statement ok
+CHECKPOINT
+
+# appends to the row group whose hidden columns store nothing, one of them rolled back
+statement ok
+INSERT INTO t SELECT i, i * 2 FROM range(150000, 150100) t(i)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t SELECT i, i * 2 FROM range(150100, 150200) t(i)
+
+statement ok
+ROLLBACK
+
+# an append to those row groups that the failed commit reverts
+statement ok
+SET GLOBAL debug_force_commit_failure = true
+
+statement error
+INSERT INTO t SELECT i, i * 2 FROM range(150200, 150300) t(i)
+----
+Forced commit failure
+
+statement ok
+SET GLOBAL debug_force_commit_failure = false
+
+statement ok
+INSERT INTO t SELECT i, i * 2 FROM range(150300, 150310) t(i)
+
+statement ok
+CHECKPOINT
+
+# a merge
+statement ok
+DELETE FROM t WHERE i % 3 <> 0
+
+statement ok
+CHECKPOINT
+
+query III
+SELECT COUNT(*), SUM(i), SUM(x)
+FROM t
+----
+50039	3755627898	7511255798
+
+statement ok
+ALTER TABLE t ADD COLUMN st INTEGER DEFAULT 7
+
+query IIII
+SELECT COUNT(*), SUM(i), SUM(x), SUM(st)
+FROM t
+----
+50039	3755627898	7511255798	350273
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), SUM(x), SUM(st)
+FROM t
+----
+50039	3755627898	7511255798	350273
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE table_name = 't' ORDER BY column_index
+----
+i
+x
+st

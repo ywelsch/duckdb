@@ -1417,6 +1417,11 @@ public:
 			idx_t current_row_group_rows = MinValue<idx_t>(row_group_rows, row_group_size);
 			auto new_row_group = make_shared_ptr<RowGroup>(collection, current_row_group_rows);
 			new_row_group->InitializeEmpty(types, ColumnDataType::MAIN_TABLE);
+			for (idx_t c = 0; c < types.size(); c++) {
+				if (checkpoint_state.IsHiddenColumn(c)) {
+					new_row_group->HideColumn(c, 0);
+				}
+			}
 			new_row_groups.push_back(make_uniq<SegmentNode<RowGroup>>(0ULL, std::move(new_row_group), target_idx));
 			append_counts.push_back(0);
 			row_group_rows -= current_row_group_rows;

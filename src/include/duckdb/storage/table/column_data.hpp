@@ -215,6 +215,10 @@ public:
 	void SetBlocksReleased() {
 		blocks_released = true;
 	}
+	//! Whether this is a hidden column that stores nothing
+	virtual bool IsHiddenPlaceholder() const {
+		return false;
+	}
 
 	virtual unique_ptr<ColumnCheckpointState> CreateCheckpointState(const RowGroup &row_group, Context &context,
 	                                                                PartialBlockManager &partial_block_manager);

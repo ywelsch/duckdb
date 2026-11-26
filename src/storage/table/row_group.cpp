@@ -1,4 +1,5 @@
 #include "duckdb/storage/table/row_group.hpp"
+#include "duckdb/storage/table/hidden_column_data.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/transaction/commit_state.hpp"
@@ -208,17 +209,20 @@ void RowGroup::LoadColumn(storage_t c) const {
 	if (column_pointers.size() != columns.size()) {
 		throw InternalException("Lazy loading a column but the pointer was not set");
 	}
-	auto &metadata_manager = GetCollection().GetMetadataManager();
-	auto &types = GetCollection().GetTypes();
-	auto &block_pointer = column_pointers[c];
-	MetadataReader column_data_reader(metadata_manager, block_pointer);
-	this->columns[c] = ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), c, column_data_reader, types[c]);
+	this->columns[c] = ReadColumn(c);
 	is_loaded[c] = true;
 	if (this->columns[c]->count != this->count) {
 		throw DataCorruptionException("Corrupted database - loaded column with index %llu, count %llu did "
 		                              "not match count of row group %llu",
 		                              c, this->columns[c]->count.load(), this->count.load());
 	}
+}
+
+shared_ptr<ColumnData> RowGroup::ReadColumn(storage_t c) const {
+	auto &metadata_manager = GetCollection().GetMetadataManager();
+	auto &types = GetCollection().GetTypes();
+	MetadataReader column_data_reader(metadata_manager, column_pointers[c]);
+	return ColumnData::Deserialize(GetBlockManager(), GetTableInfo(), c, column_data_reader, types[c]);
 }
 
 void RowGroup::UnloadColumn(storage_t c) {
@@ -667,6 +671,15 @@ void RowGroup::AddConstantColumn(const LogicalType &type, const Value &constant)
 	}
 	columns.push_back(std::move(column));
 	ExtendLoadedState(old_count);
+}
+
+void RowGroup::HideColumn(idx_t column_idx, idx_t row_count) {
+	auto &type = GetCollection().GetTypes()[column_idx];
+	columns[column_idx] =
+	    make_shared_ptr<HiddenColumnData>(GetBlockManager(), GetTableInfo(), column_idx, type, row_count);
+	if (is_loaded) {
+		is_loaded[column_idx] = true;
+	}
 }
 
 void RowGroup::ExtendLoadedState(idx_t old_count) {
@@ -1838,17 +1851,38 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	for (auto &position : written_columns) {
 		is_written[position] = true;
 	}
+	// a non-concurrent checkpoint runs when no snapshot older than its bound is active
+	bool no_older_snapshot = writer.GetCheckpointOptions().type != CheckpointType::CONCURRENT_CHECKPOINT;
 	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
 		if (is_written[column_idx]) {
 			continue;
 		}
 		if (column_idx < writer.GetVersionColumnCount()) {
-			// a hidden column: its blocks are freed once, the loaded column stays for older readers
-			auto &column = GetColumn(column_idx);
-			if (!column.BlocksReleased()) {
-				ImageBlockDropper dropper(GetBlockManager());
-				column.VisitBlockIds(dropper);
-				column.SetBlocksReleased();
+			// a hidden column: its blocks are freed once
+			ImageBlockDropper dropper(GetBlockManager());
+			if (no_older_snapshot) {
+				// nothing reads it any more: it stores nothing from now on, without loading it to free its blocks
+				if (!ColumnIsLoaded(column_idx)) {
+					ReadColumn(column_idx)->VisitBlockIds(dropper);
+					result_row_group->HideColumn(column_idx, count);
+					continue;
+				}
+				auto &column = *columns[column_idx];
+				if (!column.BlocksReleased()) {
+					column.VisitBlockIds(dropper);
+					column.SetBlocksReleased();
+				}
+				if (!column.IsHiddenPlaceholder()) {
+					result_row_group->HideColumn(column_idx, count);
+					continue;
+				}
+			} else {
+				// the loaded column stays for older snapshots
+				auto &column = GetColumn(column_idx);
+				if (!column.BlocksReleased()) {
+					column.VisitBlockIds(dropper);
+					column.SetBlocksReleased();
+				}
 			}
 		}
 		D_ASSERT(ColumnIsLoaded(column_idx));

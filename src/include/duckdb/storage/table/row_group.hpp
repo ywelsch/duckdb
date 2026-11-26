@@ -184,6 +184,9 @@ public:
 	void AddConstantColumn(const LogicalType &type, const Value &constant);
 	//! For a row group a checkpoint built and has not published: keeps only the first column_count columns
 	void TrimColumns(idx_t column_count);
+	//! Replaces a column with one that stores nothing and reads as NULL, for a column the table version hid. It has
+	//! row_count rows: the row group's count, or 0 before appending
+	void HideColumn(idx_t column_idx, idx_t row_count);
 
 	//! Accumulates this row group's on-disk blocks into the drop state.
 	void CommitDrop(CommitDropState &drop_state);
@@ -342,6 +345,8 @@ private:
 	void SetCount(idx_t count);
 	bool ColumnIsLoaded(storage_t c) const;
 	void UnloadColumn(storage_t c);
+	//! Reads a column from disk without keeping it loaded
+	shared_ptr<ColumnData> ReadColumn(storage_t c) const;
 	bool HasUnchangedColumns() const;
 	static shared_ptr<ColumnData> CheckpointColumn(const RowGroup &row_group, idx_t column_idx, RowGroupWriteInfo &info,
 	                                               RowGroupWriteData &write_data);
