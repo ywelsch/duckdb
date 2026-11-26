@@ -241,9 +241,9 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	auto &metadata_manager = GetMetadataManager();
 
 	//! Set up the writers for the checkpoints
-	metadata_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
+	metadata_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::LOAD);
 	column_metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
-	row_group_pointer_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
+	row_group_pointer_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::LOAD);
 
 	// get the id of the first meta block
 	auto meta_block = metadata_writer->GetMetaBlockPointer();
@@ -457,8 +457,8 @@ void SingleFileCheckpointReader::LoadFromStorage() {
 	auto transaction = CatalogTransaction::GetSystemTransaction(catalog.GetDatabase());
 	LoadCheckpoint(transaction, reader);
 	// loading read the free list, the catalog and the table statistics
-	metadata_manager.AddAttachPointers(catalog_pointers);
-	metadata_manager.ClassifyAttachBlocks();
+	metadata_manager.AddLoadPointers(catalog_pointers);
+	metadata_manager.ClassifyLoadBlocks();
 }
 
 void CheckpointWriter::WriteEntry(CatalogEntry &entry, Serializer &serializer) {
@@ -818,7 +818,7 @@ void CheckpointReader::ReadTableData(CatalogTransaction transaction, Deserialize
 	bound_info.data->total_rows = total_rows;
 	bound_info.data->next_row_id = next_row_id;
 	bound_info.data->read_metadata_pointers = read_pointers;
-	reader.GetMetadataManager().AddAttachPointers(read_pointers);
+	reader.GetMetadataManager().AddLoadPointers(read_pointers);
 }
 
 } // namespace duckdb

@@ -908,7 +908,7 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 	}
 	GetMetadataManager().Read(reader);
 	GetMetadataManager().MarkBlocksAsModified(false);
-	GetMetadataManager().AddAttachPointers(free_list_pointers);
+	GetMetadataManager().AddLoadPointers(free_list_pointers);
 }
 
 bool SingleFileBlockManager::IsRootBlock(MetaBlockPointer root) {
@@ -1320,7 +1320,7 @@ vector<MetadataHandle> SingleFileBlockManager::GetFreeListBlocks() {
 		if (total_size < allocated_size) {
 			break;
 		}
-		auto free_list_handle = GetMetadataManager().AllocateHandle(MetadataPool::ATTACH);
+		auto free_list_handle = GetMetadataManager().AllocateHandle(MetadataPool::LOAD);
 		free_list_blocks.push_back(std::move(free_list_handle));
 		allocated_size += block_size;
 	}

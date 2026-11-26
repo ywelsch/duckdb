@@ -200,20 +200,20 @@ block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock, Met
 	return new_block_id;
 }
 
-void MetadataManager::AddAttachPointers(const vector<MetaBlockPointer> &pointers) {
+void MetadataManager::AddLoadPointers(const vector<MetaBlockPointer> &pointers) {
 	lock_guard<mutex> guard(block_lock);
-	attach_pointers.insert(attach_pointers.end(), pointers.begin(), pointers.end());
+	load_pointers.insert(load_pointers.end(), pointers.begin(), pointers.end());
 }
 
-void MetadataManager::ClassifyAttachBlocks() {
+void MetadataManager::ClassifyLoadBlocks() {
 	// row group pointers follow the table statistics but are read lazily, so loading reads only part of a block
 	static constexpr idx_t MIN_READ_PERCENTAGE = 25;
 	lock_guard<mutex> guard(block_lock);
 	unordered_map<block_id_t, idx_t> read_masks;
-	for (auto &pointer : attach_pointers) {
+	for (auto &pointer : load_pointers) {
 		read_masks[pointer.GetBlockId()] |= idx_t(1) << pointer.GetBlockIndex();
 	}
-	attach_pointers = vector<MetaBlockPointer>();
+	load_pointers = vector<MetaBlockPointer>();
 	for (auto &entry : read_masks) {
 		auto block_entry = blocks.find(entry.first);
 		if (block_entry == blocks.end()) {
@@ -224,7 +224,7 @@ void MetadataManager::ClassifyAttachBlocks() {
 		auto read = bitset<64>(entry.second).count();
 		// mixed blocks, e.g. written without metadata locality, stay in the default pool
 		if (read * 100 >= used * MIN_READ_PERCENTAGE) {
-			block.pool = MetadataPool::ATTACH;
+			block.pool = MetadataPool::LOAD;
 		}
 	}
 }

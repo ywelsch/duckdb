@@ -23,7 +23,7 @@ enum class MetadataPool : uint8_t {
 	//! row group metadata and everything else
 	DEFAULT,
 	//! what loading the database reads: the catalog, the table statistics and the free list
-	ATTACH
+	LOAD
 };
 
 struct MetadataBlock {
@@ -79,9 +79,9 @@ public:
 	//! Allocates a sub-block, only from blocks of the pool once there are a few metadata blocks
 	MetadataHandle AllocateHandle(MetadataPool pool = MetadataPool::DEFAULT);
 	//! Remembers sub-blocks that loading the database read
-	void AddAttachPointers(const vector<MetaBlockPointer> &pointers);
-	//! Puts the blocks whose contents loading the database mostly read into the attach pool
-	void ClassifyAttachBlocks();
+	void AddLoadPointers(const vector<MetaBlockPointer> &pointers);
+	//! Puts the blocks whose contents loading the database mostly read into the load pool
+	void ClassifyLoadBlocks();
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
 	MetadataHandle Pin(const QueryContext &context, const MetadataPointer &pointer);
@@ -124,8 +124,8 @@ protected:
 	mutable mutex block_lock;
 	unordered_map<block_id_t, MetadataBlock> blocks;
 	unordered_map<block_id_t, idx_t> modified_blocks;
-	//! Sub-blocks read while the database loaded, until ClassifyAttachBlocks
-	vector<MetaBlockPointer> attach_pointers;
+	//! Sub-blocks read while the database loaded, until ClassifyLoadBlocks
+	vector<MetaBlockPointer> load_pointers;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;
