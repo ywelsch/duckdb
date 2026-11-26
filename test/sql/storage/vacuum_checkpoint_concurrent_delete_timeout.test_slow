@@ -53,10 +53,10 @@ INSERT INTO mem.timing VALUES ('checkpoint end', now())
 
 sleep 3000 millisecond
 
-# one second before the checkpoint merges row groups: a delete statement that runs for four seconds
+# one second before the checkpoint merges row groups: a delete statement whose scan runs for four seconds
 onlyif threadid=1
 statement ok
-DELETE FROM test WHERE i = 20 AND (SELECT count(x) FROM (SELECT sleep_ms(4000) AS x)) = 0
+DELETE FROM test WHERE i = 20 AND sleep_ms(4000) IS NULL
 
 onlyif threadid=1
 statement ok
@@ -64,7 +64,7 @@ INSERT INTO mem.timing VALUES ('long delete', now())
 
 sleep 1250 millisecond
 
-# while the checkpoint waits for the long delete, or right after it gave up
+# while the long delete runs
 onlyif threadid=2
 statement ok
 DELETE FROM test WHERE i = 300000

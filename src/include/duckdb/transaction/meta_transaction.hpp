@@ -51,6 +51,8 @@ public:
 	ValidChecker transaction_validity;
 	//! Whether the running statement refers to a row id column by name
 	atomic<bool> statement_reads_row_ids {false};
+	//! Whether the running statement deletes or updates rows by the row ids it scans
+	atomic<bool> statement_writes_rows {false};
 
 public:
 	DUCKDB_API static MetaTransaction &Get(ClientContext &context);
@@ -74,6 +76,12 @@ public:
 	}
 	bool StatementReadsRowIds() const {
 		return statement_reads_row_ids;
+	}
+	void SetStatementWritesRows(bool writes_rows) {
+		statement_writes_rows = writes_rows;
+	}
+	bool StatementWritesRows() const {
+		return statement_writes_rows;
 	}
 
 	void SetReadOnly();

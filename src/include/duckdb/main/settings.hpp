@@ -784,6 +784,19 @@ struct DebugCheckpointScanSleepMsSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct DebugCheckpointSealSleepMsSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "debug_checkpoint_seal_sleep_ms";
+	static constexpr const char *Description =
+	    "DEBUG SETTING: time to sleep after a checkpoint planned and built a merge, before it seals it";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr bool IsDebug = false;
+	static constexpr bool IsDeprecated = false;
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::GLOBAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct DebugCheckpointSleepMsSetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "debug_checkpoint_sleep_ms";

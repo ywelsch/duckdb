@@ -130,6 +130,23 @@ ReaderRowGroups DuckTransaction::PeekRowGroups(const shared_ptr<RowGroupCollecti
 	return collection->GetReaderRowGroups(entry->second.second);
 }
 
+void DuckTransaction::HoldRowIds(const shared_ptr<RowGroupCollection> &collection, bool until_transaction_end) {
+	lock_guard<mutex> guard(read_tables_lock);
+	if (transaction_row_id_holds.find(*collection) != transaction_row_id_holds.end()) {
+		return;
+	}
+	auto &holds = until_transaction_end ? transaction_row_id_holds : statement_row_id_holds;
+	if (holds.find(*collection) != holds.end()) {
+		return;
+	}
+	{
+		// a merge checks the holders under the exclusive vacuum lock
+		auto vacuum_lock = GetTransactionManager().SharedVacuumLock();
+		collection->HoldRowIds();
+	}
+	holds.emplace(*collection, collection);
+}
+
 void DuckTransaction::ReleaseStatementState() {
 	// the next statement reads the live row groups
 	ReleaseRowGroups(false);
@@ -141,6 +158,16 @@ void DuckTransaction::ReleaseRowGroups(bool transaction_ends) {
 		entry.second.first->UnregisterReader(entry.second.second);
 	}
 	read_tables.clear();
+	for (auto &entry : statement_row_id_holds) {
+		entry.second->ReleaseRowIds();
+	}
+	statement_row_id_holds.clear();
+	if (transaction_ends) {
+		for (auto &entry : transaction_row_id_holds) {
+			entry.second->ReleaseRowIds();
+		}
+		transaction_row_id_holds.clear();
+	}
 	reads_live_row_groups = reads_live_row_groups || transaction_ends;
 }
 
@@ -473,17 +500,16 @@ void DuckTransaction::SetModifications(DatabaseModificationType type) {
 			checkpoint_lock = GetTransactionManager().SharedCheckpointLock();
 		}
 	}
-	bool require_vacuum_lock = false;
-	require_vacuum_lock =
-	    require_vacuum_lock || (type.InsertData() && GetTransactionManager().InsertRequiresVacuumLock());
-	require_vacuum_lock = require_vacuum_lock || type.DeleteData();
-
+	// with merges that are sealed, a deleting statement keeps merges out of its table while it runs (HoldRowIds)
+	// and the row groups it wrote to are kept by their writer count
+	bool require_vacuum_lock =
+	    GetTransactionManager().InsertRequiresVacuumLock() && (type.InsertData() || type.DeleteData());
 	if (require_vacuum_lock) {
 		if (!vacuum_lock) {
 			vacuum_lock = GetTransactionManager().SharedVacuumLock();
 		}
-		// with merges that take the lock themselves, it is given back when the transaction ends
-		transaction_holds_vacuum_lock = GetTransactionManager().VacuumSealsMerges();
+		// kept until the transaction is destroyed, also if a row id read took it first
+		transaction_holds_vacuum_lock = false;
 	}
 }
 

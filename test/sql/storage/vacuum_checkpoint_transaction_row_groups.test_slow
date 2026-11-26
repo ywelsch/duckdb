@@ -1,5 +1,5 @@
 # name: test/sql/storage/vacuum_checkpoint_transaction_row_groups.test_slow
-# description: A transaction that has asked for row ids keeps checkpoints from moving rows until it ends
+# description: A transaction that has asked for row ids of a table keeps checkpoints from moving them until it ends
 # group: [storage]
 
 load {TEST_DIR}/vacuum_checkpoint_transaction_row_groups.db readwrite v2.1.0
@@ -27,14 +27,10 @@ endloop
 statement ok
 CHECKPOINT
 
-foreach tbl t_ids t_del t_plain
-
 statement ok
-DELETE FROM {tbl} WHERE i >= 245760 AND i % 10 <> 0
+DELETE FROM t_ids WHERE i >= 245760 AND i % 10 <> 0
 
-endloop
-
-# a transaction that has asked for row ids: the checkpoint leaves the row groups as they are
+# a transaction that has asked for row ids: the checkpoint leaves the row groups of that table as they are
 statement ok con1
 BEGIN
 
@@ -59,7 +55,10 @@ SELECT rowid, i FROM t_ids WHERE i = 300000
 statement ok con1
 COMMIT
 
-# a transaction that has deleted rows; a checkpoint needs changes in the WAL to do anything
+statement ok
+DELETE FROM t_del WHERE i >= 245760 AND i % 10 <> 0
+
+# a transaction that has deleted rows keeps the row group it deleted in, the others are merged
 statement ok con1
 BEGIN
 
@@ -75,7 +74,7 @@ CHECKPOINT
 query II con2
 SELECT (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t_del')), (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t_ids'))
 ----
-5	5
+4	3
 
 query II con1
 SELECT rowid, i FROM t_del WHERE i = 300010
@@ -88,7 +87,7 @@ COMMIT
 # a transaction that has read a table without asking for row ids does not hold the merges back: a query that
 # fetches rows by row id on its own account does not count
 statement ok con2
-INSERT INTO other VALUES (2)
+DELETE FROM t_plain WHERE i >= 245760 AND i % 10 <> 0
 
 statement ok con1
 BEGIN

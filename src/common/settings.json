@@ -348,6 +348,13 @@
         "default_value": "0"
     },
     {
+        "name": "debug_checkpoint_seal_sleep_ms",
+        "description": "DEBUG SETTING: time to sleep after a checkpoint planned and built a merge, before it seals it",
+        "type": "UBIGINT",
+        "default_scope": "global",
+        "default_value": "0"
+    },
+    {
         "name": "debug_checkpoint_sleep_ms",
         "description": "Time to sleep before a checkpoint is invoked.",
         "type": "UBIGINT",

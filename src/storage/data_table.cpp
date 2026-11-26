@@ -286,9 +286,23 @@ static bool ScansRowIds(const vector<T> &columns) {
 }
 
 void DataTable::KeepRowIds(ClientContext &context, DuckTransaction &transaction, bool scans_row_ids) {
-	// row ids that only serve the statement itself, as in a delete, do not outlive it
-	if (scans_row_ids && MetaTransaction::Get(context).StatementReadsRowIds()) {
-		transaction.KeepVacuumLockForTransaction();
+	if (!scans_row_ids) {
+		return;
+	}
+	auto &meta_transaction = MetaTransaction::Get(context);
+	if (!transaction.GetTransactionManager().VacuumSealsMerges()) {
+		// a merging checkpoint holds the vacuum lock for its whole run; deletes hold it until the transaction ends
+		if (meta_transaction.StatementReadsRowIds()) {
+			transaction.KeepVacuumLockForTransaction();
+		}
+		return;
+	}
+	if (meta_transaction.StatementReadsRowIds()) {
+		// row ids handed to the user stay valid until the transaction ends
+		transaction.HoldRowIds(row_groups, true);
+	} else if (meta_transaction.StatementWritesRows()) {
+		// deletes and updates by the scanned row ids; once written, the row groups are kept by their writer count
+		transaction.HoldRowIds(row_groups, false);
 	}
 }
 

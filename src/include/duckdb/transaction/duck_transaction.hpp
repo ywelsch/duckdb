@@ -83,6 +83,8 @@ public:
 	ReaderRowGroups GetRowGroups(const shared_ptr<RowGroupCollection> &collection);
 	//! The same, without making the statement a reader of the table (for use before it holds its locks)
 	ReaderRowGroups PeekRowGroups(const shared_ptr<RowGroupCollection> &collection);
+	//! Keeps merges out of the table until the running statement ends, or the transaction if until_transaction_end
+	void HoldRowIds(const shared_ptr<RowGroupCollection> &collection, bool until_transaction_end);
 	//! Keeps a row group this transaction writes deletes or update markers to out of merges
 	void RegisterRowGroupWrite(const shared_ptr<RowGroupVersionInfo> &version_info);
 	//! Waits until the checkpoints that merged row groups this transaction wrote to are durable
@@ -159,6 +161,9 @@ private:
 	mutex read_tables_lock;
 	//! The tables read by the running statement, with the row id version it reads each of them at
 	reference_map_t<RowGroupCollection, pair<shared_ptr<RowGroupCollection>, idx_t>> read_tables;
+	//! The tables whose row ids the running statement, and the transaction, keep from moving
+	reference_map_t<RowGroupCollection, shared_ptr<RowGroupCollection>> statement_row_id_holds;
+	reference_map_t<RowGroupCollection, shared_ptr<RowGroupCollection>> transaction_row_id_holds;
 	//! Whether tables are read from the live row groups only: the transaction is ending
 	bool reads_live_row_groups = false;
 	//! Lock for the row groups and latches below

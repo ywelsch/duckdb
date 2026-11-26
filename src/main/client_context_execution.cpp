@@ -261,7 +261,14 @@ unique_ptr<QueryResult> ClientContext::SubmitPreparedStatementInternal(
 	D_ASSERT(active_query);
 	auto &statement_data = *statement_data_p;
 	if (transaction.HasActiveTransaction()) {
-		MetaTransaction::Get(*this).SetStatementReadsRowIds(statement_data.properties.reads_row_ids);
+		auto &meta_transaction = MetaTransaction::Get(*this);
+		meta_transaction.SetStatementReadsRowIds(statement_data.properties.reads_row_ids);
+		bool writes_rows = false;
+		for (auto &entry : statement_data.properties.modified_databases) {
+			auto &modifications = entry.second.modifications;
+			writes_rows = writes_rows || modifications.DeleteData() || modifications.UpdateData();
+		}
+		meta_transaction.SetStatementWritesRows(writes_rows);
 	}
 	BindPreparedStatementParameters(*this, statement_data, parameters);
 	// The plan must outlive the executor, also when Initialize throws

@@ -281,6 +281,11 @@ public:
 	void UnregisterReader(idx_t version);
 	//! The row groups a registered reader reads: the live ones, or the ones from before a checkpoint moved rows
 	ReaderRowGroups GetReaderRowGroups(idx_t version) const;
+	//! Keeps merges out of the table while row ids read from it are in use. Called under the shared vacuum lock,
+	//! which a merge holds exclusively while it checks for holders
+	void HoldRowIds();
+	void ReleaseRowIds();
+	bool RowIdsHeld() const;
 
 	//! The metadata blocks of the table data of this collection, as read from disk or written by the last checkpoint
 	const vector<MetaBlockPointer> &GetMetadataPointers() const {
@@ -319,6 +324,8 @@ private:
 	unordered_map<idx_t, idx_t> readers;
 	//! The row groups from before a checkpoint moved rows, per row id version that still has readers
 	unordered_map<idx_t, shared_ptr<RowGroupSegmentTree>> replaced_row_groups;
+	//! The statements and transactions that keep the row ids of the table from moving
+	atomic<idx_t> row_id_holders {0};
 	//! Table statistics
 	TableStatistics stats;
 	//! Allocation size, only tracked for appends

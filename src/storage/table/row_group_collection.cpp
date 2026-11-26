@@ -256,6 +256,19 @@ ReaderRowGroups RowGroupCollection::GetReaderRowGroups(idx_t version) const {
 	return result;
 }
 
+void RowGroupCollection::HoldRowIds() {
+	row_id_holders++;
+}
+
+void RowGroupCollection::ReleaseRowIds() {
+	D_ASSERT(row_id_holders > 0);
+	row_id_holders--;
+}
+
+bool RowGroupCollection::RowIdsHeld() const {
+	return row_id_holders > 0;
+}
+
 void RowGroupCollection::SetRowGroups(shared_ptr<RowGroupSegmentTree> new_row_groups, bool row_ids_changed) {
 	lock_guard<mutex> guard(row_group_pointer_lock);
 	if (row_ids_changed) {
@@ -1597,11 +1610,20 @@ private:
 			if (merged_rows != merge_rows) {
 				return false;
 			}
+			auto seal_sleep_ms =
+			    Settings::Get<DebugCheckpointSealSleepMsSetting>(checkpoint_state.writer.GetDatabase());
+			if (seal_sleep_ms > 0) {
+				ThreadUtil::SleepMs(seal_sleep_ms);
+			}
 			// appends, deletes and index scans stay out while the live row groups are replaced
 			append_guard = unique_lock<mutex>(*checkpoint_state.append_lock);
 			vacuum_lock = transaction_manager.TryGetVacuumLock(SEAL_LOCK_TIMEOUT_MS);
 			if (!vacuum_lock) {
 				transaction_manager.AbandonVacuumSeals();
+				return false;
+			}
+			if (checkpoint_state.collection.RowIdsHeld()) {
+				// a statement or transaction started using row ids of the table after the merge was planned
 				return false;
 			}
 			for (auto c_idx : source_indexes) {
@@ -1678,6 +1700,11 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	// currently we can only vacuum deletes if we are doing a full checkpoint
 	state.can_vacuum_deletes = options.type != CheckpointType::CONCURRENT_CHECKPOINT;
 	if (!state.can_vacuum_deletes) {
+		return;
+	}
+	if (RowIdsHeld()) {
+		// a statement or transaction uses row ids it read from the table (a merge also checks when it is sealed)
+		state.can_vacuum_deletes = false;
 		return;
 	}
 
