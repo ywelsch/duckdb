@@ -11,12 +11,12 @@
 using namespace duckdb;
 
 // A commit is published before its WAL is durable. These tests check that a transaction starting in
-// that window does not get to see it
+// that window does not get to see it, and that an explicit COMMIT parked in it completes
 namespace {
 
 constexpr idx_t ROW_COUNT = 5000;
 
-//! Parks WAL fsyncs while armed
+//! Parks WAL fsyncs while armed, and fails them on request
 class GatedFsyncFileSystem : public LocalFileSystem {
 public:
 	void FileSync(FileHandle &handle) override {
@@ -26,6 +26,9 @@ public:
 				parked = true;
 				cv.notify_all();
 				cv.wait(guard, [&]() { return released; });
+				if (fail) {
+					throw IOException("injected WAL fsync failure");
+				}
 			}
 		}
 		LocalFileSystem::FileSync(handle);
@@ -35,16 +38,18 @@ public:
 		armed = true;
 		parked = false;
 		released = false;
+		fail = false;
 	}
 	bool WaitUntilParked() {
 		unique_lock<mutex> guard(lock);
 		return cv.wait_for(guard, std::chrono::seconds(60), [&]() { return parked; });
 	}
-	void Release() {
+	void Release(bool fail_sync = false) {
 		{
 			lock_guard<mutex> guard(lock);
 			released = true;
 			armed = false;
+			fail = fail_sync;
 		}
 		cv.notify_all();
 	}
@@ -55,6 +60,7 @@ private:
 	bool armed = false;
 	bool parked = false;
 	bool released = false;
+	bool fail = false;
 };
 
 struct GatedDatabase {
@@ -83,8 +89,8 @@ struct GatedDatabase {
 		});
 		REQUIRE(gate->WaitUntilParked());
 	}
-	bool FinishWriter() {
-		gate->Release();
+	bool FinishWriter(bool fail_sync = false) {
+		gate->Release(fail_sync);
 		if (writer.joinable()) {
 			writer.join();
 		}
@@ -106,6 +112,31 @@ idx_t ScalarValue(Connection &con, const string &query) {
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	return result->Collection().GetValue(0, 0).GetValue<idx_t>();
+}
+
+void Setup(Connection &con) {
+	// only the calling thread runs a submitted query's tasks
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET checkpoint_threshold='1TB'"));
+	REQUIRE_NO_FAIL(con.Query("PRAGMA disable_checkpoint_on_shutdown"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE t(i INTEGER)"));
+}
+
+//! Submits COMMIT and runs it until its task parks
+unique_ptr<QueryResult> SubmitParkedCommit(Connection &con) {
+	auto result = con.Submit("COMMIT");
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+	while (std::chrono::steady_clock::now() < deadline) {
+		auto state = result->ExecuteTask();
+		if (state == QueryResultState::BLOCKED) {
+			return result;
+		}
+		REQUIRE(state != QueryResultState::FINISHED);
+		REQUIRE(state != QueryResultState::EXECUTION_ERROR);
+		REQUIRE(state != QueryResultState::READY);
+	}
+	FAIL("the COMMIT did not park");
+	return result;
 }
 
 } // namespace
@@ -188,4 +219,99 @@ TEST_CASE("txid_current stays unique while commits are pending durability", "[ap
 	REQUIRE_NO_FAIL(second.Query("COMMIT"));
 
 	REQUIRE(gated.FinishWriter());
+}
+
+TEST_CASE("A checkpoint completes a parked COMMIT that nobody resumes", "[api][group_commit]") {
+	GatedDatabase gated("group_commit_parked_checkpoint.db");
+	Connection setup(*gated.db);
+	Setup(setup);
+
+	Connection committer(*gated.db);
+	REQUIRE_NO_FAIL(committer.Query("BEGIN"));
+	REQUIRE_NO_FAIL(committer.Query("INSERT INTO t VALUES (1000)"));
+
+	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
+	auto commit = SubmitParkedCommit(committer);
+
+	// the writer's sync does not cover the parked commit; with no worker threads its task is not run again
+	REQUIRE(gated.FinishWriter());
+	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 100);
+	// the checkpoint drains the WAL before replacing it: it must sync for the parked commit, not wait for it
+	REQUIRE_NO_FAIL(setup.Query("CHECKPOINT"));
+	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 101);
+
+	commit->Complete();
+	REQUIRE_NO_FAIL(*commit);
+}
+
+TEST_CASE("A failed WAL sync fails the COMMIT parked behind it", "[api][group_commit]") {
+	GatedDatabase gated("group_commit_parked_failure.db");
+	Connection setup(*gated.db);
+	Setup(setup);
+
+	Connection committer(*gated.db);
+	REQUIRE_NO_FAIL(committer.Query("BEGIN"));
+	REQUIRE_NO_FAIL(committer.Query("INSERT INTO t VALUES (1000)"));
+
+	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
+	auto commit = SubmitParkedCommit(committer);
+
+	REQUIRE(!gated.FinishWriter(true));
+	commit->Complete();
+	REQUIRE(commit->HasError());
+	// the database is invalidated
+	REQUIRE_FAIL(setup.Query("SELECT count(*) FROM t"));
+}
+
+TEST_CASE("A parked COMMIT blocks new transactions on its connection and completes when abandoned",
+          "[api][group_commit]") {
+	GatedDatabase gated("group_commit_parked_abandoned.db");
+	Connection setup(*gated.db);
+	Setup(setup);
+
+	Connection committer(*gated.db);
+	REQUIRE_NO_FAIL(committer.Query("BEGIN"));
+	REQUIRE_NO_FAIL(committer.Query("INSERT INTO t VALUES (1000)"));
+
+	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
+	auto commit = SubmitParkedCommit(committer);
+
+	// runs in a transaction without ending the open query: refused, and the COMMIT is unaffected
+	REQUIRE_THROWS(committer.TableInfo("t"));
+
+	REQUIRE(gated.FinishWriter());
+	// still parked: snapshots stop below the commit until it is durable
+	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 100);
+	// the client drops the result: the parked COMMIT is abandoned, but it is irreversible
+	commit.reset();
+	REQUIRE(ScalarValue(committer, "SELECT count(*) FROM t") == 101);
+	REQUIRE(committer.TableInfo("t"));
+}
+
+TEST_CASE("A parked COMMIT resumes the commit of the remaining databases", "[api][group_commit]") {
+	GatedDatabase gated("group_commit_parked_attached.db");
+	Connection setup(*gated.db);
+	Setup(setup);
+	auto other_path = TestCreatePath("group_commit_parked_attached_other.db");
+	DeleteDatabase(other_path);
+	REQUIRE_NO_FAIL(setup.Query("ATTACH '" + other_path + "' AS other"));
+	REQUIRE_NO_FAIL(setup.Query("CREATE TABLE other.o AS SELECT 1 AS i"));
+
+	Connection committer(*gated.db);
+	REQUIRE_NO_FAIL(committer.Query("BEGIN"));
+	// databases commit in reverse order of use: the write to t commits and parks before temp and other commit
+	REQUIRE_NO_FAIL(committer.Query("CREATE TEMP TABLE tt AS SELECT 7 AS i"));
+	REQUIRE(ScalarValue(committer, "SELECT count(*) FROM other.o") == 1);
+	REQUIRE_NO_FAIL(committer.Query("INSERT INTO t VALUES (1000)"));
+
+	gated.StartWriter("INSERT INTO t SELECT * FROM range(100)");
+	auto commit = SubmitParkedCommit(committer);
+
+	REQUIRE(gated.FinishWriter());
+	commit->Complete();
+	REQUIRE_NO_FAIL(*commit);
+	REQUIRE(ScalarValue(setup, "SELECT count(*) FROM t") == 101);
+	// the temp database committed after the resume
+	REQUIRE(ScalarValue(committer, "SELECT i FROM tt") == 7);
+	REQUIRE(ScalarValue(committer, "SELECT count(*) FROM other.o") == 1);
 }
