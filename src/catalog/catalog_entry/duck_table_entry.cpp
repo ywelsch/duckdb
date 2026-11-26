@@ -1461,7 +1461,7 @@ void DuckTableEntry::SetAsRoot() {
 	storage->SetTableName(name);
 }
 
-void DuckTableEntry::CommitAlter(string &column_name, CommitDropState &drop_state) {
+void DuckTableEntry::CommitAlter(string &column_name, CommitDropState &drop_state, transaction_t commit_id) {
 	D_ASSERT(!column_name.empty());
 	optional_idx logical_column_idx;
 	idx_t column_position = 0;
@@ -1482,7 +1482,7 @@ void DuckTableEntry::CommitAlter(string &column_name, CommitDropState &drop_stat
 	}
 	auto logical_column_index = LogicalIndex(logical_column_idx.GetIndex());
 	auto column_index = columns.LogicalToPhysical(logical_column_index).index;
-	storage->CommitDropColumn(column_index, drop_state);
+	storage->CommitDropColumn(column_index, drop_state, commit_id);
 }
 
 void DuckTableEntry::CommitDrop(CommitDropState &drop_state) {

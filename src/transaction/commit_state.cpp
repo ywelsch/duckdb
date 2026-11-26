@@ -212,7 +212,7 @@ void CommitState::CommitEntryDrop(CatalogEntry &entry, data_ptr_t dataptr, Commi
 					auto &table_entry = entry.Cast<DuckTableEntry>();
 					D_ASSERT(table_entry.IsDuckTable());
 					// write the alter table in the log
-					table_entry.CommitAlter(column_name, drop_state);
+					table_entry.CommitAlter(column_name, drop_state, commit_id);
 				}
 				break;
 			case CatalogType::VIEW_ENTRY:

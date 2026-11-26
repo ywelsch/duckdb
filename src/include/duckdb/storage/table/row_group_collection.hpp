@@ -251,6 +251,10 @@ public:
 	//! Removes the shared columns past column_count again, returns the row groups that had them. Runs under the
 	//! table's append lock
 	shared_ptr<RowGroupSegmentTree> RemoveSharedColumns(idx_t column_count);
+	//! Records the commit that hid a shared column: snapshots older than it still read the column
+	void SetHiddenSince(idx_t column_idx, transaction_t commit_id);
+	//! Whether a snapshot may still read a column the checkpointed version hid
+	bool HiddenColumnMayBeRead(idx_t column_idx, const CheckpointOptions &options) const;
 	shared_ptr<RowGroupCollection> RemoveColumn(idx_t col_idx);
 	shared_ptr<RowGroupCollection> AlterType(ClientContext &context, idx_t changed_idx, const LogicalType &target_type,
 	                                         vector<StorageIndex> bound_columns, Expression &cast_expr,
@@ -326,6 +330,10 @@ private:
 	unordered_map<idx_t, Value> shared_column_constants;
 	//! The positions of the columns the table's metadata on disk has, in order
 	vector<idx_t> image_columns;
+	//! Guards hidden_since
+	mutable mutex hidden_since_lock;
+	//! The commit that hid each hidden column
+	unordered_map<idx_t, transaction_t> hidden_since;
 	//! Lock held when accessing or modifying the owned_row_groups pointer
 	mutable mutex row_group_pointer_lock;
 	//! The owning pointer of the segment tree

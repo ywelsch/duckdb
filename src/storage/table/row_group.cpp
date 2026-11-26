@@ -1845,12 +1845,11 @@ bool RowGroup::ImageHasWrittenColumns(RowGroupWriter &writer) const {
 			return false;
 		}
 	}
-	// a non-concurrent checkpoint rebuilds a row group that still has data in a hidden column
-	if (writer.GetCheckpointOptions().type != CheckpointType::CONCURRENT_CHECKPOINT) {
-		for (idx_t c = 0; c < writer.GetVersionColumnCount(); c++) {
-			if (!is_written[c] && ColumnIsLoaded(c) && !columns[c]->IsHiddenPlaceholder()) {
-				return false;
-			}
+	// a row group that still has data in a hidden column nobody reads any more is rebuilt
+	for (idx_t c = 0; c < writer.GetVersionColumnCount(); c++) {
+		if (!is_written[c] && ColumnIsLoaded(c) && !columns[c]->IsHiddenPlaceholder() &&
+		    !GetCollection().HiddenColumnMayBeRead(c, writer.GetCheckpointOptions())) {
+			return false;
 		}
 	}
 	return true;
@@ -1930,8 +1929,6 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	for (auto &position : written_columns) {
 		is_written[position] = true;
 	}
-	// a non-concurrent checkpoint runs when no snapshot older than its bound is active
-	bool no_older_snapshot = writer.GetCheckpointOptions().type != CheckpointType::CONCURRENT_CHECKPOINT;
 	for (idx_t column_idx = 0; column_idx < GetColumnCount(); column_idx++) {
 		if (is_written[column_idx]) {
 			continue;
@@ -1939,7 +1936,7 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 		if (column_idx < writer.GetVersionColumnCount()) {
 			// a hidden column: its blocks are freed once
 			ImageBlockDropper dropper(GetBlockManager());
-			if (no_older_snapshot) {
+			if (!GetCollection().HiddenColumnMayBeRead(column_idx, writer.GetCheckpointOptions())) {
 				// nothing reads it any more: it stores nothing from now on, without loading it to free its blocks
 				if (!ColumnIsLoaded(column_idx)) {
 					ReadColumn(column_idx)->VisitBlockIds(dropper);

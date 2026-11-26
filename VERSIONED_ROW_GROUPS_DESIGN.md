@@ -136,6 +136,14 @@ one is visible to every active transaction, as in `CatalogSet::CleanupEntry` (`c
    stamp, instead of "the checkpoint is non-concurrent". Replace the database-wide vacuum lock of computed ALTERs
    by a per-table mark that keeps that table's row groups out of merge planning while the ALTER is open. Both work
    on today's main and keep working once the vacuum branch drops the database-wide downgrade.
+
+   *Done (2026-11-26):* the stamp is the hiding commit id, compared with the lowest visibility bound
+   (`RowGroupCollection::HiddenColumnMayBeRead`); merge planning refuses a table with a hidden column still read.
+   No per-table mark was needed: the computed ALTER holds the shared vacuum lock for its statement only, so its
+   column exists before any merging checkpoint takes its snapshot, and a merge carries a column past the
+   checkpoint's version with its rows like any other (rollback trims it at publish). The table stays mergeable
+   while the ALTER is open. Note: an `ADD COLUMN` with a non-constant default is split by the parser into
+   `ADD ... DEFAULT NULL`, `UPDATE`, `SET DEFAULT`; only `ADD COLUMN IF NOT EXISTS` reaches the computed path.
 1. **Trees as versions (compaction).** Generalize variant 2's kept trees into the collection's chain with stamps,
    pinned by snapshot; decide the stale-writer rule (translation or merge exclusion, not an error). Durability
    latch stays.

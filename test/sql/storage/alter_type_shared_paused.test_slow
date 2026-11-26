@@ -41,9 +41,10 @@ onlyif threadid=1
 statement ok
 ALTER TABLE m ALTER s TYPE BIGINT
 
+# IF NOT EXISTS keeps the ALTER from being split into an ADD and an UPDATE: it computes the column
 onlyif threadid=1
 statement ok
-ALTER TABLE m ADD COLUMN k BIGINT DEFAULT (random() * 0)::BIGINT + 1
+ALTER TABLE m ADD COLUMN IF NOT EXISTS k BIGINT DEFAULT (random() * 0)::BIGINT + 1
 
 onlyif threadid=1
 query III
@@ -160,3 +161,111 @@ query III
 SELECT COUNT(*), SUM(i), SUM(s) FROM p
 ----
 1101	609450	1208907
+
+# the ALTERs are open before a full checkpoint starts, which merges their computed columns; one commits and one rolls
+# back while it is paused
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+CREATE TABLE committed AS SELECT i, i::VARCHAR AS s FROM range(400000) t(i)
+
+statement ok
+CREATE TABLE rolled_back AS SELECT i, i::VARCHAR AS s FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+DELETE FROM committed WHERE i < 300000 AND i % 10 <> 0
+
+statement ok
+DELETE FROM rolled_back WHERE i < 300000 AND i % 10 <> 0
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=2000
+
+concurrentloop threadid 0 3
+
+onlyif threadid=1
+statement ok
+BEGIN
+
+onlyif threadid=1
+statement ok
+ALTER TABLE committed ALTER s TYPE BIGINT USING s::BIGINT * 2
+
+onlyif threadid=1
+statement ok
+ALTER TABLE committed ADD COLUMN IF NOT EXISTS k BIGINT DEFAULT (random() * 0)::BIGINT + 1
+
+onlyif threadid=2
+statement ok
+BEGIN
+
+onlyif threadid=2
+statement ok
+ALTER TABLE rolled_back ALTER s TYPE BIGINT
+
+onlyif threadid=2
+statement ok
+ALTER TABLE rolled_back ADD COLUMN IF NOT EXISTS k BIGINT DEFAULT (random() * 0)::BIGINT + 1
+
+sleep 1000 millisecond
+
+onlyif threadid=0
+statement ok
+CHECKPOINT
+
+sleep 1000 millisecond
+
+onlyif threadid=1
+statement ok
+COMMIT
+
+onlyif threadid=2
+statement ok
+ROLLBACK
+
+endloop
+
+statement ok
+SET debug_checkpoint_scan_sleep_ms=0
+
+query II
+SELECT (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('committed')), (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('rolled_back'))
+----
+2	2
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i * 2), SUM(k) FROM committed
+----
+130000	39499800000	130000	130000
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i::VARCHAR), typeof(ANY_VALUE(s)) FROM rolled_back
+----
+130000	39499800000	130000	VARCHAR
+
+statement error
+SELECT k FROM rolled_back
+----
+not found
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i * 2), SUM(k) FROM committed
+----
+130000	39499800000	130000	130000
+
+query IIII
+SELECT COUNT(*), SUM(i), COUNT(*) FILTER (s = i::VARCHAR), typeof(ANY_VALUE(s)) FROM rolled_back
+----
+130000	39499800000	130000	VARCHAR

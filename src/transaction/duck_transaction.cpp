@@ -397,11 +397,14 @@ void DuckTransaction::LockCheckpointsUntilCommit() {
 	}
 }
 
-void DuckTransaction::LockVacuumsUntilCommit() {
-	lock_guard<mutex> guard(lock_keys_lock);
-	if (!vacuum_lock) {
-		vacuum_lock = GetTransactionManager().SharedVacuumLock();
+unique_ptr<StorageLockKey> DuckTransaction::LockVacuums() {
+	{
+		lock_guard<mutex> guard(lock_keys_lock);
+		if (vacuum_lock) {
+			return nullptr;
+		}
 	}
+	return GetTransactionManager().SharedVacuumLock();
 }
 
 void DuckTransaction::AddSharedColumns(shared_ptr<DataTableInfo> info, shared_ptr<RowGroupCollection> collection,

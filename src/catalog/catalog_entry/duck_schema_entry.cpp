@@ -371,9 +371,10 @@ void DuckSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		if (transaction.transaction && AlterCopiesRowGroups(info)) {
 			transaction.transaction->Cast<DuckTransaction>().LockCheckpointsUntilCommit();
 		}
+		unique_ptr<StorageLockKey> vacuum_lock;
 		if (transaction.transaction && AlterComputesColumn(info)) {
-			// before any table lock: a vacuuming checkpoint that runs finishes its publish first
-			transaction.transaction->Cast<DuckTransaction>().LockVacuumsUntilCommit();
+			// before any table lock: a vacuuming checkpoint that runs publishes first, a later one merges the column
+			vacuum_lock = transaction.transaction->Cast<DuckTransaction>().LockVacuums();
 		}
 		auto &name = info.GetQualifiedName().Name();
 		if (!set.AlterEntry(transaction, name, info)) {

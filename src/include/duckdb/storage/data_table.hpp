@@ -266,7 +266,7 @@ public:
 	//! Accumulates the table's on-disk blocks for reclamation into the drop state.
 	void CommitDropTable(CommitDropState &drop_state);
 	//! Accumulates the column's on-disk blocks for reclamation into the drop state.
-	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state);
+	void CommitDropColumn(const idx_t column_index, CommitDropState &drop_state, transaction_t commit_id);
 
 	idx_t ColumnCount() const;
 	idx_t GetTotalRows() const;

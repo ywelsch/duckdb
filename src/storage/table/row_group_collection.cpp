@@ -1453,8 +1453,7 @@ public:
 			row_group_rows -= current_row_group_rows;
 		}
 
-		// a column the version hid is not read: its blocks can be freed and reused already, and only a
-		// non-concurrent checkpoint merges, so no older snapshot reads it
+		// a column the version hid is not read any more (checked when planning): merged row groups leave it out
 		vector<StorageIndex> column_ids;
 		vector<LogicalType> scan_types;
 		for (idx_t c = 0; c < types.size(); c++) {
@@ -1617,6 +1616,13 @@ void RowGroupCollection::InitializeVacuumState(CollectionCheckpointState &checkp
 	state.can_vacuum_deletes = options.type != CheckpointType::CONCURRENT_CHECKPOINT;
 	if (!state.can_vacuum_deletes) {
 		return;
+	}
+	// merged row groups leave out the hidden columns
+	for (idx_t c = 0; c < checkpoint_state.hidden_columns.size(); c++) {
+		if (checkpoint_state.IsHiddenColumn(c) && HiddenColumnMayBeRead(c, options)) {
+			state.can_vacuum_deletes = false;
+			return;
+		}
 	}
 
 	// Index state decides whether vacuum may change surviving rowids.
@@ -2311,7 +2317,7 @@ shared_ptr<RowGroupSegmentTree> RowGroupCollection::AlignCheckpointColumns(Colle
 			for (idx_t c = result.column_count; c < live_types.size(); c++) {
 				auto constant = shared_column_constants.find(c);
 				if (constant == shared_column_constants.end()) {
-					// a computed column: its ALTER holds vacuums back until it commits
+					// a computed column: its ALTER waits for a merging checkpoint that runs, and a later one merges it
 					throw InternalException("A checkpoint merged row groups of a table whose ALTER computed a column");
 				}
 				row_group->AddConstantColumn(live_types[c], constant->second);
@@ -2412,10 +2418,36 @@ shared_ptr<RowGroupSegmentTree> RowGroupCollection::RemoveSharedColumns(idx_t co
 	for (idx_t c = column_count; c < new_types.size(); c++) {
 		shared_column_constants.erase(c);
 	}
+	{
+		lock_guard<mutex> guard(hidden_since_lock);
+		for (idx_t c = column_count; c < new_types.size(); c++) {
+			hidden_since.erase(c);
+		}
+	}
 	new_types.resize(column_count);
 	SetRowGroups(std::move(new_row_groups));
 	SetTypes(std::move(new_types));
 	return row_groups;
+}
+
+void RowGroupCollection::SetHiddenSince(idx_t column_idx, transaction_t commit_id) {
+	lock_guard<mutex> guard(hidden_since_lock);
+	hidden_since[column_idx] = commit_id;
+}
+
+bool RowGroupCollection::HiddenColumnMayBeRead(idx_t column_idx, const CheckpointOptions &options) const {
+	transaction_t hidden_commit;
+	{
+		lock_guard<mutex> guard(hidden_since_lock);
+		auto entry = hidden_since.find(column_idx);
+		if (entry == hidden_since.end()) {
+			// not stamped: only a checkpoint without older snapshots knows that nobody reads it
+			return options.type == CheckpointType::CONCURRENT_CHECKPOINT;
+		}
+		hidden_commit = entry->second;
+	}
+	// every active transaction, and every later one, sees the commit that hid it
+	return hidden_commit >= DuckTransactionManager::Get(GetAttached()).LowestVisibilityBound();
 }
 
 void RowGroupCollection::InstallCheckpoint(CollectionCheckpointResult result, TableStatistics &checkpoint_stats) {

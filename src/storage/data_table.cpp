@@ -1859,9 +1859,10 @@ void DataTable::Checkpoint(TableDataWriter &writer, Serializer &serializer) {
 	writer.FinalizeTable(checkpoint_stats, *info, *row_groups, index_infos, serializer);
 }
 
-void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state) {
+void DataTable::CommitDropColumn(const idx_t column_index, CommitDropState &drop_state, transaction_t commit_id) {
 	if (successor_shares_row_groups) {
-		// the newer version keeps the column hidden in the shared row groups: its checkpoint frees the blocks
+		// the newer version keeps the column hidden in the shared row groups: a checkpoint frees the blocks
+		row_groups->SetHiddenSince(PhysicalColumn(column_index), commit_id);
 		return;
 	}
 	row_groups->CommitDropColumn(PhysicalColumn(column_index), drop_state);

@@ -1,0 +1,128 @@
+# name: test/sql/storage/alter_shared_hidden_since.test
+# description: A concurrent checkpoint gives up a hidden column once every snapshot sees the ALTER that hid it
+# group: [storage]
+
+# a restart between the statements checkpoints without the readers
+require skip_reload
+
+load {TEST_DIR}/alter_shared_hidden_since.db
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+# uncompressed strings longer than a block's string limit go to overflow blocks
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+CREATE TABLE dropped AS SELECT i, repeat(md5(i::VARCHAR), 160) AS s FROM range(2000) t(i)
+
+statement ok
+CREATE TABLE retyped AS SELECT i, repeat(md5((i + 1)::VARCHAR), 160) AS s FROM range(2000) t(i)
+
+statement ok
+CREATE TABLE tick (i INTEGER)
+
+statement ok
+CREATE TABLE filler (i INTEGER, s VARCHAR)
+
+statement ok
+CHECKPOINT
+
+# the columns are loaded from disk only when read
+restart
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+SET force_compression='uncompressed'
+
+statement ok
+SET debug_verify_blocks=true
+
+statement ok
+ALTER TABLE dropped DROP COLUMN s
+
+statement ok
+ALTER TABLE retyped ALTER s TYPE BLOB
+
+# snapshots that started after the ALTERs keep the checkpoints concurrent but do not read the old columns
+statement ok con1
+BEGIN
+
+query II con1
+SELECT COUNT(*), SUM(i) FROM dropped
+----
+2000	1999000
+
+statement ok
+INSERT INTO tick VALUES (1)
+
+# frees the old columns' blocks without loading them
+statement ok
+CHECKPOINT
+
+statement ok con2
+BEGIN
+
+query I con2
+SELECT COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)::BLOB) FROM retyped
+----
+2000
+
+statement ok con1
+COMMIT
+
+statement ok
+INSERT INTO tick VALUES (2)
+
+# con2 started after the blocks were freed: nothing holds them
+statement ok
+CHECKPOINT
+
+statement ok
+ATTACH ':memory:' AS mem
+
+statement ok
+CREATE TABLE mem.sizes AS SELECT total_blocks FROM pragma_database_size() WHERE database_name = 'alter_shared_hidden_since'
+
+# one and a half old columns: fits only if both were freed
+statement ok
+INSERT INTO filler SELECT i, repeat(md5((i + 2)::VARCHAR), 160) FROM range(3000) t(i)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT total_blocks = (SELECT total_blocks FROM mem.sizes) FROM pragma_database_size() WHERE database_name = 'alter_shared_hidden_since'
+----
+true
+
+statement ok con2
+COMMIT
+
+restart
+
+statement ok
+SET debug_verify_blocks=true
+
+query II
+SELECT COUNT(*), SUM(i) FROM dropped
+----
+2000	1999000
+
+query III
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 1)::VARCHAR), 160)::BLOB), typeof(ANY_VALUE(s)) FROM retyped
+----
+2000	2000	BLOB
+
+query I
+SELECT COUNT(*) FROM tick
+----
+2
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (s = repeat(md5((i + 2)::VARCHAR), 160)) FROM filler
+----
+3000	3000
