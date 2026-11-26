@@ -12,6 +12,7 @@
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table/update_segment.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/transaction/transaction_data.hpp"
 
 namespace duckdb {
 
@@ -92,27 +93,34 @@ ColumnDataCheckpointer::ColumnDataCheckpointer(vector<reference<ColumnCheckpoint
 }
 
 void ColumnDataCheckpointer::ScanSegments(const std::function<void(Vector &)> &callback) {
-	auto &first_state = checkpoint_states[0];
-	auto &col_data = first_state.get().original_column;
-
-	// TODO: scan all the nodes from all segments, no need for CheckpointScan to virtualize this I think..
-	for (auto &segment_node : col_data.data.SegmentNodes()) {
-		auto &segment = segment_node.GetNode();
-		ColumnScanState scan_state(nullptr);
-		scan_state.current = segment_node;
-		segment.InitializeScan(scan_state);
-
-		auto &scan_vector = intermediate.data[0];
-		for (idx_t base_row_index = 0; base_row_index < segment.count; base_row_index += STANDARD_VECTOR_SIZE) {
-			intermediate.Reset();
-
-			idx_t count = MinValue<idx_t>(segment.count - base_row_index, STANDARD_VECTOR_SIZE);
-			scan_state.offset_in_column = segment_node.GetRowStart() + base_row_index;
-
-			col_data.CheckpointScan(segment, scan_state, count, scan_vector, checkpoint_info.GetVisibilityBound());
-			scan_vector.BufferMutable().SetVectorSize(count);
-			callback(scan_vector);
+	auto &col_data = checkpoint_states[0].get().original_column;
+	// a scan on behalf of no transaction: the checkpoint writes what was committed before its bound
+	TransactionData transaction(MAX_TRANSACTION_ID, checkpoint_info.GetVisibilityBound());
+	const idx_t row_count = col_data.count;
+	// every checkpointed column (the data and, for a standard column, its validity) scans its own segments
+	vector<unique_ptr<ColumnScanState>> scan_states;
+	for (auto &checkpoint_state : checkpoint_states) {
+		scan_states.push_back(make_uniq<ColumnScanState>(nullptr));
+		checkpoint_state.get().original_column_mutable.InitializeSegmentScan(*scan_states.back());
+		if (row_count > 0 && !scan_states.back()->current) {
+			throw InternalException("ColumnDataCheckpointer::ScanSegments - column has rows but no segments");
 		}
+	}
+	auto &scan_vector = intermediate.data[0];
+	for (idx_t vector_index = 0; vector_index * STANDARD_VECTOR_SIZE < row_count; vector_index++) {
+		intermediate.Reset();
+		idx_t count = MinValue<idx_t>(row_count - vector_index * STANDARD_VECTOR_SIZE, STANDARD_VECTOR_SIZE);
+		for (idx_t i = 0; i < checkpoint_states.size(); i++) {
+			auto &column = checkpoint_states[i].get().original_column_mutable;
+			auto scanned = column.ScanVector(transaction, vector_index, *scan_states[i], scan_vector, count,
+			                                 ScanVectorType::SCAN_FLAT_VECTOR, UpdateScanType::STANDARD);
+			if (scanned != count) {
+				throw InternalException("ColumnDataCheckpointer::ScanSegments - scanned %llu rows instead of %llu",
+				                        scanned, count);
+			}
+		}
+		scan_vector.BufferMutable().SetVectorSize(count);
+		callback(scan_vector);
 	}
 }
 

@@ -23,6 +23,8 @@ class PartialBlockManager;
 class TableDataWriter;
 
 struct ColumnCheckpointState {
+	friend class ColumnDataCheckpointer;
+
 	ColumnCheckpointState(const RowGroup &row_group, ColumnData &original_column, Context &context,
 	                      PartialBlockManager &partial_block_manager);
 	virtual ~ColumnCheckpointState();
