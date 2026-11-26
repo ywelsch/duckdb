@@ -60,8 +60,8 @@ public:
 	transaction_t GetLastCommit() const {
 		return last_commit;
 	}
-	//! Wait until every published commit is durable, syncing for parked commits. Called under the commit lock, so
-	//! no new commit can enter its sync window and the wait is bounded by the syncs in flight
+	//! Wait until every published commit is durable. Called under the commit lock, so no new commit can
+	//! enter its sync window and the wait is bounded by the syncs in flight
 	void WaitForDurability();
 	optional_idx GetActiveCheckpoint() const {
 		auto id = active_checkpoint.load();
@@ -137,13 +137,10 @@ private:
 
 	bool CommitTransactionInternal(ClientContext &context, DuckTransaction &transaction,
 	                               optional_ptr<const InterruptState> interrupt_state, ErrorData &result);
-	//! Finish a commit that parked while it waited for its durability. Without an interrupt state, or when no sync
-	//! runs, the calling thread syncs the WAL itself
+	//! Finish a parked commit; without an interrupt state, or with no sync running, sync on this thread
 	bool FinishParkedCommit(DuckTransaction &transaction, optional_ptr<const InterruptState> interrupt_state,
 	                        ErrorData &error);
-	//! Sync the WAL up to the offset as one of the running syncs, then advance the durable bound, wake the parked
-	//! commits, and remove `committer`. Called with the transaction lock that decided to sync, which it releases;
-	//! returns the sync's error
+	//! Sync as one of the running syncs, wake parked commits and remove committer; releases the caller's lock
 	ErrorData SyncCommits(unique_lock<mutex> &t_lock, WriteAheadLog &wal, idx_t offset,
 	                      optional_ptr<DuckTransaction> committer, bool store_committer);
 
@@ -191,11 +188,9 @@ private:
 	VisibilityBound durable_bound;
 	//! Signalled when running_syncs drops to zero
 	std::condition_variable durability_cv;
-	//! Threads inside SyncCommits. A commit parks only while one runs, as the last one to end wakes every parked
-	//! commit; the drain waits for none to run before it syncs itself or the WAL is replaced
+	//! Threads inside SyncCommits: commits park only while one runs, and the drain waits for none
 	idx_t running_syncs = 0;
-	//! A commit before this bound that is not durable never becomes durable: a sync of its WAL failed with
-	//! sync_failure. Only ever advances
+	//! A commit below this bound that is not durable never will be: its WAL failed to sync with sync_failure
 	VisibilityBound failed_bound;
 	ErrorData sync_failure;
 

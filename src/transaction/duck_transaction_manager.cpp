@@ -320,8 +320,7 @@ void DuckTransactionManager::WaitForDurability() {
 	unique_lock<mutex> guard(transaction_lock);
 	while (true) {
 		durability_cv.wait(guard, [&]() { return running_syncs == 0; });
-		// with no sync running, a published commit that is not durable is parked, and its committer may never
-		// resume: sync for it here. A commit whose sync failed cannot become durable anymore
+		// no sync runs: a commit that is not durable is parked and may never resume, so sync for it here
 		idx_t offset = 0;
 		for (auto &active_transaction : active_transactions) {
 			if (active_transaction->wal_sync_offset != 0 && active_transaction->commit_id >= durable_bound &&
@@ -376,8 +375,7 @@ ErrorData DuckTransactionManager::SyncCommits(unique_lock<mutex> &t_lock, WriteA
 			failed_bound = VisibilityBound::Through(last_commit);
 			sync_failure = sync_error;
 		}
-		// parked committers check for themselves whether they are done: wake them once the durable bound moved, a
-		// sync failed, or no sync runs anymore, so that one of them syncs
+		// parked commits check for themselves: wake them when the bound moved, a sync failed, or none runs anymore
 		if (durable_bound != previous_bound || sync_error.HasError() || running_syncs == 0) {
 			for (auto &active_transaction : active_transactions) {
 				auto &callback = active_transaction->sync_callback;
@@ -662,8 +660,7 @@ bool DuckTransactionManager::CommitTransactionInternal(ClientContext &context, D
 		// as they (1) have been removed, or (2) enter cleanup_info.
 		t_lock.unlock();
 	} else {
-		// make the commit durable before acknowledging it; one fsync can cover many commits. The sync is counted in
-		// the lock hold that decided against parking, so that commits publishing after this one park behind it
+		// make the commit durable before acknowledging it; counted in this lock hold, so later commits park behind it
 		D_ASSERT(!error.HasError());
 		error = SyncCommits(t_lock, *commit_wal, info.wal_sync_offset, transaction, store_transaction);
 		if (error.HasError()) {
