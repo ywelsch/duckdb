@@ -140,7 +140,7 @@ MetadataManager &SingleFileCheckpointWriter::GetMetadataManager() {
 }
 
 unique_ptr<TableDataWriter> SingleFileCheckpointWriter::GetTableDataWriter(TableCatalogEntry &table) {
-	return make_uniq<SingleFileTableDataWriter>(*this, table, *table_metadata_writer, *row_group_pointer_writer);
+	return make_uniq<SingleFileTableDataWriter>(*this, table, *column_metadata_writer, *row_group_pointer_writer);
 }
 
 static catalog_entry_vector_t GetCatalogEntries(vector<reference<DuckSchemaEntry>> &schemas, VisibilityBound bound) {
@@ -242,7 +242,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 
 	//! Set up the writers for the checkpoints
 	metadata_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
-	table_metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
+	column_metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
 	row_group_pointer_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::ATTACH);
 
 	// get the id of the first meta block
@@ -316,7 +316,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	pending_publications.clear();
 
 	metadata_writer->Flush();
-	table_metadata_writer->Flush();
+	column_metadata_writer->Flush();
 	row_group_pointer_writer->Flush();
 
 	auto debug_checkpoint_abort = Settings::Get<DebugCheckpointAbortSetting>(db.GetDatabase());

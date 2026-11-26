@@ -68,15 +68,15 @@ Context &TableDataWriter::GetContext() const {
 }
 
 SingleFileTableDataWriter::SingleFileTableDataWriter(SingleFileCheckpointWriter &checkpoint_manager,
-                                                     TableCatalogEntry &table, MetadataWriter &table_data_writer,
+                                                     TableCatalogEntry &table, MetadataWriter &column_metadata_writer,
                                                      MetadataWriter &row_group_pointer_writer)
     : TableDataWriter(table, checkpoint_manager.GetContext()), checkpoint_manager(checkpoint_manager),
-      table_data_writer(table_data_writer), row_group_pointer_writer(row_group_pointer_writer) {
+      column_metadata_writer(column_metadata_writer), row_group_pointer_writer(row_group_pointer_writer) {
 }
 
 unique_ptr<RowGroupWriter> SingleFileTableDataWriter::GetRowGroupWriter() {
 	return make_uniq<SingleFileRowGroupWriter>(table, checkpoint_manager.partial_block_manager, *this,
-	                                           table_data_writer);
+	                                           column_metadata_writer);
 }
 
 CheckpointOptions SingleFileTableDataWriter::GetCheckpointOptions() const {

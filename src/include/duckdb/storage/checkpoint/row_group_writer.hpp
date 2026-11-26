@@ -67,7 +67,7 @@ protected:
 class SingleFileRowGroupWriter : public RowGroupWriter {
 public:
 	SingleFileRowGroupWriter(TableCatalogEntry &table, PartialBlockManager &partial_block_manager,
-	                         TableDataWriter &writer, MetadataWriter &table_data_writer);
+	                         TableDataWriter &writer, MetadataWriter &column_metadata_writer);
 
 public:
 	CheckpointOptions GetCheckpointOptions() const override;
@@ -80,7 +80,7 @@ public:
 private:
 	//! MetadataWriter is a cursor on a given BlockManager. This returns the
 	//! cursor against which we should write payload data for the specified RowGroup.
-	MetadataWriter &table_data_writer;
+	MetadataWriter &column_metadata_writer;
 };
 
 } // namespace duckdb

@@ -22,8 +22,8 @@ AttachedDatabase &RowGroupWriter::GetAttachedDatabase() {
 }
 
 SingleFileRowGroupWriter::SingleFileRowGroupWriter(TableCatalogEntry &table, PartialBlockManager &partial_block_manager,
-                                                   TableDataWriter &writer, MetadataWriter &table_data_writer)
-    : RowGroupWriter(writer, table, partial_block_manager), table_data_writer(table_data_writer) {
+                                                   TableDataWriter &writer, MetadataWriter &column_metadata_writer)
+    : RowGroupWriter(writer, table, partial_block_manager), column_metadata_writer(column_metadata_writer) {
 }
 
 CheckpointOptions SingleFileRowGroupWriter::GetCheckpointOptions() const {
@@ -31,23 +31,23 @@ CheckpointOptions SingleFileRowGroupWriter::GetCheckpointOptions() const {
 }
 
 WriteStream &SingleFileRowGroupWriter::GetPayloadWriter() {
-	return table_data_writer;
+	return column_metadata_writer;
 }
 
 MetaBlockPointer SingleFileRowGroupWriter::GetMetaBlockPointer() {
-	return table_data_writer.GetMetaBlockPointer();
+	return column_metadata_writer.GetMetaBlockPointer();
 }
 
 optional_ptr<MetadataManager> SingleFileRowGroupWriter::GetMetadataManager() {
-	return table_data_writer.GetManager();
+	return column_metadata_writer.GetManager();
 }
 
 void SingleFileRowGroupWriter::StartWritingColumns(vector<MetaBlockPointer> &column_metadata) {
-	table_data_writer.SetWrittenPointers(column_metadata);
+	column_metadata_writer.SetWrittenPointers(column_metadata);
 }
 
 void SingleFileRowGroupWriter::FinishWritingColumns() {
-	table_data_writer.SetWrittenPointers(nullptr);
+	column_metadata_writer.SetWrittenPointers(nullptr);
 }
 
 } // namespace duckdb

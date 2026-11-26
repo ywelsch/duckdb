@@ -178,8 +178,8 @@ private:
 private:
 	//! The metadata writer is responsible for writing schema information
 	unique_ptr<MetadataWriter> metadata_writer;
-	//! The table data writer is responsible for writing the DataPointers used by the table chunks
-	unique_ptr<MetadataWriter> table_metadata_writer;
+	//! Writes the column metadata of each row group: the data pointers and segment statistics
+	unique_ptr<MetadataWriter> column_metadata_writer;
 	//! Writes what each table pointer points to: the table statistics, then the row group pointers
 	unique_ptr<MetadataWriter> row_group_pointer_writer;
 	//! Because this is single-file storage, we can share partial blocks across
