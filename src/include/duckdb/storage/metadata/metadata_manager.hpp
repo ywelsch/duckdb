@@ -77,7 +77,7 @@ public:
 	}
 
 	//! Allocates a sub-block, only from blocks of the pool once there are a few metadata blocks
-	MetadataHandle AllocateHandle(MetadataPool pool = MetadataPool::DEFAULT);
+	MetadataHandle AllocateHandle(MetadataPool pool);
 	//! Remembers sub-blocks that loading the database read
 	void AddLoadPointers(const vector<MetaBlockPointer> &pointers);
 	//! Puts the blocks whose contents loading the database mostly read into the load pool
