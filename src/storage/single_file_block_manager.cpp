@@ -1152,15 +1152,6 @@ idx_t SingleFileBlockManager::TotalBlocks() {
 	return NumericCast<idx_t>(max_block);
 }
 
-block_id_t SingleFileBlockManager::GetTruncationWatermark(const unordered_set<block_id_t> &movable_blocks) {
-	lock_guard<mutex> lock(single_file_block_lock);
-	auto watermark = max_block;
-	while (watermark > 0 && (free_list.count(watermark - 1) || movable_blocks.count(watermark - 1))) {
-		watermark--;
-	}
-	return watermark;
-}
-
 idx_t SingleFileBlockManager::FreeBlocks() {
 	lock_guard<mutex> lock(single_file_block_lock);
 	return free_list.size();

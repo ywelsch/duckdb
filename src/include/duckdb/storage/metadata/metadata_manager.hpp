@@ -86,8 +86,6 @@ public:
 	void RecordLoadRead(const MetadataPointer &pointer);
 	//! Stops putting the blocks that are read into the load pool
 	void EndLoad();
-	//! Finds the block id the file could be truncated to if no metadata were in the way, at the start of a checkpoint
-	void UpdateTruncationWatermark();
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
 	MetadataHandle Pin(const QueryContext &context, const MetadataPointer &pointer);
@@ -134,8 +132,6 @@ protected:
 	atomic<bool> loading {false};
 	//! Per pool, the blocks that have free sub-blocks, so that allocation can take the lowest one
 	array<set<block_id_t>, 2> blocks_with_free_space;
-	//! Metadata in blocks at or above this id moves to a lower free block, so that the file can be truncated
-	block_id_t truncation_watermark = MAXIMUM_BLOCK;
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;

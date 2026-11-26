@@ -68,7 +68,6 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 	if (!locality) {
 		pool = MetadataPool::DEFAULT;
 	}
-	auto watermark = truncation_watermark;
 	block_id_t free_block = INVALID_BLOCK;
 	for (idx_t pool_idx = 0; pool_idx < blocks_with_free_space.size(); pool_idx++) {
 		auto &candidates = blocks_with_free_space[pool_idx];
@@ -80,11 +79,8 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 		}
 	}
 	guard.unlock();
-	// with metadata locality a pool refills its own holes, unless only free blocks and metadata come after them
-	auto next_block_id = PeekNextBlockId();
-	auto take_lower_block =
-	    locality ? free_block >= watermark && next_block_id < watermark : free_block > next_block_id;
-	if (free_block == INVALID_BLOCK || take_lower_block) {
+	// with metadata locality each pool refills its own holes rather than taking a new block with a lower id
+	if (free_block == INVALID_BLOCK || (!locality && free_block > PeekNextBlockId())) {
 		free_block = AllocateNewBlock(guard, pool);
 	} else {
 		guard.lock();
@@ -222,19 +218,6 @@ void MetadataManager::RecordLoadRead(const MetadataPointer &pointer) {
 
 void MetadataManager::EndLoad() {
 	loading = false;
-}
-
-void MetadataManager::UpdateTruncationWatermark() {
-	unordered_set<block_id_t> metadata_blocks;
-	{
-		lock_guard<mutex> guard(block_lock);
-		for (auto &kv : blocks) {
-			metadata_blocks.insert(kv.first);
-		}
-	}
-	auto watermark = block_manager.GetTruncationWatermark(metadata_blocks);
-	lock_guard<mutex> guard(block_lock);
-	truncation_watermark = watermark;
 }
 
 void MetadataManager::AddBlock(unique_lock<mutex> &block_lock, MetadataBlock new_block, bool if_exists) {

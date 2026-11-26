@@ -14,7 +14,6 @@
 #include "duckdb/common/optional.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/unordered_map.hpp"
-#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/query_context.hpp"
 #include "duckdb/storage/block.hpp"
 #include "duckdb/storage/storage_info.hpp"
@@ -95,10 +94,6 @@ public:
 
 	//! Returns the number of total blocks
 	virtual idx_t TotalBlocks() = 0;
-	//! The number of blocks the file could be truncated to if the movable blocks were free as well
-	virtual block_id_t GetTruncationWatermark(const unordered_set<block_id_t> &movable_blocks) {
-		return NumericCast<block_id_t>(TotalBlocks());
-	}
 	//! Returns the number of free blocks
 	virtual idx_t FreeBlocks() = 0;
 	//! Whether or not the attached database is a remote file (e.g. attached over s3/https)
