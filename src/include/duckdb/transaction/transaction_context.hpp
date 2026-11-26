@@ -44,8 +44,7 @@ public:
 
 	void BeginTransaction();
 	void Commit();
-	//! Commits like Commit, but returns false while the commit waits for its durability, after arranging for the
-	//! interrupt state to be called back. Must be called again until it returns true
+	//! Commit, but return false while the commit waits for durability; call again once called back
 	bool TryCommit(const InterruptState &interrupt_state);
 	//! Whether TryCommit has started a commit that has not finished
 	bool HasPendingCommit() const {

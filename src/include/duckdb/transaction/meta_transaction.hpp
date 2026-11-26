@@ -64,8 +64,7 @@ public:
 	void RemoveTransaction(AttachedDatabase &db);
 
 	ErrorData Commit(ClientContext &context);
-	//! Commits like Commit, but returns false while a database's commit waits for its durability, after arranging
-	//! for the interrupt state to be called back. Must be called again until it returns true
+	//! Commit, but return false while a database's commit waits for durability; call again once called back
 	bool TryCommit(ClientContext &context, const InterruptState &interrupt_state, ErrorData &error);
 	void Rollback(ClientContext &context);
 	// Finalize the transaction after a COMMIT of ROLLBACK.

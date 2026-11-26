@@ -1263,15 +1263,6 @@ void ClientContext::RegisterFunction(CreateFunctionInfo &info) {
 
 bool ClientContext::RunTransactionStatementInternal(const TransactionInfo &info,
                                                     optional_ptr<const InterruptState> commit_callback) {
-	if (transaction.HasPendingCommit()) {
-		// resume a COMMIT that waited for its durability
-		D_ASSERT(info.type == TransactionType::COMMIT);
-		if (!commit_callback) {
-			transaction.FinishPendingCommit();
-			return true;
-		}
-		return transaction.TryCommit(*commit_callback);
-	}
 	auto type = info.type;
 	if (type == TransactionType::COMMIT && transaction.HasActiveTransaction() &&
 	    ValidChecker::IsInvalidated(ActiveTransaction())) {
@@ -1301,13 +1292,12 @@ bool ClientContext::RunTransactionStatementInternal(const TransactionInfo &info,
 		break;
 	}
 	case TransactionType::COMMIT:
-		if (transaction.IsAutoCommit()) {
+		if (transaction.IsAutoCommit() && !transaction.HasPendingCommit()) {
 			throw TransactionException("cannot commit - no transaction is active");
 		}
 		if (commit_callback) {
 			auto done = transaction.TryCommit(*commit_callback);
-			// The commit is irreversible, also while it waits for its durability, so ignore interrupts until the
-			// next query.
+			// irreversible, also while it waits for durability: ignore interrupts until the next query
 			SuppressInterrupts();
 			return done;
 		}

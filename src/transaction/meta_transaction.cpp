@@ -128,8 +128,7 @@ bool MetaTransaction::CommitInternal(ClientContext &context, optional_ptr<const 
 #ifdef DEBUG
 	reference_set_t<AttachedDatabase> committed_tx;
 #endif
-	// commit transactions in reverse order. Called again after a commit waited for its durability, this skips the
-	// databases that are done and finishes the waiting one; no earlier database failed, or it would not have waited
+	// commit transactions in reverse order; called again, skip the finished ones and finish the waiting one
 	for (idx_t i = all_transactions.size(); i > 0; i--) {
 		auto &db = all_transactions[i - 1].get();
 		auto entry = transactions.find(db);

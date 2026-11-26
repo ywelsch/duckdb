@@ -52,7 +52,9 @@ void TransactionContext::SetAutocheckpointError(ErrorData error) {
 }
 
 void TransactionContext::Commit() {
-	StartCommit();
+	if (!committing_transaction) {
+		StartCommit();
+	}
 	FinishPendingCommit();
 }
 

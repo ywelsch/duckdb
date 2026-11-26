@@ -337,8 +337,8 @@ private:
 
 	//! Runs a transaction statement without going through the local query processing pipeline.
 	void RunTransactionStatement(const TransactionInfo &info);
-	//! Same as RunTransactionStatement, but does not obtain a lock or route CONNECT statements. With an interrupt
-	//! state, a COMMIT returns false while it waits for its durability; it must then be run again once called back
+	//! Same as RunTransactionStatement, but does not obtain a lock or route CONNECT statements.
+	//! With commit_callback, a COMMIT returns false while it parks, and is run again once called back
 	bool RunTransactionStatementInternal(const TransactionInfo &info,
 	                                     optional_ptr<const InterruptState> commit_callback = nullptr);
 
