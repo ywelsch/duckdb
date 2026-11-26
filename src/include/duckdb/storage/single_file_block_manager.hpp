@@ -134,6 +134,7 @@ public:
 	}
 	//! Returns the number of total blocks
 	idx_t TotalBlocks() override;
+	block_id_t GetTruncationWatermark(const unordered_set<block_id_t> &movable_blocks) override;
 	//! Returns the number of free blocks
 	idx_t FreeBlocks() override;
 	//! Whether or not the attached database is a remote file

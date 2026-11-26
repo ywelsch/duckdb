@@ -241,6 +241,7 @@ void SingleFileCheckpointWriter::CreateCheckpoint() {
 	auto &metadata_manager = GetMetadataManager();
 
 	//! Set up the writers for the checkpoints
+	metadata_manager.UpdateTruncationWatermark();
 	metadata_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::LOAD);
 	column_metadata_writer = make_uniq<MetadataWriter>(metadata_manager);
 	row_group_pointer_writer = make_uniq<MetadataWriter>(metadata_manager, nullptr, MetadataPool::LOAD);
