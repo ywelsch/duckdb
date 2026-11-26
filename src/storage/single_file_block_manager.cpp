@@ -864,6 +864,7 @@ void SingleFileBlockManager::Initialize(const DatabaseHeader &header, const opti
 
 	db.GetStorageManager().SetStorageVersion(options.storage_version);
 	GetMetadataManager().SetStorageVersion(options.storage_version);
+	GetMetadataManager().SetFileStorageVersion(header.storage_compatibility);
 
 	if (block_alloc_size.IsValid() && block_alloc_size.GetIndex() != header.block_alloc_size) {
 		throw InvalidInputException(
@@ -891,7 +892,8 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 		// no free list
 		return;
 	}
-	MetadataReader reader(GetMetadataManager(), free_pointer, nullptr, BlockReaderType::REGISTER_BLOCKS);
+	vector<MetaBlockPointer> free_list_pointers;
+	MetadataReader reader(GetMetadataManager(), free_pointer, free_list_pointers, BlockReaderType::REGISTER_BLOCKS);
 	auto free_list_count = reader.Read<uint64_t>(context);
 	free_list.clear();
 	for (idx_t i = 0; i < free_list_count; i++) {
@@ -907,6 +909,7 @@ void SingleFileBlockManager::LoadFreeList(QueryContext context) {
 	}
 	GetMetadataManager().Read(reader);
 	GetMetadataManager().MarkBlocksAsModified(false);
+	GetMetadataManager().MarkFreeListBlocks(free_list_pointers);
 }
 
 bool SingleFileBlockManager::IsRootBlock(MetaBlockPointer root) {
@@ -1312,13 +1315,14 @@ vector<MetadataHandle> SingleFileBlockManager::GetFreeListBlocks() {
 		auto free_list_size = sizeof(uint64_t) + sizeof(block_id_t) * free_list_count;
 		auto multi_use_blocks_size =
 		    sizeof(uint64_t) + (sizeof(block_id_t) + sizeof(uint32_t)) * multi_use_blocks_count;
+		// an entry can also hold where a block that can move is in the file
 		auto metadata_blocks =
-		    sizeof(uint64_t) + (sizeof(block_id_t) + sizeof(idx_t)) * GetMetadataManager().BlockCount();
+		    sizeof(uint64_t) + (2 * sizeof(block_id_t) + sizeof(idx_t)) * GetMetadataManager().BlockCount();
 		auto total_size = free_list_size + multi_use_blocks_size + metadata_blocks;
 		if (total_size < allocated_size) {
 			break;
 		}
-		auto free_list_handle = GetMetadataManager().AllocateHandle(MetadataPool::LOAD);
+		auto free_list_handle = GetMetadataManager().AllocateHandle(MetadataPool::FREE_LIST);
 		free_list_blocks.push_back(std::move(free_list_handle));
 		allocated_size += block_size;
 	}
@@ -1368,6 +1372,8 @@ bool SingleFileBlockManager::AddFreeBlock(unique_lock<mutex> &lock, block_id_t b
 }
 void SingleFileBlockManager::WriteHeader(QueryContext context, DatabaseHeader header, VisibilityBound bound,
                                          transaction_t read_stamp, transaction_t lowest_active_start) {
+	// before the free list is sized: moving blocks changes which blocks are free
+	GetMetadataManager().AssignPhysicalBlocks();
 	auto free_list_blocks = GetFreeListBlocks();
 
 	// now handle the free list

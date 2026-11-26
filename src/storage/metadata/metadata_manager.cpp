@@ -1,5 +1,8 @@
 #include "duckdb/storage/metadata/metadata_manager.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "duckdb/common/serializer/read_stream.hpp"
 #include "duckdb/common/serializer/write_stream.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -12,13 +15,15 @@ namespace duckdb {
 //! Below this many metadata blocks loading reads all of them anyway, so the pools share blocks
 static constexpr idx_t METADATA_LOCALITY_MIN_BLOCKS = 4;
 
-MetadataBlock::MetadataBlock() : block_id(INVALID_BLOCK), pending_reuse(0), dirty(false), pool(MetadataPool::DEFAULT) {
+MetadataBlock::MetadataBlock()
+    : block_id(INVALID_BLOCK), physical_id(INVALID_BLOCK), pending_reuse(0), dirty(false), pool(MetadataPool::DEFAULT) {
 }
 
 MetadataBlock::MetadataBlock(MetadataBlock &&other) noexcept
     : pending_reuse(0), dirty(false), pool(MetadataPool::DEFAULT) {
 	std::swap(block, other.block);
 	std::swap(block_id, other.block_id);
+	std::swap(physical_id, other.physical_id);
 	std::swap(free_blocks, other.free_blocks);
 	std::swap(pending_reuse, other.pending_reuse);
 	std::swap(pool, other.pool);
@@ -30,6 +35,7 @@ MetadataBlock::MetadataBlock(MetadataBlock &&other) noexcept
 MetadataBlock &MetadataBlock::operator=(MetadataBlock &&other) noexcept {
 	std::swap(block, other.block);
 	std::swap(block_id, other.block_id);
+	std::swap(physical_id, other.physical_id);
 	std::swap(free_blocks, other.free_blocks);
 	std::swap(pending_reuse, other.pending_reuse);
 	std::swap(pool, other.pool);
@@ -65,23 +71,33 @@ MetadataHandle MetadataManager::AllocateHandle(MetadataPool pool) {
 	MetadataPointer pointer;
 	unique_lock<mutex> guard(block_lock);
 	auto locality = blocks.size() >= METADATA_LOCALITY_MIN_BLOCKS;
+	// the free list must be readable before the places of blocks that can move are known
+	auto needs_fixed_block = pool == MetadataPool::FREE_LIST;
 	if (!locality) {
 		pool = MetadataPool::DEFAULT;
 	}
 	block_id_t free_block = INVALID_BLOCK;
 	for (idx_t pool_idx = 0; pool_idx < blocks_with_free_space.size(); pool_idx++) {
 		auto &candidates = blocks_with_free_space[pool_idx];
-		if (candidates.empty() || (locality && pool_idx != static_cast<idx_t>(pool))) {
+		if (locality && pool_idx != static_cast<idx_t>(pool)) {
 			continue;
 		}
-		if (free_block == INVALID_BLOCK || *candidates.begin() < free_block) {
-			free_block = *candidates.begin();
+		// blocks that can move have the highest ids: the free list only takes the others, and once blocks can move
+		// other metadata leaves the others alone, so that they empty out
+		auto skip_fixed_blocks = movable_blocks && locality && !needs_fixed_block;
+		auto entry = skip_fixed_blocks ? candidates.lower_bound(MOVABLE_BLOCK_FLAG) : candidates.begin();
+		if (entry == candidates.end() || (needs_fixed_block && IsMovable(*entry))) {
+			continue;
+		}
+		if (free_block == INVALID_BLOCK || *entry < free_block) {
+			free_block = *entry;
 		}
 	}
 	guard.unlock();
-	// with metadata locality each pool refills its own holes rather than taking a new block with a lower id
-	if (free_block == INVALID_BLOCK || (!locality && free_block > PeekNextBlockId())) {
-		free_block = AllocateNewBlock(guard, pool);
+	// a block that can move is placed when it is written; one that cannot moves down by not being refilled
+	auto prefer_lower_block_id = !locality || (free_block != INVALID_BLOCK && !IsMovable(free_block));
+	if (free_block == INVALID_BLOCK || (prefer_lower_block_id && free_block > PeekNextBlockId())) {
+		free_block = AllocateNewBlock(guard, pool, movable_blocks && locality && !needs_fixed_block);
 	} else {
 		guard.lock();
 	}
@@ -172,21 +188,26 @@ void MetadataManager::ConvertToTransient(unique_lock<mutex> &block_lock, Metadat
 	}
 
 	// unregister the old block
-	block_manager.UnregisterBlock(metadata_block.block_id);
+	block_manager.UnregisterBlock(metadata_block.physical_id);
 
 	block_lock.lock();
 	metadata_block.block = std::move(new_block);
 	metadata_block.dirty = true;
 }
 
-block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool) {
+block_id_t MetadataManager::AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool, bool movable) {
 	D_ASSERT(!block_lock.owns_lock());
-	auto new_block_id = GetNextBlockId();
-
 	MetadataBlock new_block;
+	if (movable) {
+		// its place in the file is picked when the checkpoint writes it
+		new_block.block_id = MOVABLE_BLOCK_FLAG | NumericCast<block_id_t>(next_movable_id++);
+	} else {
+		new_block.block_id = GetNextBlockId();
+		new_block.physical_id = new_block.block_id;
+	}
+	auto new_block_id = new_block.block_id;
 	auto handle = buffer_manager.Allocate(MemoryTag::METADATA, &block_manager, false);
 	new_block.block = handle.GetBlockHandle();
-	new_block.block_id = new_block_id;
 	new_block.pool = pool;
 	for (idx_t i = 0; i < METADATA_BLOCK_COUNT; i++) {
 		new_block.free_blocks.push_back(NumericCast<uint8_t>(METADATA_BLOCK_COUNT - i - 1));
@@ -210,9 +231,63 @@ void MetadataManager::RecordLoadRead(const MetadataPointer &pointer) {
 	}
 	lock_guard<mutex> guard(block_lock);
 	auto entry = blocks.find(UnsafeNumericCast<block_id_t>(pointer.block_index));
-	if (entry != blocks.end()) {
+	if (entry != blocks.end() && entry->second.pool != MetadataPool::FREE_LIST) {
 		entry->second.pool = MetadataPool::LOAD;
 		UpdateFreeSpace(entry->second);
+	}
+}
+
+void MetadataManager::MarkFreeListBlocks(const vector<MetaBlockPointer> &pointers) {
+	lock_guard<mutex> guard(block_lock);
+	for (auto &pointer : pointers) {
+		auto entry = blocks.find(pointer.GetBlockId());
+		if (entry != blocks.end()) {
+			entry->second.pool = MetadataPool::FREE_LIST;
+			UpdateFreeSpace(entry->second);
+		}
+	}
+}
+
+void MetadataManager::SetFileStorageVersion(StorageVersion storage_version) {
+	read_physical_ids = storage_version >= StorageVersion::V2_1_0;
+}
+
+void MetadataManager::AssignPhysicalBlocks() {
+	vector<block_id_t> moved_from;
+	{
+		lock_guard<mutex> guard(block_lock);
+		for (auto &kv : blocks) {
+			auto &block = kv.second;
+			if (!IsMovable(kv.first) || !block.dirty) {
+				continue;
+			}
+			// a rewritten block goes to the lowest free block, so that metadata leaves the end of the file
+			if (block.physical_id != INVALID_BLOCK && block_manager.PeekFreeBlockId() > block.physical_id) {
+				continue;
+			}
+			if (block.physical_id != INVALID_BLOCK) {
+				moved_from.push_back(block.physical_id);
+			}
+			block.physical_id = block_manager.GetFreeBlockIdForCheckpoint();
+		}
+	}
+	// the old places are freed like data blocks, once the header that no longer uses them is written
+	for (auto &block_id : moved_from) {
+		block_manager.MarkBlockAsModified(block_id);
+	}
+	// SPIKE PROBE: report how many blocks moved
+	static FILE *trace = [] {
+		auto path = std::getenv("DUCKDB_RELOCATE_TRACE");
+		return path ? std::fopen(path, "a") : nullptr;
+	}();
+	if (trace) {
+		idx_t movable = 0;
+		for (auto &kv : blocks) {
+			movable += IsMovable(kv.first);
+		}
+		std::fprintf(trace, "checkpoint blocks=%llu movable=%llu moved=%llu\n", (unsigned long long)blocks.size(),
+		             (unsigned long long)movable, (unsigned long long)moved_from.size());
+		std::fflush(trace);
 	}
 }
 
@@ -247,7 +322,7 @@ void MetadataManager::ForgetFreeSpace(block_id_t block_id) {
 }
 
 bool MetadataManager::FreeSpaceIsConsistent() const {
-	array<set<block_id_t>, 2> expected;
+	decltype(blocks_with_free_space) expected;
 	for (auto &kv : blocks) {
 		if (!kv.second.free_blocks.empty()) {
 			expected[static_cast<idx_t>(kv.second.pool)].insert(kv.first);
@@ -260,11 +335,11 @@ void MetadataManager::AddAndRegisterBlock(unique_lock<mutex> &block_lock, Metada
 	if (block.block) {
 		throw InternalException("Calling AddAndRegisterBlock on block that already exists");
 	}
-	if (block.block_id >= MAXIMUM_BLOCK) {
+	if (block.physical_id < 0 || block.physical_id >= MAXIMUM_BLOCK) {
 		throw InternalException("AddAndRegisterBlock called with a transient block id");
 	}
 	block_lock.unlock();
-	block.block = block_manager.RegisterBlock(block.block_id, MemoryTag::METADATA);
+	block.block = block_manager.RegisterBlock(block.physical_id, MemoryTag::METADATA);
 	block_lock.lock();
 	AddBlock(block_lock, std::move(block), true);
 }
@@ -310,8 +385,12 @@ MetadataPointer MetadataManager::RegisterDiskPointer(MetaBlockPointer pointer) {
 	unique_lock<mutex> guard(block_lock);
 
 	auto block_id = pointer.GetBlockId();
+	if (IsMovable(block_id)) {
+		throw DataCorruptionException("Corrupt database file: the free list is in a metadata block that can move");
+	}
 	MetadataBlock block;
 	block.block_id = block_id;
+	block.physical_id = block_id;
 	AddAndRegisterBlock(guard, std::move(block));
 	return FromDiskPointerInternal(guard, pointer);
 }
@@ -372,7 +451,10 @@ void MetadataManager::Flush(QueryContext context) {
 			// Convert the temporary block to a persistent block.
 			// we cannot use ConvertToPersistent as another thread might still be reading the block
 			// so we use the safe version of ConvertToPersistent
-			auto new_block = block_manager.ConvertToPersistent(context, kv.first, std::move(block_handle),
+			if (block.physical_id == INVALID_BLOCK) {
+				throw InternalException("Metadata block %llu has no place in the file", kv.first);
+			}
+			auto new_block = block_manager.ConvertToPersistent(context, block.physical_id, std::move(block_handle),
 			                                                   std::move(handle), ConvertToPersistentMode::THREAD_SAFE);
 
 			guard.lock();
@@ -380,8 +462,9 @@ void MetadataManager::Flush(QueryContext context) {
 			guard.unlock();
 		} else {
 			// Already a persistent block, so we only need to write it.
-			D_ASSERT(block.block->BlockId() == block.block_id);
-			block_manager.Write(context, handle.GetFileBuffer(), block.block_id);
+			D_ASSERT(!IsMovable(kv.first));
+			D_ASSERT(block.block->BlockId() == block.physical_id);
+			block_manager.Write(context, handle.GetFileBuffer(), block.physical_id);
 		}
 		// the block is no longer dirty
 		block.dirty = false;
@@ -393,6 +476,9 @@ void MetadataManager::Write(WriteStream &sink) {
 	sink.Write<uint64_t>(blocks.size());
 	for (auto &kv : blocks) {
 		kv.second.Write(sink);
+		if (movable_blocks) {
+			sink.Write<block_id_t>(kv.second.physical_id);
+		}
 	}
 }
 
@@ -400,8 +486,16 @@ void MetadataManager::Read(ReadStream &source) {
 	auto block_count = source.Read<uint64_t>();
 	for (idx_t i = 0; i < block_count; i++) {
 		auto block = MetadataBlock::Read(source);
-		if (block.block_id < 0 || block.block_id >= MAXIMUM_BLOCK) {
+		block.physical_id = read_physical_ids ? source.Read<block_id_t>() : block.block_id;
+		if (block.block_id < 0 || block.block_id >= MAXIMUM_BLOCK || block.physical_id < 0 ||
+		    block.physical_id >= MAXIMUM_BLOCK || (!IsMovable(block.block_id) && block.physical_id != block.block_id)) {
 			throw DataCorruptionException("Corrupt database file: invalid metadata block id %lld", block.block_id);
+		}
+		if (IsMovable(block.block_id)) {
+			auto movable_id = NumericCast<idx_t>(block.block_id & ~MOVABLE_BLOCK_FLAG) + 1;
+			if (movable_id > next_movable_id) {
+				next_movable_id = movable_id;
+			}
 		}
 
 		unique_lock<mutex> guard(block_lock);
@@ -486,12 +580,15 @@ unordered_map<block_id_t, idx_t> MetadataManager::MarkBlocksAsModified(bool has_
 		idx_t new_free_blocks = current_free_blocks | modified_list;
 		if (new_free_blocks == NumericLimits<idx_t>::Maximum()) {
 			// if new free_blocks is all blocks - mark entire block as modified
+			auto physical_id = block.physical_id;
 			blocks.erase(entry);
 			ForgetFreeSpace(block_id);
 
-			guard.unlock();
-			block_manager.MarkBlockAsModified(block_id);
-			guard.lock();
+			if (physical_id != INVALID_BLOCK) {
+				guard.unlock();
+				block_manager.MarkBlockAsModified(physical_id);
+				guard.lock();
+			}
 		} else {
 			// set the new set of free blocks
 			block.FreeBlocksFromInteger(new_free_blocks);
@@ -566,6 +663,7 @@ void MetadataManager::ClearModifiedBlocks(const vector<MetaBlockPointer> &pointe
 
 void MetadataManager::SetStorageVersion(StorageVersion storage_version) {
 	keep_next_blocks = storage_version < StorageVersion::V1_5_0;
+	movable_blocks = storage_version >= StorageVersion::V2_1_0;
 }
 
 MetaBlockPointer MetadataManager::GetNextBlock(MetaBlockPointer pointer) {
@@ -603,7 +701,7 @@ vector<MetadataBlockInfo> MetadataManager::GetMetadataInfo() const {
 	unique_lock<mutex> guard(block_lock);
 	for (auto &block : blocks) {
 		MetadataBlockInfo block_info;
-		block_info.block_id = block.second.block_id;
+		block_info.block_id = block.second.physical_id;
 		block_info.total_blocks = MetadataManager::METADATA_BLOCK_COUNT;
 		for (auto free_block : block.second.free_blocks) {
 			block_info.free_list.push_back(free_block);

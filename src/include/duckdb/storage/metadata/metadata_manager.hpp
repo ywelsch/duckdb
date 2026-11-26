@@ -24,8 +24,11 @@ struct MetadataBlockInfo;
 enum class MetadataPool : uint8_t {
 	//! row group metadata and everything else
 	DEFAULT,
-	//! what loading the database reads: the catalog, the table statistics and the free list
-	LOAD
+	//! what loading the database reads: the catalog and the table statistics
+	LOAD,
+	//! the free list and the list of metadata blocks, which loading reads before it knows where blocks that can move
+	//! are
+	FREE_LIST
 };
 
 struct MetadataBlock {
@@ -39,6 +42,8 @@ struct MetadataBlock {
 
 	shared_ptr<BlockHandle> block;
 	block_id_t block_id;
+	//! Where the block is in the file, which differs from block_id for a block that can move
+	block_id_t physical_id;
 	vector<uint8_t> free_blocks;
 	//! The blocks that are free on disk but cannot be reused yet, as a mask
 	idx_t pending_reuse;
@@ -86,6 +91,16 @@ public:
 	void RecordLoadRead(const MetadataPointer &pointer);
 	//! Stops putting the blocks that are read into the load pool
 	void EndLoad();
+	//! Keeps the blocks holding the free list read at load in the free list pool
+	void MarkFreeListBlocks(const vector<MetaBlockPointer> &pointers);
+	//! Sets the storage version the database file was written with, which decides how its metadata blocks are read
+	void SetFileStorageVersion(StorageVersion storage_version);
+	//! Picks where in the file the rewritten blocks that can move go, before the header is written
+	void AssignPhysicalBlocks();
+	//! Whether a metadata block id names a block that can move rather than its place in the file
+	static bool IsMovable(block_id_t block_id) {
+		return (block_id & MOVABLE_BLOCK_FLAG) != 0;
+	}
 	MetadataHandle Pin(const MetadataPointer &pointer);
 
 	MetadataHandle Pin(const QueryContext &context, const MetadataPointer &pointer);
@@ -131,13 +146,21 @@ protected:
 	//! Whether the database is loading, between BeginLoad and EndLoad
 	atomic<bool> loading {false};
 	//! Per pool, the blocks that have free sub-blocks, so that allocation can take the lowest one
-	array<set<block_id_t>, 2> blocks_with_free_space;
+	array<set<block_id_t>, 3> blocks_with_free_space;
+	//! Metadata block ids with this bit name blocks that can move, the others are their place in the file
+	static constexpr block_id_t MOVABLE_BLOCK_FLAG = block_id_t(1) << 55;
+	//! Whether new metadata blocks can move, which needs storage version v2.1.0
+	bool movable_blocks = false;
+	//! Whether the list of metadata blocks being read stores their place in the file
+	bool read_physical_ids = false;
+	//! The id of the next block that can move
+	atomic<idx_t> next_movable_id {0};
 	//! Readers before v1.4.2 resolve the next pointer of a block when they enter it, so for files they can open the
 	//! block a kept block points to must stay a metadata block
 	bool keep_next_blocks = false;
 
 protected:
-	block_id_t AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool);
+	block_id_t AllocateNewBlock(unique_lock<mutex> &block_lock, MetadataPool pool, bool movable);
 	//! Updates blocks_with_free_space after the free sub-blocks or the pool of a block changed
 	void UpdateFreeSpace(const MetadataBlock &block);
 	//! Removes a block that is no longer a metadata block from blocks_with_free_space
