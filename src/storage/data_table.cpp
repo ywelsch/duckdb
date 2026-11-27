@@ -299,11 +299,14 @@ void DataTable::KeepRowIds(ClientContext &context, DuckTransaction &transaction,
 		}
 		return;
 	}
-	// taken before the statement first reads the table, so that no merge lands between two of its scans
-	transaction.HoldRowIds(row_groups, false);
+	if (writes_rows) {
+		// taken before the statement first reads the table: no merge lands between its scans and its writes
+		transaction.HoldRowIds(row_groups);
+	}
 	if (reads_row_ids && scans_row_ids) {
-		// row ids handed to the user stay valid until the transaction ends
-		transaction.HoldRowIds(row_groups, true);
+		// row ids handed to the user stay valid: the transaction keeps reading these row groups, and its deletes are
+		// translated to the rows' places in the row groups a merge put them into
+		transaction.KeepRowGroupsForTransaction(row_groups);
 	}
 }
 
@@ -1468,7 +1471,16 @@ idx_t DataTable::Delete(TableDeleteState &state, ClientContext &context, DuckTab
 			Fetch(transaction, state.verify_chunk, state.col_ids, offset_ids, current_count, fetch_state);
 			VerifyDeleteConstraints(storage, state, context, state.verify_chunk);
 		}
-		delete_count += row_groups->Delete(transaction, table_entry, ids + current_offset, current_count);
+		row_t *delete_ids = ids + current_offset;
+		vector<row_t> live_ids;
+		auto reader_row_groups = transaction.GetRowGroups(row_groups);
+		if (reader_row_groups.stale) {
+			// the transaction reads row groups that merges replaced since: delete the rows where they are now
+			live_ids.resize(current_count);
+			row_groups->TranslateRowIds(*reader_row_groups.row_groups, delete_ids, current_count, live_ids.data());
+			delete_ids = live_ids.data();
+		}
+		delete_count += row_groups->Delete(transaction, table_entry, delete_ids, current_count);
 	}
 	return delete_count;
 }
@@ -1578,6 +1590,12 @@ void DataTable::Update(TableUpdateState &state, ClientContext &context, DuckTabl
 		throw TransactionException(
 		    "Transaction conflict: attempting to update table %s but it has been %s by a different transaction",
 		    GetTableName(), TableModification());
+	}
+	if (DuckTransaction::Get(context, db).GetRowGroups(row_groups).stale) {
+		// PROTOTYPE: updates are not forwarded to the row groups a merge put the rows into
+		throw TransactionException("Cannot update table %s: a checkpoint moved its rows after this transaction read "
+		                           "their row ids",
+		                           GetTableName());
 	}
 
 	// first verify that no constraints are violated

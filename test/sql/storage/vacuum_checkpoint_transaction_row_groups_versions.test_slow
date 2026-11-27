@@ -29,7 +29,8 @@ CHECKPOINT db
 statement ok
 DELETE FROM db.test WHERE i >= 245760 AND i % 10 <> 0
 
-# a transaction that has asked for row ids: the checkpoint leaves the row groups as they are
+# a transaction that has asked for row ids keeps them: older storage does not merge meanwhile, v2.1.0 merges and the
+# transaction keeps reading the row groups from before
 statement ok con1
 BEGIN
 
@@ -42,9 +43,9 @@ statement ok con2
 CHECKPOINT db
 
 query I con2
-SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('db.test')
+SELECT COUNT(DISTINCT row_group_id) = CASE WHEN '{version}' = 'v2.1.0' THEN 3 ELSE 5 END FROM pragma_storage_info('db.test')
 ----
-5
+true
 
 query II con1
 SELECT rowid, i FROM db.test WHERE i = 300000

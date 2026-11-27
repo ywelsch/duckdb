@@ -130,13 +130,9 @@ ReaderRowGroups DuckTransaction::PeekRowGroups(const shared_ptr<RowGroupCollecti
 	return collection->GetReaderRowGroups(entry->second.second);
 }
 
-void DuckTransaction::HoldRowIds(const shared_ptr<RowGroupCollection> &collection, bool until_transaction_end) {
+void DuckTransaction::HoldRowIds(const shared_ptr<RowGroupCollection> &collection) {
 	lock_guard<mutex> guard(read_tables_lock);
-	if (transaction_row_id_holds.find(*collection) != transaction_row_id_holds.end()) {
-		return;
-	}
-	auto &holds = until_transaction_end ? transaction_row_id_holds : statement_row_id_holds;
-	if (holds.find(*collection) != holds.end()) {
+	if (statement_row_id_holds.find(*collection) != statement_row_id_holds.end()) {
 		return;
 	}
 	{
@@ -144,7 +140,12 @@ void DuckTransaction::HoldRowIds(const shared_ptr<RowGroupCollection> &collectio
 		auto vacuum_lock = GetTransactionManager().SharedVacuumLock();
 		collection->HoldRowIds();
 	}
-	holds.emplace(*collection, collection);
+	statement_row_id_holds.emplace(*collection, collection);
+}
+
+void DuckTransaction::KeepRowGroupsForTransaction(const shared_ptr<RowGroupCollection> &collection) {
+	lock_guard<mutex> guard(read_tables_lock);
+	transaction_read_tables.emplace(*collection, collection);
 }
 
 void DuckTransaction::ReleaseStatementState() {
@@ -154,20 +155,22 @@ void DuckTransaction::ReleaseStatementState() {
 
 void DuckTransaction::ReleaseRowGroups(bool transaction_ends) {
 	lock_guard<mutex> guard(read_tables_lock);
-	for (auto &entry : read_tables) {
-		entry.second.first->UnregisterReader(entry.second.second);
+	for (auto entry = read_tables.begin(); entry != read_tables.end();) {
+		if (!transaction_ends && transaction_read_tables.find(entry->first) != transaction_read_tables.end()) {
+			// the row ids the transaction handed out stay valid in these row groups
+			entry++;
+			continue;
+		}
+		entry->second.first->UnregisterReader(entry->second.second);
+		entry = read_tables.erase(entry);
 	}
-	read_tables.clear();
+	if (transaction_ends) {
+		transaction_read_tables.clear();
+	}
 	for (auto &entry : statement_row_id_holds) {
 		entry.second->ReleaseRowIds();
 	}
 	statement_row_id_holds.clear();
-	if (transaction_ends) {
-		for (auto &entry : transaction_row_id_holds) {
-			entry.second->ReleaseRowIds();
-		}
-		transaction_row_id_holds.clear();
-	}
 	reads_live_row_groups = reads_live_row_groups || transaction_ends;
 }
 

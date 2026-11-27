@@ -15,6 +15,7 @@
 #include "duckdb/common/enums/scan_options.hpp"
 #include "duckdb/storage/table/per_column_metadata_blocks.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/storage/table/segment_base.hpp"
 #include "duckdb/storage/block.hpp"
@@ -99,6 +100,30 @@ struct RowGroupWriteData {
 	optional_idx write_count;
 };
 
+class RowGroupVersionInfo;
+
+//! The row groups a merge put the rows of other row groups into, which take their deletes from then on
+struct MergedRowGroups {
+	//! The version info and first row id of each merged row group
+	vector<shared_ptr<RowGroupVersionInfo>> version_infos;
+	vector<idx_t> row_starts;
+	//! The merged position of the first row of each merged row group
+	vector<idx_t> position_starts;
+};
+
+//! Where a merge put the rows of a row group it replaced: readers that keep the replaced row group find the deletes
+//! made since in the merged row groups
+struct RowGroupForward {
+	static constexpr uint32_t VACUUMED = NumericLimits<uint32_t>::Maximum();
+
+	shared_ptr<MergedRowGroups> merged;
+	//! The merged position of each row, VACUUMED for a row the merge left out
+	vector<uint32_t> positions;
+
+	//! The merged row group a row went to and its offset there, false for a row the merge left out
+	bool Resolve(idx_t offset, idx_t &target, idx_t &target_offset) const;
+};
+
 //! The version info of a row group, shared with the row groups a checkpoint or an ALTER copies it into
 class RowGroupVersionInfo {
 public:
@@ -132,6 +157,12 @@ public:
 	//! The latch of the checkpoint that merged this row group, until that checkpoint has finished
 	void SetSealLatch(shared_ptr<VacuumSealLatch> latch);
 	shared_ptr<VacuumSealLatch> GetSealLatch();
+	//! Set when a merge replaced the row group
+	void SetForward(shared_ptr<const RowGroupForward> forward);
+	shared_ptr<const RowGroupForward> GetForward();
+	bool HasForward() const {
+		return has_forward;
+	}
 
 private:
 	mutex lock;
@@ -142,6 +173,8 @@ private:
 	atomic<idx_t> registered_writers;
 	atomic<idx_t> released_writers;
 	shared_ptr<VacuumSealLatch> seal_latch;
+	atomic<bool> has_forward {false};
+	shared_ptr<const RowGroupForward> forward;
 };
 
 //! Collects the ids of the rows that a delete actually deleted, but only once rows were skipped (e.g. because they
@@ -272,6 +305,9 @@ public:
 	//! The version info holder, shared with the written copies of this row group
 	RowGroupVersionInfo &GetVersionInfoHolder() {
 		return *version_info;
+	}
+	shared_ptr<RowGroupVersionInfo> GetVersionInfoHolderPtr() {
+		return version_info;
 	}
 	//! Returns the number of rows visible to the given transaction
 	idx_t GetVisibleRowCount(TransactionData transaction);

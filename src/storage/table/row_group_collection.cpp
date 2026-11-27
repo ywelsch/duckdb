@@ -256,6 +256,27 @@ ReaderRowGroups RowGroupCollection::GetReaderRowGroups(idx_t version) const {
 	return result;
 }
 
+void RowGroupCollection::TranslateRowIds(RowGroupSegmentTree &reader_row_groups, const row_t *ids, idx_t count,
+                                         row_t *result) const {
+	for (idx_t i = 0; i < count; i++) {
+		auto row_id = UnsafeNumericCast<idx_t>(ids[i]);
+		auto segment = reader_row_groups.GetSegment(row_id);
+		idx_t offset = row_id - segment->GetRowStart();
+		auto forward = segment->GetNode().GetVersionInfoHolder().GetForward();
+		while (forward) {
+			idx_t target;
+			idx_t target_offset;
+			if (!forward->Resolve(offset, target, target_offset)) {
+				throw InternalException("Row %d was left out by a merge but is still visible", ids[i]);
+			}
+			row_id = forward->merged->row_starts[target] + target_offset;
+			offset = target_offset;
+			forward = forward->merged->version_infos[target]->GetForward();
+		}
+		result[i] = UnsafeNumericCast<row_t>(row_id);
+	}
+}
+
 void RowGroupCollection::HoldRowIds() {
 	row_id_holders++;
 }
@@ -1493,12 +1514,26 @@ public:
 		for (idx_t c = 0; c < types.size(); c++) {
 			column_ids.emplace_back(c);
 		}
+		// a sealed merge records where each row goes, for the readers that keep the replaced row groups
+		const bool record_positions = vacuum_state.seal_merges;
 		DataChunk scan_chunk;
+		DataChunk table_chunk;
+		vector<column_t> table_column_ids;
 		if (remapper) {
 			remapper->InitializeMergeScan(scan_chunk, column_ids);
+		} else if (record_positions) {
+			column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+			auto scan_types = types;
+			scan_types.push_back(LogicalType::ROW_TYPE);
+			scan_chunk.Initialize(Allocator::DefaultAllocator(), scan_types);
+			table_chunk.InitializeEmpty(types);
+			for (idx_t c = 0; c < types.size(); c++) {
+				table_column_ids.push_back(c);
+			}
 		} else {
 			scan_chunk.Initialize(Allocator::DefaultAllocator(), types);
 		}
+		vector<vector<uint32_t>> source_positions;
 
 		idx_t current_append_idx = 0;
 
@@ -1519,6 +1554,10 @@ public:
 				row_start = current_segment->GetRowStart();
 			}
 			auto &current_row_group = current_segment->GetNode();
+			const auto source_row_start = current_segment->GetRowStart();
+			if (record_positions) {
+				source_positions.emplace_back(current_row_group.count.load(), RowGroupForward::VACUUMED);
+			}
 
 			current_row_group.InitializeScan(scan_state.table_state, *current_segment);
 			while (true) {
@@ -1533,10 +1572,24 @@ public:
 				if (live_row_offset + chunk_count > merge_rows) {
 					throw InternalException("Vacuum found more than the %d rows planned for the merge", merge_rows);
 				}
+				if (record_positions) {
+					auto row_ids = FlatVector::GetData<row_t>(scan_chunk.data[types.size()]);
+					auto &positions = source_positions.back();
+					for (idx_t i = 0; i < chunk_count; i++) {
+						auto offset = NumericCast<idx_t>(row_ids[i]) - source_row_start;
+						D_ASSERT(offset < positions.size());
+						positions[offset] = NumericCast<uint32_t>(live_row_offset + i);
+					}
+				}
 				// Buffer shifted rows and strip the scanned rowid column before appending to the new row groups.
-				auto &append_chunk =
-				    remapper ? remapper->ProcessScanChunk(scan_chunk, row_start.GetIndex() + live_row_offset)
-				             : scan_chunk;
+				DataChunk *append_chunk_ptr = &scan_chunk;
+				if (remapper) {
+					append_chunk_ptr = &remapper->ProcessScanChunk(scan_chunk, row_start.GetIndex() + live_row_offset);
+				} else if (record_positions) {
+					table_chunk.ReferenceColumns(scan_chunk, table_column_ids);
+					append_chunk_ptr = &table_chunk;
+				}
+				auto &append_chunk = *append_chunk_ptr;
 				idx_t remaining = append_chunk.size();
 				while (remaining > 0) {
 					auto &current_append_row_group = new_row_groups[current_append_idx]->GetNode();
@@ -1566,7 +1619,7 @@ public:
 		new_row_groups[current_append_idx]->GetNode().FinalizeAppend(append_state.row_group_append_state);
 
 		bool merged = FinishMerge(transaction_manager, source_indexes, new_row_groups, append_counts,
-		                          row_start.GetIndex(), live_row_offset, remapper.get());
+		                          row_start.GetIndex(), live_row_offset, remapper.get(), source_positions);
 
 		// Explicitly end the timer for the vacuum tasks here.
 		timer.EndTimer();
@@ -1596,7 +1649,8 @@ private:
 	//! Replaces the merged row groups by the new ones - false if rows changed since the merge was planned
 	bool FinishMerge(DuckTransactionManager &transaction_manager, const vector<idx_t> &source_indexes,
 	                 vector<unique_ptr<SegmentNode<RowGroup>>> &new_row_groups, const vector<idx_t> &append_counts,
-	                 idx_t row_start, idx_t merged_rows, optional_ptr<VacuumIndexRemapper> remapper) {
+	                 idx_t row_start, idx_t merged_rows, optional_ptr<VacuumIndexRemapper> remapper,
+	                 vector<vector<uint32_t>> &source_positions) {
 		unique_lock<mutex> append_guard;
 		unique_ptr<StorageLockKey> vacuum_lock;
 		shared_ptr<VacuumSealLatch> latch;
@@ -1635,6 +1689,25 @@ private:
 			}
 			// commits that delete merged rows are logged with the new row ids: they wait for this checkpoint
 			latch = transaction_manager.GetVacuumSealLatch();
+			// readers that keep the replaced row groups find the deletes made from now on in the merged ones
+			auto merged = make_shared_ptr<MergedRowGroups>();
+			idx_t position = 0;
+			for (idx_t target_idx = 0; target_idx < target_count; target_idx++) {
+				merged->version_infos.push_back(new_row_groups[target_idx]->GetNode().GetVersionInfoHolderPtr());
+				merged->row_starts.push_back(row_start + position);
+				merged->position_starts.push_back(position);
+				position += append_counts[target_idx];
+			}
+			D_ASSERT(position == merged_rows && source_positions.size() == source_indexes.size());
+			for (idx_t k = 0; k < source_indexes.size(); k++) {
+				auto forward = make_shared_ptr<RowGroupForward>();
+				forward->merged = merged;
+				forward->positions = std::move(source_positions[k]);
+				checkpoint_state.GetSegment(source_indexes[k])
+				    ->GetNode()
+				    .GetVersionInfoHolder()
+				    .SetForward(std::move(forward));
+			}
 		}
 		// the row groups to take out of the live row groups, including the dropped ones in between
 		reference_set_t<RowGroup> removed;

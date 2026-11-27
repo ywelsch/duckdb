@@ -286,6 +286,8 @@ public:
 	void HoldRowIds();
 	void ReleaseRowIds();
 	bool RowIdsHeld() const;
+	//! The live row ids of rows identified in row groups that merges replaced since (the reader's row groups)
+	void TranslateRowIds(RowGroupSegmentTree &reader_row_groups, const row_t *ids, idx_t count, row_t *result) const;
 
 	//! The metadata blocks of the table data of this collection, as read from disk or written by the last checkpoint
 	const vector<MetaBlockPointer> &GetMetadataPointers() const {

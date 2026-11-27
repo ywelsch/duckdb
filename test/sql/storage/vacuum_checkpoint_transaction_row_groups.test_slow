@@ -1,5 +1,5 @@
 # name: test/sql/storage/vacuum_checkpoint_transaction_row_groups.test_slow
-# description: A transaction that has asked for row ids of a table keeps checkpoints from moving them until it ends
+# description: A transaction that has asked for row ids of a table keeps them while checkpoints merge its row groups
 # group: [storage]
 
 load {TEST_DIR}/vacuum_checkpoint_transaction_row_groups.db readwrite v2.1.0
@@ -30,7 +30,7 @@ CHECKPOINT
 statement ok
 DELETE FROM t_ids WHERE i >= 245760 AND i % 10 <> 0
 
-# a transaction that has asked for row ids: the checkpoint leaves the row groups of that table as they are
+# a transaction that has asked for row ids: the checkpoint merges, the transaction keeps reading the row groups from before
 statement ok con1
 BEGIN
 
@@ -45,7 +45,7 @@ CHECKPOINT
 query I con2
 SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t_ids')
 ----
-5
+3
 
 query II con1
 SELECT rowid, i FROM t_ids WHERE i = 300000
@@ -161,7 +161,7 @@ CHECKPOINT
 query I con2
 SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('t_ids')
 ----
-3
+1
 
 query II con1
 SELECT rowid, i FROM t_ids WHERE i = 300000

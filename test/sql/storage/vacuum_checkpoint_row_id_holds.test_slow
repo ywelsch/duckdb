@@ -1,5 +1,5 @@
 # name: test/sql/storage/vacuum_checkpoint_row_id_holds.test_slow
-# description: Row ids in use keep merges out of their own table only, also when they are taken after the merge was planned
+# description: Row ids in use stay valid while checkpoints merge: statements that write hold their tables, transactions that asked for row ids keep their row groups
 # group: [storage]
 
 load {TEST_DIR}/vacuum_checkpoint_row_id_holds.db readwrite v2.1.0
@@ -27,7 +27,7 @@ endloop
 statement ok
 CHECKPOINT
 
-# a transaction that asked for row ids of one table: the other table is merged
+# a transaction that asked for row ids of one table: both tables are merged, the transaction keeps its row ids
 foreach tbl held free
 
 statement ok
@@ -49,7 +49,7 @@ CHECKPOINT
 query II con2
 SELECT (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('held')), (SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('free'))
 ----
-5	3
+3	3
 
 query II con1
 SELECT rowid, i FROM held WHERE i = 400000
@@ -91,7 +91,7 @@ SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('deleted')
 ----
 3
 
-# row ids asked for after the merge was planned: the merge is not sealed
+# row ids asked for after the merge was planned: the merge is sealed, the transaction keeps its row ids
 statement ok
 DELETE FROM planned WHERE i >= 245760 AND i % 10 <> 0
 
@@ -133,7 +133,7 @@ endloop
 query I
 SELECT COUNT(DISTINCT row_group_id) FROM pragma_storage_info('planned')
 ----
-5
+3
 
 statement ok
 SET debug_checkpoint_seal_sleep_ms=0

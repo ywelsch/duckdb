@@ -1,4 +1,5 @@
 #include "duckdb/storage/table/row_group.hpp"
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/transaction/commit_state.hpp"
@@ -1155,6 +1156,53 @@ void RowGroupVersionInfo::SetSealLatch(shared_ptr<VacuumSealLatch> latch) {
 	seal_latch = std::move(latch);
 }
 
+void RowGroupVersionInfo::SetForward(shared_ptr<const RowGroupForward> forward_p) {
+	lock_guard<mutex> guard(lock);
+	forward = std::move(forward_p);
+	has_forward = true;
+}
+
+shared_ptr<const RowGroupForward> RowGroupVersionInfo::GetForward() {
+	if (!has_forward) {
+		return nullptr;
+	}
+	lock_guard<mutex> guard(lock);
+	return forward;
+}
+
+bool RowGroupForward::Resolve(idx_t offset, idx_t &target, idx_t &target_offset) const {
+	if (offset >= positions.size() || positions[offset] == VACUUMED) {
+		return false;
+	}
+	idx_t position = positions[offset];
+	auto &starts = merged->position_starts;
+	target = NumericCast<idx_t>(std::upper_bound(starts.begin(), starts.end(), position) - starts.begin()) - 1;
+	target_offset = position - starts[target];
+	return true;
+}
+
+//! Whether a row of a replaced row group is visible in the merged row groups it went to, through later merges
+static bool ForwardedRowIsVisible(shared_ptr<const RowGroupForward> forward, idx_t offset, BlockManager &block_manager,
+                                  TransactionData transaction) {
+	SelectionVector visible(1);
+	while (forward) {
+		idx_t target;
+		idx_t target_offset;
+		if (!forward->Resolve(offset, target, target_offset)) {
+			// left out by the merge: deleted for every reader
+			return false;
+		}
+		auto &version_info = *forward->merged->version_infos[target];
+		auto vinfo = version_info.Get(block_manager);
+		if (vinfo && vinfo->GetVisibleRows(transaction, &target_offset, 1, visible) == 0) {
+			return false;
+		}
+		offset = target_offset;
+		forward = version_info.GetForward();
+	}
+	return true;
+}
+
 shared_ptr<VacuumSealLatch> RowGroupVersionInfo::GetSealLatch() {
 	lock_guard<mutex> guard(lock);
 	if (seal_latch && seal_latch->IsReleased()) {
@@ -1223,10 +1271,22 @@ idx_t RowGroup::GetSelVector(ScanOptions options, idx_t vector_idx, SelectionVec
 		return max_count;
 	}
 	auto vinfo = GetVersionInfo();
-	if (!vinfo) {
-		return max_count;
+	idx_t count = vinfo ? vinfo->GetSelVector(options, vector_idx, sel_vector, max_count) : max_count;
+	if (count == 0 || !version_info->HasForward() || options.delete_type != DeletedScanType::STANDARD) {
+		return count;
 	}
-	return vinfo->GetSelVector(options, vector_idx, sel_vector, max_count);
+	// a merge replaced the row group: the deletes made since are in the merged row groups
+	auto forward = version_info->GetForward();
+	auto &block_manager = GetBlockManager();
+	const idx_t base = vector_idx * STANDARD_VECTOR_SIZE;
+	idx_t result_count = 0;
+	for (idx_t i = 0; i < count; i++) {
+		idx_t row = count == max_count ? i : sel_vector.get_index(i);
+		if (ForwardedRowIsVisible(forward, base + row, block_manager, options.transaction)) {
+			sel_vector.set_index(result_count++, row);
+		}
+	}
+	return result_count;
 }
 
 idx_t RowGroup::Fetch(TransactionData transaction, const idx_t *offsets, idx_t fetch_count,
@@ -1235,11 +1295,27 @@ idx_t RowGroup::Fetch(TransactionData transaction, const idx_t *offsets, idx_t f
 		return 0;
 	}
 	auto vinfo = GetVersionInfo();
+	idx_t count;
 	if (!vinfo) {
 		// No version info at all, which means every row is visible.
-		return fetch_count;
+		count = fetch_count;
+	} else {
+		count = vinfo->GetVisibleRows(transaction, offsets, fetch_count, visible_sel);
 	}
-	return vinfo->GetVisibleRows(transaction, offsets, fetch_count, visible_sel);
+	if (count == 0 || !version_info->HasForward()) {
+		return count;
+	}
+	// a merge replaced the row group: the deletes made since are in the merged row groups
+	auto forward = version_info->GetForward();
+	auto &block_manager = GetBlockManager();
+	idx_t result_count = 0;
+	for (idx_t i = 0; i < count; i++) {
+		idx_t k = vinfo ? visible_sel.get_index(i) : i;
+		if (ForwardedRowIsVisible(forward, offsets[k], block_manager, transaction)) {
+			visible_sel.set_index(result_count++, k);
+		}
+	}
+	return result_count;
 }
 
 void RowGroup::FetchRows(TransactionData transaction, ColumnFetchState &state, const vector<StorageIndex> &column_ids,
@@ -1608,6 +1684,17 @@ idx_t RowGroup::GetVisibleRowCount(TransactionData transaction) {
 idx_t RowGroup::GetVisibleRowCount(TransactionData transaction, idx_t start_vector, idx_t scan_count) {
 	D_ASSERT(start_vector * STANDARD_VECTOR_SIZE <= count);
 	D_ASSERT(scan_count <= count - start_vector * STANDARD_VECTOR_SIZE);
+	if (version_info->HasForward()) {
+		// the deletes made since a merge replaced the row group are in the merged row groups
+		SelectionVector sel(STANDARD_VECTOR_SIZE);
+		idx_t result = 0;
+		for (idx_t done = 0, vector_idx = start_vector; done < scan_count; vector_idx++) {
+			idx_t max_count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, scan_count - done);
+			result += GetSelVector(ScanOptions(transaction), vector_idx, sel, max_count);
+			done += max_count;
+		}
+		return result;
+	}
 	auto vinfo = GetVersionInfo();
 	if (!vinfo) {
 		return scan_count;
@@ -2124,7 +2211,7 @@ PartitionStatistics RowGroup::GetPartitionStats(SegmentNode<RowGroup> &row_group
 
 	PartitionStatistics result;
 	result.row_start = row_group.GetRowStart();
-	if (row_group_ref.HasUnloadedDeletes()) {
+	if (row_group_ref.HasUnloadedDeletes() || row_group_ref.GetVersionInfoHolder().HasForward()) {
 		result.count = row_group_ref.count;
 		result.count_type = CountType::COUNT_APPROXIMATE;
 		result.partition_row_group =
