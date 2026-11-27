@@ -416,8 +416,20 @@ void DuckTransactionManager::CleanupTransactions() {
 	ReuseFreedBlocks(lowest_start);
 }
 
-ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
-	auto &transaction = transaction_p.Cast<DuckTransaction>();
+ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
+	PublishedCommit commit(transaction.Cast<DuckTransaction>());
+	auto error = PublishCommit(context, commit);
+	if (commit.wal) {
+		// make the commit durable before acknowledging it; one fsync can cover many commits
+		D_ASSERT(!error.HasError());
+		error = SyncCommit(commit);
+	}
+	FinishCommit(context, commit, error);
+	return error;
+}
+
+ErrorData DuckTransactionManager::PublishCommit(ClientContext &context, PublishedCommit &commit) {
+	auto &transaction = commit.transaction;
 	// flush the transaction-local blocks of bulk appends before taking any commit locks (see PreFlushOptimisticBlocks)
 	ErrorData error = transaction.PreFlushOptimisticBlocks(context, db);
 	unique_lock<mutex> t_lock(transaction_lock);
@@ -431,15 +443,16 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 
 	// check if we can checkpoint
-	unique_ptr<StorageLockKey> lock;
+	auto &lock = commit.checkpoint_lock;
 	auto undo_properties = transaction.GetUndoProperties();
-	auto checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties);
+	auto &checkpoint_decision = commit.checkpoint_decision;
+	checkpoint_decision = CanCheckpoint(transaction, lock, undo_properties);
+	commit.needs_pre_commit_state = undo_properties.has_updates || undo_properties.has_dropped_entries;
 	// orders this commit's append and commit or revert against checkpoints; read-only transactions commit without it
-	unique_lock<mutex> held_commit_lock;
+	auto &held_commit_lock = commit.commit_lock;
 	unique_ptr<StorageCommitState> commit_state;
-	optional_ptr<WriteAheadLog> commit_wal;
 	bool skip_wal_write_due_to_checkpoint = false;
-	bool wal_written = false;
+	auto &wal_written = commit.wal_written;
 	if (checkpoint_decision.can_checkpoint) {
 		// we can perform an automatic checkpoint
 		// we have two options:
@@ -536,10 +549,10 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		DUCKDB_LOG(context, TransactionLogType, db, "Commit", info.commit_id);
 		last_commit = info.commit_id;
 		if (wal_written && info.wal_sync_offset > 0) {
-			// published but not yet durable: the transaction stays active until the sync below. An offset
+			// published but not yet durable: the transaction stays active until SyncCommit. An offset
 			// of 0 means nothing reached the WAL, or the commit synced under the lock already
-			commit_wal = db.GetStorageManager().GetWAL();
-			if (commit_wal) {
+			commit.wal = db.GetStorageManager().GetWAL();
+			if (commit.wal) {
 				// the catalog version is recorded before this commit's own bump below
 				D_ASSERT(info.commit_id >= durable_bound);
 				transaction.wal_sync_offset = info.wal_sync_offset;
@@ -562,13 +575,13 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 
 	// commit successful: remove the transaction id from the list of active transactions
 	// potentially resulting in garbage collection
-	bool store_transaction = undo_properties.has_updates || undo_properties.has_index_deletes ||
-	                         undo_properties.has_catalog_changes || error.HasError();
+	commit.store_transaction = undo_properties.has_updates || undo_properties.has_index_deletes ||
+	                           undo_properties.has_catalog_changes || error.HasError();
 
-	if (!commit_wal) {
+	if (!commit.wal) {
 		// Remove the transaction from the list of active transactions and gather cleanup information.
-		// A commit that needs a WAL sync stays active until the sync below has completed.
-		QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
+		// A commit that needs a WAL sync stays active until SyncCommit has completed.
+		QueueCleanup(RemoveTransaction(transaction, commit.store_transaction, CreateCleanupInfo()));
 	}
 
 	// We do not need to hold the transaction lock during cleanup of transactions,
@@ -579,51 +592,56 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	if (!skip_wal_write_due_to_checkpoint && held_commit_lock.owns_lock()) {
 		held_commit_lock.unlock();
 	}
+	return error;
+}
 
-	if (commit_wal) {
-		// make the commit durable before acknowledging it; one fsync can cover many commits
-		D_ASSERT(!error.HasError());
-		bool synced = false;
-		try {
-			commit_wal->SyncUpTo(info.wal_sync_offset);
-			synced = true;
-		} catch (std::exception &ex) {
-			// published and no longer revertable, but not durable: invalidate. The WAL keeps the
-			// bytes; whether a restart replays them is in doubt
-			error = ErrorData(ex);
-			db.Invalidate("syncing the WAL after a commit failed", error.RawMessage());
-			// no checkpoint after a failed commit, as on the rollback path above
-			checkpoint_decision = CheckpointDecision(error.Message());
-			lock.reset();
-		}
-		// durable, or durability has failed: now leave the list of active transactions
-		t_lock.lock();
-		if (synced) {
-			// advance the durable bound over every commit the sync covered
-			for (auto &active_transaction : active_transactions) {
-				if (active_transaction->wal_sync_offset != 0 &&
-				    active_transaction->wal_sync_offset <= info.wal_sync_offset &&
-				    active_transaction->commit_id >= durable_bound) {
-					durable_bound = VisibilityBound::Through(active_transaction->commit_id);
-				}
+ErrorData DuckTransactionManager::SyncCommit(PublishedCommit &commit) {
+	ErrorData error;
+	bool synced = false;
+	try {
+		commit.wal->SyncUpTo(commit.transaction.wal_sync_offset);
+		synced = true;
+	} catch (std::exception &ex) {
+		// published and no longer revertable, but not durable: invalidate. The WAL keeps the
+		// bytes; whether a restart replays them is in doubt
+		error = ErrorData(ex);
+		db.Invalidate("syncing the WAL after a commit failed", error.RawMessage());
+		// no checkpoint after a failed commit, as on the rollback path
+		commit.checkpoint_decision = CheckpointDecision(error.Message());
+		commit.checkpoint_lock.reset();
+	}
+	// durable, or durability has failed: now leave the list of active transactions
+	unique_lock<mutex> t_lock(transaction_lock);
+	if (synced) {
+		// advance the durable bound over every commit the sync covered
+		for (auto &active_transaction : active_transactions) {
+			if (active_transaction->wal_sync_offset != 0 &&
+			    active_transaction->wal_sync_offset <= commit.transaction.wal_sync_offset &&
+			    active_transaction->commit_id >= durable_bound) {
+				durable_bound = VisibilityBound::Through(active_transaction->commit_id);
 			}
 		}
-		QueueCleanup(RemoveTransaction(transaction, store_transaction, CreateCleanupInfo()));
-		bool notify_others = !HasUnsyncedCommits();
-		t_lock.unlock();
-		if (notify_others) {
-			durability_cv.notify_all();
-		}
 	}
+	QueueCleanup(RemoveTransaction(commit.transaction, commit.store_transaction, CreateCleanupInfo()));
+	bool notify_others = !HasUnsyncedCommits();
+	t_lock.unlock();
+	if (notify_others) {
+		durability_cv.notify_all();
+	}
+	return error;
+}
 
+void DuckTransactionManager::FinishCommit(ClientContext &context, PublishedCommit &commit, ErrorData &error) {
+	auto &checkpoint_decision = commit.checkpoint_decision;
+	auto &lock = commit.checkpoint_lock;
 	CleanupTransactions();
 
-	if (checkpoint_decision.can_checkpoint && (undo_properties.has_updates || undo_properties.has_dropped_entries) &&
+	if (checkpoint_decision.can_checkpoint && commit.needs_pre_commit_state &&
 	    GetLastCommit() >= LowestVisibilityBound()) {
 		// GetCheckpointType does not checkpoint while another transaction might still need the state
 		// from before this commit. That check ran before the sync; transactions that started during
 		// the sync are bounded below this commit and need that state too, so check again here
-		D_ASSERT(!skip_wal_write_due_to_checkpoint);
+		D_ASSERT(!commit.commit_lock.owns_lock());
 		checkpoint_decision = CheckpointDecision("snapshots bounded below this commit need its pre-commit state");
 		lock.reset();
 	}
@@ -643,20 +661,18 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		CheckpointOptions options;
 		options.action = CheckpointAction::ALWAYS_CHECKPOINT;
 		options.type = checkpoint_decision.type;
-		options.commit_lock = held_commit_lock.owns_lock() ? &held_commit_lock : nullptr;
+		options.commit_lock = commit.commit_lock.owns_lock() ? &commit.commit_lock : nullptr;
 		auto &storage_manager = db.GetStorageManager();
 		try {
 			storage_manager.CreateCheckpoint(context, options);
 		} catch (std::exception &ex) {
-			if (wal_written) {
+			if (commit.wal_written) {
 				context.transaction.SetAutocheckpointError(BuildAutocheckpointError(db, ex));
 			} else {
 				error.Merge(ErrorData(ex));
 			}
 		}
 	}
-
-	return error;
 }
 
 void DuckTransactionManager::RollbackTransaction(ClientContext &, Transaction &transaction_p) {

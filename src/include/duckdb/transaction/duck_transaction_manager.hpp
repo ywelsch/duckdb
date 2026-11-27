@@ -19,6 +19,7 @@ namespace duckdb {
 class DataTable;
 class DuckTransactionManager;
 class DuckTransaction;
+class WriteAheadLog;
 struct UndoBufferProperties;
 
 //! CleanupInfo collects transactions awaiting cleanup.
@@ -136,6 +137,32 @@ private:
 
 	bool HasOtherTransactions(DuckTransaction &transaction);
 	void CleanupTransactions();
+
+	//! A commit between its steps: PublishCommit, SyncCommit when it needs a WAL sync, then FinishCommit
+	struct PublishedCommit {
+		explicit PublishedCommit(DuckTransaction &transaction_p)
+		    : transaction(transaction_p), checkpoint_decision("no checkpoint decided") {
+		}
+		DuckTransaction &transaction;
+		//! The WAL to sync up to the transaction's wal_sync_offset before the commit is acknowledged; null when none
+		optional_ptr<WriteAheadLog> wal;
+		//! Passed to RemoveTransaction
+		bool store_transaction = false;
+		CheckpointDecision checkpoint_decision;
+		unique_ptr<StorageLockKey> checkpoint_lock;
+		//! The commit had updates or dropped entries, which snapshots bounded below it may still need
+		bool needs_pre_commit_state = false;
+		//! Held through a checkpoint that replaces the commit's WAL write
+		unique_lock<mutex> commit_lock;
+		//! A failed checkpoint after a commit that reached the WAL is reported apart from the commit
+		bool wal_written = false;
+	};
+	//! Write the WAL and publish without syncing; a commit that needs no sync leaves the active transactions
+	ErrorData PublishCommit(ClientContext &context, PublishedCommit &commit);
+	//! Make a published commit durable, and so visible to new snapshots, then remove it from the active transactions
+	ErrorData SyncCommit(PublishedCommit &commit);
+	//! Clean up after the commit and run its automatic checkpoint
+	void FinishCommit(ClientContext &context, PublishedCommit &commit, ErrorData &error);
 	//! Lets the block manager reuse the blocks that checkpoints freed before every active transaction started
 	void ReuseFreedBlocks(transaction_t lowest_start) noexcept;
 	//! The earliest start time of the active transactions, checkpoints aside. Caller holds the transaction lock
