@@ -1,5 +1,6 @@
 #include "catch.hpp"
 #include "test_helpers.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
@@ -223,6 +224,89 @@ TEST_CASE("External-sync and self-sync commits alongside an external syncer and 
 	checkpointer.join();
 	REQUIRE(failures == 0);
 	REQUIRE(ScalarValue(*db.setup, "SELECT count(*) FROM t") == COMMITTERS * COMMITS);
+}
+
+TEST_CASE("COMMITs abandoned while worker threads run them and an external syncer wakes them", "[api][group_commit]") {
+	constexpr idx_t COMMITTERS = 4;
+	constexpr idx_t COMMITS = 50;
+	ExternalSyncDatabase db("external_commit_sync_abandon_workers.db");
+	REQUIRE_NO_FAIL(db.setup->Query("SET threads=4"));
+	std::atomic<bool> stop {false};
+	mutex error_lock;
+	vector<string> errors;
+	std::thread syncer([&]() {
+		while (!stop) {
+			db.TransactionManager().SyncCommits();
+		}
+	});
+	vector<std::thread> committers;
+	for (idx_t c = 0; c < COMMITTERS; c++) {
+		committers.emplace_back([&, c]() {
+			Connection con(*db.db);
+			auto run = [&](const string &query) {
+				auto result = con.Query(query);
+				if (result->HasError()) {
+					lock_guard<mutex> guard(error_lock);
+					errors.push_back(query + ": " + result->GetError());
+					return false;
+				}
+				return true;
+			};
+			run("SET external_commit_sync=true");
+			for (idx_t i = 0; i < COMMITS; i++) {
+				auto value = to_string(c * COMMITS + i);
+				if (!run("BEGIN") || !run("INSERT INTO t VALUES (" + value + ")")) {
+					return;
+				}
+				// dropped at once or after a few tasks, while workers may run it and the syncer may wake it
+				auto commit = con.Submit("COMMIT");
+				for (idx_t task = 0; task < i % 3; task++) {
+					auto state = commit->ExecuteTask();
+					if (state == QueryResultState::FINISHED || state == QueryResultState::EXECUTION_ERROR) {
+						break;
+					}
+				}
+				commit.reset();
+				if (!con.context->transaction.IsAutoCommit() && !run("COMMIT")) {
+					// dropped before any task ran it: aborted, so the transaction is still open
+					return;
+				}
+				auto count = con.Query("SELECT count(*) FROM t WHERE i = " + value);
+				if (count->HasError() || count->Collection().GetValue(0, 0).GetValue<idx_t>() != 1) {
+					lock_guard<mutex> guard(error_lock);
+					errors.push_back("commit " + value + " not visible to its connection");
+				}
+			}
+		});
+	}
+	for (auto &committer : committers) {
+		committer.join();
+	}
+	stop = true;
+	syncer.join();
+	INFO(StringUtil::Join(errors, "\n"));
+	REQUIRE(errors.empty());
+	REQUIRE(ScalarValue(*db.setup, "SELECT count(*) FROM t") == COMMITTERS * COMMITS);
+}
+
+TEST_CASE("A parked UPDATE commit holds off CHECKPOINT until it resumes", "[api][group_commit]") {
+	ExternalSyncDatabase db("external_commit_sync_update.db");
+	REQUIRE_NO_FAIL(db.setup->Query("INSERT INTO t SELECT * FROM range(1000)"));
+	auto committer = db.Committer("UPDATE t SET i = i + 1");
+	auto commit = SubmitParkedCommit(*committer);
+	// the parked transaction keeps the shared checkpoint lock it took for the update
+	REQUIRE_FAIL(db.setup->Query("CHECKPOINT"));
+	REQUIRE(ScalarValue(*db.setup, "SELECT sum(i) FROM t") == 499500);
+
+	// once synced, the resumed commit upgrades its lock for the automatic checkpoint it gave up
+	REQUIRE_NO_FAIL(db.setup->Query("SET checkpoint_threshold='1KB'"));
+	REQUIRE(db.TransactionManager().SyncCommits());
+	commit->Complete();
+	REQUIRE_NO_FAIL(*commit);
+	auto &fs = FileSystem::GetFileSystem(*db.db->instance);
+	REQUIRE(!fs.FileExists(db.path + ".wal"));
+	REQUIRE(ScalarValue(*db.setup, "SELECT sum(i) FROM t") == 500500);
+	REQUIRE_NO_FAIL(db.setup->Query("CHECKPOINT"));
 }
 
 TEST_CASE("A parked COMMIT runs its automatic checkpoint once synced", "[api][group_commit]") {
