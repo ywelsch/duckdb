@@ -122,6 +122,8 @@ public:
 	bool ReadsLiveRowGroups(DuckTransaction &transaction);
 	//! Keeps checkpoints from moving rows until the transaction ends, if the statement can hand out the row ids
 	void KeepRowIds(ClientContext &context, DuckTransaction &transaction, const vector<ColumnIndex> &column_indexes);
+	//! The live row ids of rows the transaction read from row groups that merges replaced since (row_ids if none)
+	Vector &LiveRowIds(ClientContext &context, Vector &row_ids, idx_t count, Vector &result);
 	void FetchCommitted(DataChunk &result, const vector<StorageIndex> &column_ids, const Vector &row_identifiers,
 	                    idx_t fetch_count, ColumnFetchState &state);
 	//! Returns true, if the transaction can fetch the row ID.

@@ -93,8 +93,21 @@ DataTable::DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_m
 	row_groups->Verify();
 }
 
+//! PROTOTYPE: an ALTER that copies the row groups copies the live ones, whose row ids differ from the ones a
+//! transaction read before a merge
+static void VerifyRowIdsNotMoved(ClientContext &context, DataTable &parent,
+                                 const shared_ptr<RowGroupCollection> &rows) {
+	auto &transaction = DuckTransaction::Get(context, parent.GetAttached());
+	if (transaction.PeekRowGroups(rows).stale) {
+		throw TransactionException("Cannot alter table %s: a checkpoint moved its rows after this transaction read "
+		                           "their row ids",
+		                           parent.GetTableName());
+	}
+}
+
 DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value)
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
+	VerifyRowIdsNotMoved(context, parent, parent.row_groups);
 	// add the column definitions from this DataTable
 	for (auto &column_def : parent.column_definitions) {
 		column_definitions.emplace_back(column_def.Copy());
@@ -120,6 +133,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, ColumnDefinition
 
 DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t removed_column)
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
+	VerifyRowIdsNotMoved(context, parent, parent.row_groups);
 	// prevent any new tuples from being added to the parent
 	auto &local_storage = LocalStorage::Get(context, db);
 	lock_guard<mutex> parent_lock(parent.append_lock);
@@ -194,6 +208,7 @@ DataTable::DataTable(ClientContext &context, DataTable &parent, idx_t changed_id
                      const vector<StorageIndex> &bound_columns, Expression &cast_expr,
                      optional_ptr<BoundConstraint> constraint_to_verify)
     : db(parent.db), info(parent.info), version(DataTableVersion::MAIN_TABLE) {
+	VerifyRowIdsNotMoved(context, parent, parent.row_groups);
 	auto &transaction = DuckTransaction::Get(context, db);
 	auto &local_storage = LocalStorage::Get(transaction);
 	// prevent any tuples from being added to the parent
@@ -308,6 +323,25 @@ void DataTable::KeepRowIds(ClientContext &context, DuckTransaction &transaction,
 		// translated to the rows' places in the row groups a merge put them into
 		transaction.KeepRowGroupsForTransaction(row_groups);
 	}
+}
+
+Vector &DataTable::LiveRowIds(ClientContext &context, Vector &row_ids, idx_t count, Vector &result) {
+	auto &transaction = DuckTransaction::Get(context, db);
+	auto reader_row_groups = transaction.GetRowGroups(row_groups);
+	if (!reader_row_groups.stale) {
+		return row_ids;
+	}
+	auto ids = row_ids.Values<row_t>();
+	auto writer = FlatVector::Writer<row_t>(result, count);
+	for (idx_t i = 0; i < count; i++) {
+		auto row_id = ids[i].GetValue();
+		if (row_id < MAX_ROW_ID) {
+			// a row of the transaction itself keeps its id
+			row_groups->TranslateRowIds(*reader_row_groups.row_groups, &row_id, 1, &row_id);
+		}
+		writer.WriteValue(row_id);
+	}
+	return result;
 }
 
 void DataTable::KeepRowIds(ClientContext &context, DuckTransaction &transaction,
@@ -1068,7 +1102,9 @@ void DataTable::LocalAppend(DuckTableEntry &table, ClientContext &context, DataC
 	LocalAppendState append_state;
 	auto &storage = table.GetStorage();
 	storage.InitializeLocalAppend(append_state, table, context, bound_constraints);
-	append_state.storage->AppendToDeleteIndexes(row_ids, delete_chunk);
+	Vector live_row_ids(LogicalType::ROW_TYPE, delete_chunk.size());
+	append_state.storage->AppendToDeleteIndexes(storage.LiveRowIds(context, row_ids, delete_chunk.size(), live_row_ids),
+	                                            delete_chunk);
 
 	storage.LocalAppend(append_state, table, context, chunk, false);
 	storage.FinalizeLocalAppend(append_state);

@@ -30,11 +30,21 @@ CREATE TABLE wide (i BIGINT);
 statement ok
 INSERT INTO wide SELECT i FROM range(368640) t(i);
 
-statement ok
-CREATE TABLE keyed (i BIGINT PRIMARY KEY, s VARCHAR);
+foreach tbl keyed reinserted rekeyed
 
 statement ok
-INSERT INTO keyed SELECT i, 'base' FROM range(614400) t(i);
+CREATE TABLE {tbl} (i BIGINT PRIMARY KEY, s VARCHAR);
+
+statement ok
+INSERT INTO {tbl} SELECT i, 'base' FROM range(614400) t(i);
+
+endloop
+
+statement ok
+CREATE TABLE altered (i BIGINT, s VARCHAR);
+
+statement ok
+INSERT INTO altered SELECT i, 'base' FROM range(614400) t(i);
 
 statement ok
 CHECKPOINT
@@ -188,6 +198,65 @@ query II con2
 SELECT COUNT(*), (SELECT rowid FROM rolled_back WHERE i = 400000) FROM rolled_back
 ----
 282624	261184
+
+# a key deleted and inserted again by the transaction, and a key changed by an update (a delete and an insert)
+foreach tbl reinserted rekeyed
+
+statement ok
+DELETE FROM {tbl} WHERE i >= 245760 AND i % 10 <> 0
+
+endloop
+
+statement ok con1
+BEGIN
+
+query II con1
+SELECT (SELECT rowid FROM reinserted WHERE i = 400000), (SELECT rowid FROM rekeyed WHERE i = 400000)
+----
+400000	400000
+
+statement ok con2
+CHECKPOINT
+
+statement ok con1
+DELETE FROM reinserted WHERE rowid = 400000
+
+statement ok con1
+INSERT INTO reinserted VALUES (400000, 'again')
+
+statement ok con1
+UPDATE rekeyed SET i = i + 1 WHERE rowid = 400000
+
+statement ok con1
+COMMIT
+
+query IIII con2
+SELECT (SELECT COUNT(*) FROM reinserted), (SELECT s FROM reinserted WHERE i = 400000), (SELECT COUNT(*) FROM rekeyed WHERE i = 400000), (SELECT COUNT(*) FROM rekeyed WHERE i = 400001)
+----
+282624	again	0	1
+
+# an ALTER that copies the row groups would copy the merged ones
+statement ok
+DELETE FROM altered WHERE i >= 245760 AND i % 10 <> 0
+
+statement ok con1
+BEGIN
+
+query II con1
+SELECT rowid, i FROM altered WHERE i = 400000
+----
+400000	400000
+
+statement ok con2
+CHECKPOINT
+
+statement error con1
+ALTER TABLE altered ADD COLUMN k INTEGER DEFAULT 1
+----
+<REGEX>:.*Cannot alter table.*
+
+statement ok con1
+ROLLBACK
 
 # updates are not forwarded yet
 statement ok

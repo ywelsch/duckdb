@@ -222,7 +222,11 @@ SinkResultType PhysicalDelete::Sink(ExecutionContext &context, DataChunk &chunk,
 		annotated_lock_guard<annotated_mutex> index_guard(g_state.index_lock);
 		auto &local_storage = LocalStorage::Get(context.client, table.db);
 		auto storage = local_storage.GetStorage(table);
-		storage->AppendToDeleteIndexes(delete_row_ids, l_state.delete_chunk);
+		// the indexes hold the live row ids
+		Vector live_row_ids(LogicalType::ROW_TYPE, l_state.delete_chunk.size());
+		storage->AppendToDeleteIndexes(
+		    table.LiveRowIds(context.client, delete_row_ids, l_state.delete_chunk.size(), live_row_ids),
+		    l_state.delete_chunk);
 	}
 
 	auto deleted = table.Delete(*l_state.delete_state, context.client, tableref, delete_row_ids, delete_count);
