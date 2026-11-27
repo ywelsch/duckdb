@@ -352,11 +352,16 @@ transaction_t DuckTransactionManager::GetCommitTimestamp() {
 
 bool DuckTransactionManager::HasUnsyncedCommits() {
 	for (auto &active_transaction : active_transactions) {
-		if (active_transaction->wal_sync_offset != 0) {
+		if (active_transaction->wal_sync_offset != 0 &&
+		    awaiting_commits.find(*active_transaction) == awaiting_commits.end()) {
 			return true;
 		}
 	}
 	return false;
+}
+
+bool DuckTransactionManager::NoSyncsRunning() {
+	return !HasUnsyncedCommits() && external_syncs == 0;
 }
 
 DuckTransactionManager::DurableSnapshot DuckTransactionManager::GetDurableSnapshot() {
@@ -382,7 +387,85 @@ DuckTransactionManager::DurableSnapshot DuckTransactionManager::GetDurableSnapsh
 
 void DuckTransactionManager::WaitForDurability() {
 	unique_lock<mutex> guard(transaction_lock);
-	durability_cv.wait(guard, [&]() { return !HasUnsyncedCommits(); });
+	do {
+		durability_cv.wait(guard, [&]() { return NoSyncsRunning(); });
+		// commits awaiting a sync may never get one: sync for them here
+	} while (SyncPublishedCommits(guard));
+}
+
+bool DuckTransactionManager::SyncCommits() {
+	unique_lock<mutex> guard(transaction_lock);
+	return SyncPublishedCommits(guard);
+}
+
+bool DuckTransactionManager::SyncPublishedCommits(unique_lock<mutex> &t_lock) {
+	D_ASSERT(t_lock.owns_lock());
+	idx_t offset = 0;
+	for (auto &active_transaction : active_transactions) {
+		if (active_transaction->wal_sync_offset != 0 && active_transaction->commit_id >= durable_bound &&
+		    active_transaction->commit_id >= failed_bound) {
+			offset = MaxValue(offset, active_transaction->wal_sync_offset);
+		}
+	}
+	if (offset == 0) {
+		return false;
+	}
+	// counted in the lock hold that found the offset, so the drain waits for this sync before replacing the WAL
+	auto &wal = *db.GetStorageManager().GetWAL();
+	external_syncs++;
+	t_lock.unlock();
+	ErrorData sync_error;
+	try {
+		wal.SyncUpTo(offset);
+	} catch (std::exception &ex) {
+		sync_error = ErrorData(ex);
+	}
+	t_lock.lock();
+	external_syncs--;
+	auto to_wake = CompleteSync(wal, sync_error);
+	bool notify_others = NoSyncsRunning();
+	t_lock.unlock();
+	if (notify_others) {
+		durability_cv.notify_all();
+	}
+	if (sync_error.HasError()) {
+		db.Invalidate("syncing the WAL after a commit failed", sync_error.RawMessage());
+	}
+	for (auto &callback : to_wake) {
+		callback.Callback();
+	}
+	t_lock.lock();
+	return true;
+}
+
+vector<InterruptState> DuckTransactionManager::CompleteSync(WriteAheadLog &wal, const ErrorData &sync_error) {
+	auto previous_bound = durable_bound;
+	// a sync covers every marker flushed before it, also beyond the offset it was asked for
+	auto durable_offset = wal.GetDurableOffset();
+	for (auto &active_transaction : active_transactions) {
+		if (active_transaction->wal_sync_offset != 0 && active_transaction->wal_sync_offset <= durable_offset &&
+		    active_transaction->commit_id >= durable_bound) {
+			durable_bound = VisibilityBound::Through(active_transaction->commit_id);
+		}
+	}
+	if (sync_error.HasError()) {
+		// the WAL is not synced again: the commits published to it that are not durable never will be
+		failed_bound = VisibilityBound::Through(last_commit);
+		sync_failure = sync_error;
+	}
+	vector<InterruptState> to_wake;
+	if (durable_bound == previous_bound && !sync_error.HasError()) {
+		return to_wake;
+	}
+	// each woken commit checks for itself whether it is done
+	for (auto &entry : awaiting_commits) {
+		auto &callback = entry.second->sync_callback;
+		if (callback.CanCallback()) {
+			to_wake.push_back(std::move(callback));
+			callback = InterruptState();
+		}
+	}
+	return to_wake;
 }
 
 void DuckTransactionManager::CleanupTransactions() {
@@ -416,9 +499,17 @@ void DuckTransactionManager::CleanupTransactions() {
 	ReuseFreedBlocks(lowest_start);
 }
 
-ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
-	PublishedCommit commit(transaction.Cast<DuckTransaction>());
-	auto error = PublishCommit(context, commit);
+ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction_p) {
+	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	ErrorData error;
+	if (transaction.wal_sync_offset != 0) {
+		// a parked COMMIT whose client stopped waiting: sync for it here
+		unique_lock<mutex> t_lock(transaction_lock);
+		AwaitSync(context, transaction, t_lock, nullptr, error);
+		return error;
+	}
+	PublishedCommit commit(transaction);
+	error = PublishCommit(context, commit);
 	if (commit.wal) {
 		// make the commit durable before acknowledging it; one fsync can cover many commits
 		D_ASSERT(!error.HasError());
@@ -426,6 +517,89 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 	}
 	FinishCommit(context, commit, error);
 	return error;
+}
+
+bool DuckTransactionManager::TryCommitTransaction(ClientContext &context, Transaction &transaction_p,
+                                                  const InterruptState &interrupt_state, ErrorData &error) {
+	auto &transaction = transaction_p.Cast<DuckTransaction>();
+	unique_lock<mutex> t_lock(transaction_lock, std::defer_lock);
+	if (transaction.wal_sync_offset != 0) {
+		// published and parked: called back, or called again
+		t_lock.lock();
+		return AwaitSync(context, transaction, t_lock, interrupt_state, error);
+	}
+	if (!Settings::Get<ExternalCommitSyncSetting>(context)) {
+		error = CommitTransaction(context, transaction);
+		return true;
+	}
+	auto commit = make_uniq<PublishedCommit>(transaction);
+	commit->await_sync = true;
+	error = PublishCommit(context, *commit);
+	if (!commit->wal) {
+		FinishCommit(context, *commit, error);
+		return true;
+	}
+	// the commit lock is thread-affine, and a checkpoint lock would block checkpoints while the commit is parked
+	D_ASSERT(!error.HasError() && !commit->commit_lock.owns_lock() && !commit->checkpoint_lock);
+	t_lock.lock();
+	awaiting_commits[transaction] = std::move(commit);
+	return AwaitSync(context, transaction, t_lock, interrupt_state, error);
+}
+
+bool DuckTransactionManager::AwaitSync(ClientContext &context, DuckTransaction &transaction, unique_lock<mutex> &t_lock,
+                                       optional_ptr<const InterruptState> interrupt_state, ErrorData &error) {
+	D_ASSERT(t_lock.owns_lock() && awaiting_commits.find(transaction) != awaiting_commits.end());
+	// nobody may call back the task that is running this
+	awaiting_commits[transaction]->sync_callback = InterruptState();
+	auto commit = TakeSyncedCommit(transaction, error);
+	while (!commit && !interrupt_state) {
+		// blocking: sync for it
+		SyncPublishedCommits(t_lock);
+		commit = TakeSyncedCommit(transaction, error);
+	}
+	if (!commit) {
+		awaiting_commits[transaction]->sync_callback = *interrupt_state;
+	}
+	// a parked commit no longer counts as syncing, which the drain may wait for
+	bool notify_others = NoSyncsRunning();
+	t_lock.unlock();
+	if (notify_others) {
+		durability_cv.notify_all();
+	}
+	if (!commit) {
+		return false;
+	}
+	FinishCommit(context, *commit, error);
+	return true;
+}
+
+unique_ptr<DuckTransactionManager::PublishedCommit>
+DuckTransactionManager::TakeSyncedCommit(DuckTransaction &transaction, ErrorData &error) {
+	if (transaction.commit_id >= durable_bound && transaction.commit_id >= failed_bound) {
+		return nullptr;
+	}
+	auto entry = awaiting_commits.find(transaction);
+	D_ASSERT(entry != awaiting_commits.end());
+	auto commit = std::move(entry->second);
+	awaiting_commits.erase(entry);
+	auto &checkpoint_decision = commit->checkpoint_decision;
+	if (transaction.commit_id >= durable_bound) {
+		error = sync_failure;
+		checkpoint_decision = CheckpointDecision(error.Message());
+	} else {
+		// it gave up its automatic checkpoint when it parked, as it might not resume: decide now
+		auto undo_properties = transaction.GetUndoProperties();
+		checkpoint_decision = CanCheckpoint(transaction, commit->checkpoint_lock, undo_properties);
+		if (checkpoint_decision.can_checkpoint) {
+			checkpoint_decision = GetCheckpointType(transaction, undo_properties);
+		}
+	}
+	OnCommitCheckpointDecision(checkpoint_decision, transaction);
+	if (!checkpoint_decision.can_checkpoint) {
+		commit->checkpoint_lock.reset();
+	}
+	QueueCleanup(RemoveTransaction(transaction, commit->store_transaction, CreateCleanupInfo()));
+	return commit;
 }
 
 ErrorData DuckTransactionManager::PublishCommit(ClientContext &context, PublishedCommit &commit) {
@@ -529,6 +703,7 @@ ErrorData DuckTransactionManager::PublishCommit(ClientContext &context, Publishe
 		} else {
 			info.active_transactions = ActiveTransactionState::NO_OTHER_TRANSACTIONS;
 		}
+		info.await_sync = commit.await_sync;
 		error = transaction.Commit(context, db, info, std::move(commit_state));
 	}
 
@@ -565,7 +740,12 @@ ErrorData DuckTransactionManager::PublishCommit(ClientContext &context, Publishe
 			transaction.catalog_version = ++last_committed_version;
 		}
 	}
-	OnCommitCheckpointDecision(checkpoint_decision, transaction);
+	if (commit.wal && commit.await_sync) {
+		// decided once a sync covers it, as it may not resume to run the checkpoint
+		checkpoint_decision = CheckpointDecision("the commit awaits a WAL sync");
+	} else {
+		OnCommitCheckpointDecision(checkpoint_decision, transaction);
+	}
 
 	if (!checkpoint_decision.can_checkpoint && lock) {
 		// we won't checkpoint after all due to an error during commit: unlock the checkpoint lock again
@@ -597,10 +777,8 @@ ErrorData DuckTransactionManager::PublishCommit(ClientContext &context, Publishe
 
 ErrorData DuckTransactionManager::SyncCommit(PublishedCommit &commit) {
 	ErrorData error;
-	bool synced = false;
 	try {
 		commit.wal->SyncUpTo(commit.transaction.wal_sync_offset);
-		synced = true;
 	} catch (std::exception &ex) {
 		// published and no longer revertable, but not durable: invalidate. The WAL keeps the
 		// bytes; whether a restart replays them is in doubt
@@ -612,21 +790,15 @@ ErrorData DuckTransactionManager::SyncCommit(PublishedCommit &commit) {
 	}
 	// durable, or durability has failed: now leave the list of active transactions
 	unique_lock<mutex> t_lock(transaction_lock);
-	if (synced) {
-		// advance the durable bound over every commit the sync covered
-		for (auto &active_transaction : active_transactions) {
-			if (active_transaction->wal_sync_offset != 0 &&
-			    active_transaction->wal_sync_offset <= commit.transaction.wal_sync_offset &&
-			    active_transaction->commit_id >= durable_bound) {
-				durable_bound = VisibilityBound::Through(active_transaction->commit_id);
-			}
-		}
-	}
+	auto to_wake = CompleteSync(*commit.wal, error);
 	QueueCleanup(RemoveTransaction(commit.transaction, commit.store_transaction, CreateCleanupInfo()));
-	bool notify_others = !HasUnsyncedCommits();
+	bool notify_others = NoSyncsRunning();
 	t_lock.unlock();
 	if (notify_others) {
 		durability_cv.notify_all();
+	}
+	for (auto &callback : to_wake) {
+		callback.Callback();
 	}
 	return error;
 }

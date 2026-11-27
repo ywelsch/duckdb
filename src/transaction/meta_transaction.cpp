@@ -5,6 +5,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
+#include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/secret/secret_storage.hpp"
 
@@ -115,10 +116,20 @@ Transaction &Transaction::Get(ClientContext &context, Catalog &catalog) {
 
 ErrorData MetaTransaction::Commit(ClientContext &context) {
 	ErrorData error;
+	CommitInternal(context, nullptr, error);
+	return error;
+}
+
+bool MetaTransaction::TryCommit(ClientContext &context, const InterruptState &interrupt_state, ErrorData &error) {
+	return CommitInternal(context, &interrupt_state, error);
+}
+
+bool MetaTransaction::CommitInternal(ClientContext &context, optional_ptr<const InterruptState> interrupt_state,
+                                     ErrorData &error) {
 #ifdef DEBUG
 	reference_set_t<AttachedDatabase> committed_tx;
 #endif
-	// commit transactions in reverse order
+	// commit transactions in reverse order; called again, skip the finished ones and finish the waiting one
 	for (idx_t i = all_transactions.size(); i > 0; i--) {
 		auto &db = all_transactions[i - 1].get();
 		auto entry = transactions.find(db);
@@ -135,30 +146,42 @@ ErrorData MetaTransaction::Commit(ClientContext &context) {
 
 		auto &transaction_manager = db.GetTransactionManager();
 		auto &transaction_ref = entry->second;
-		if (ValidChecker::IsInvalidated(db)) {
-			error.Merge(ErrorData(IOException("%s", ValidChecker::InvalidatedMessage(db))));
+		if (transaction_ref.state == TransactionState::COMMITTED ||
+		    transaction_ref.state == TransactionState::ROLLED_BACK) {
 			continue;
 		}
-		if (transaction_ref.state != TransactionState::UNCOMMITTED) {
+		if (transaction_ref.state == TransactionState::UNCOMMITTED && ValidChecker::IsInvalidated(db)) {
+			error.Merge(ErrorData(IOException("%s", ValidChecker::InvalidatedMessage(db))));
 			continue;
 		}
 		auto &transaction = transaction_ref.transaction;
 		try {
-			if (!error.HasError()) {
-				// Commit the transaction.
-				error = db.ScopeFatalError(transaction_manager.CommitTransaction(context, transaction));
-				transaction_ref.state = error.HasError() ? TransactionState::ROLLED_BACK : TransactionState::COMMITTED;
-			} else {
+			if (error.HasError()) {
 				// Rollback due to previous error.
+				D_ASSERT(transaction_ref.state == TransactionState::UNCOMMITTED);
 				transaction_manager.RollbackTransaction(context, transaction);
 				transaction_ref.state = TransactionState::ROLLED_BACK;
+				continue;
 			}
+			// Commit the transaction.
+			ErrorData commit_error;
+			if (!interrupt_state) {
+				commit_error = transaction_manager.CommitTransaction(context, transaction);
+			} else if (!transaction_manager.TryCommitTransaction(context, transaction, *interrupt_state,
+			                                                     commit_error)) {
+				transaction_ref.state = TransactionState::COMMITTING;
+				return false;
+			}
+			commit_error = db.ScopeFatalError(std::move(commit_error));
+			transaction_ref.state =
+			    commit_error.HasError() ? TransactionState::ROLLED_BACK : TransactionState::COMMITTED;
+			error.Merge(commit_error);
 		} catch (std::exception &ex) {
 			error.Merge(db.ScopeFatalError(ErrorData(ex)));
 			transaction_ref.state = TransactionState::ROLLED_BACK;
 		}
 	}
-	return error;
+	return true;
 }
 
 void MetaTransaction::Rollback(ClientContext &context) {

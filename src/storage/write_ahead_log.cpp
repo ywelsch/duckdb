@@ -574,6 +574,11 @@ idx_t WriteAheadLog::FlushMarker() {
 	return marker_offset;
 }
 
+idx_t WriteAheadLog::GetDurableOffset() {
+	lock_guard<mutex> guard(sync_lock);
+	return durable_offset;
+}
+
 void WriteAheadLog::SyncUpTo(idx_t offset) {
 	D_ASSERT(writer && offset > 0);
 	auto &db_instance = GetDatabase().GetDatabase();

@@ -122,6 +122,8 @@ ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success,
 	query_progress.Initialize();
 	ErrorData error;
 	try {
+		// a COMMIT abandoned while it waited for its durability still completes
+		transaction.FinishPendingCommit();
 		if (transaction.HasActiveTransaction()) {
 			transaction.ResetActiveQuery();
 			if (transaction.IsAutoCommit()) {

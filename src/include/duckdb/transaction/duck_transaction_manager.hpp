@@ -12,6 +12,8 @@
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/common/enums/checkpoint_type.hpp"
 #include "duckdb/common/queue.hpp"
+#include "duckdb/common/reference_map.hpp"
+#include "duckdb/parallel/interrupt.hpp"
 
 #include <condition_variable>
 
@@ -47,6 +49,12 @@ public:
 	Transaction &StartTransaction(Context &context, MetaTransaction &meta_transaction) override;
 	//! Commit the given transaction
 	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
+	//! Commit; with external_commit_sync, a commit that needs a WAL sync parks until a sync covers it
+	bool TryCommitTransaction(ClientContext &context, Transaction &transaction, const InterruptState &interrupt_state,
+	                          ErrorData &error) override;
+	//! Sync the WAL over every published commit that is not durable, and wake the commits awaiting a sync.
+	//! Returns false if there was nothing to sync
+	bool SyncCommits();
 	//! Rollback the given transaction
 	void RollbackTransaction(ClientContext &context, Transaction &transaction) override;
 
@@ -156,6 +164,10 @@ private:
 		unique_lock<mutex> commit_lock;
 		//! A failed checkpoint after a commit that reached the WAL is reported apart from the commit
 		bool wal_written = false;
+		//! Await an external WAL sync instead of syncing, also when the commit is alone
+		bool await_sync = false;
+		//! The parked committer, called back when a sync covered the commit or failed
+		InterruptState sync_callback;
 	};
 	//! Write the WAL and publish without syncing; a commit that needs no sync leaves the active transactions
 	ErrorData PublishCommit(ClientContext &context, PublishedCommit &commit);
@@ -163,12 +175,24 @@ private:
 	ErrorData SyncCommit(PublishedCommit &commit);
 	//! Clean up after the commit and run its automatic checkpoint
 	void FinishCommit(ClientContext &context, PublishedCommit &commit, ErrorData &error);
+	//! Park a published commit until a sync covers it. Returns false while parked
+	bool AwaitSync(ClientContext &context, DuckTransaction &transaction, unique_lock<mutex> &t_lock,
+	               optional_ptr<const InterruptState> interrupt_state, ErrorData &error);
+	//! An awaiting commit that a sync covered or failed, removed from the active transactions; null while it waits
+	unique_ptr<PublishedCommit> TakeSyncedCommit(DuckTransaction &transaction, ErrorData &error);
+	//! Sync for the published commits that are not durable, releasing t_lock meanwhile. False if nothing to sync
+	bool SyncPublishedCommits(unique_lock<mutex> &t_lock);
+	//! Advance the durable bound over the commits a sync of wal covered; returns the awaiting commits to wake
+	vector<InterruptState> CompleteSync(WriteAheadLog &wal, const ErrorData &sync_error);
+	//! No committer is in its own sync and no external sync runs, so the WAL can be replaced
+	bool NoSyncsRunning();
 	//! Lets the block manager reuse the blocks that checkpoints freed before every active transaction started
 	void ReuseFreedBlocks(transaction_t lowest_start) noexcept;
 	//! The earliest start time of the active transactions, checkpoints aside. Caller holds the transaction lock
 	transaction_t LowestActiveStart();
 
-	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo
+	//! Whether a commit that needed a WAL sync is still in its commit path, possibly inside SyncUpTo. Commits
+	//! awaiting an external sync are not
 	bool HasUnsyncedCommits();
 	struct DurableSnapshot {
 		//! Every commit before this bound is durable
@@ -216,8 +240,15 @@ private:
 	//! active_transactions until its commit is durable, so new snapshots are bounded below commits
 	//! that are not yet durable
 	VisibilityBound durable_bound;
-	//! Signalled (under transaction_lock) when no active transaction awaits its WAL sync
+	//! Signalled when NoSyncsRunning() may have become true
 	std::condition_variable durability_cv;
+	//! Published commits that await a sync they do not run themselves
+	reference_map_t<DuckTransaction, unique_ptr<PublishedCommit>> awaiting_commits;
+	//! Threads in SyncPublishedCommits
+	idx_t external_syncs = 0;
+	//! A commit below this bound that is not durable never will be: a sync of its WAL failed with sync_failure
+	VisibilityBound failed_bound;
+	ErrorData sync_failure;
 
 	atomic<idx_t> last_uncommitted_catalog_version = {TRANSACTION_ID_START};
 	idx_t last_committed_version = 0;

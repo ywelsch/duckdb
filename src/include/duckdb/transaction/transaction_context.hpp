@@ -19,6 +19,7 @@
 namespace duckdb {
 
 class ClientContext;
+class InterruptState;
 class MetaTransaction;
 class Transaction;
 class TransactionManager;
@@ -43,6 +44,14 @@ public:
 
 	void BeginTransaction();
 	void Commit();
+	//! Commit, but return false while the commit waits for durability; call again once called back
+	bool TryCommit(const InterruptState &interrupt_state);
+	//! Whether TryCommit has started a commit that has not finished
+	bool HasPendingCommit() const {
+		return committing_transaction.get();
+	}
+	//! Finish the commit TryCommit started, blocking until it is durable
+	void FinishPendingCommit();
 	void Rollback(optional_ptr<ErrorData>);
 	void ClearTransaction();
 	void SetAutocheckpointError(ErrorData error);
@@ -70,12 +79,18 @@ public:
 	};
 
 private:
+	void StartCommit();
+	//! Ends the commit of committing_transaction
+	void CompleteCommit(ErrorData error);
+
 	ClientContext &context;
 	bool auto_commit;
 	TransactionInvalidationPolicy invalidation_policy = TransactionInvalidationPolicy::STANDARD_POLICY;
 	bool auto_rollback = false;
 
 	unique_ptr<MetaTransaction> current_transaction;
+	//! The transaction whose commit TryCommit started and has not finished
+	unique_ptr<MetaTransaction> committing_transaction;
 	//! The query number of the query currently running on this connection (MAXIMUM_QUERY_ID if none)
 	atomic<transaction_t> active_query_id = MAXIMUM_QUERY_ID;
 	ErrorData autocheckpoint_error;

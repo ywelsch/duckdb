@@ -24,6 +24,7 @@ class MetaTransaction;
 class Catalog;
 struct ClientLockWrapper;
 class DatabaseInstance;
+class InterruptState;
 class Transaction;
 
 //! The Transaction Manager is responsible for creating and managing
@@ -37,6 +38,12 @@ public:
 	virtual Transaction &StartTransaction(Context &context, MetaTransaction &meta_transaction) = 0;
 	//! Commit the given transaction. Returns a non-empty error message on failure.
 	virtual ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) = 0;
+	//! Like CommitTransaction, but may return false while waiting for durability; calling either again finishes it
+	virtual bool TryCommitTransaction(ClientContext &context, Transaction &transaction,
+	                                  const InterruptState &interrupt_state, ErrorData &error) {
+		error = CommitTransaction(context, transaction);
+		return true;
+	}
 	//! Rollback the given transaction
 	virtual void RollbackTransaction(ClientContext &context, Transaction &transaction) = 0;
 

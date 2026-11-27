@@ -303,7 +303,8 @@ ErrorData DuckTransaction::Commit(ClientContext &context, AttachedDatabase &db, 
 			// if we have written to the WAL - flush after the commit has been successful. With no other
 			// transaction there is nothing to share the sync with, so sync now under the transaction lock;
 			// otherwise only write the marker and sync once the locks are released
-			bool sync_now = commit_info.active_transactions == ActiveTransactionState::NO_OTHER_TRANSACTIONS;
+			bool sync_now = !commit_info.await_sync &&
+			                commit_info.active_transactions == ActiveTransactionState::NO_OTHER_TRANSACTIONS;
 			commit_info.wal_sync_offset = commit_state->FlushCommit(commit_info.commit_id, sync_now);
 		}
 		drop_state.FinalizeCommit(manager.Cast<DuckTransactionManager>());

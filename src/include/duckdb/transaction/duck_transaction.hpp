@@ -32,6 +32,8 @@ struct CommitInfo {
 	optional_ptr<CommitDropState> drop_state;
 	//! WAL offset covering the commit's flush marker (0 if no WAL was written)
 	idx_t wal_sync_offset = 0;
+	//! The commit awaits an external sync: never sync under the lock
+	bool await_sync = false;
 };
 
 class DuckTransaction : public Transaction {

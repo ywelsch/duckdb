@@ -1771,6 +1771,20 @@ struct ExtensionRepositoryDirectorySetting {
 	static void OnSet(SettingCallbackInfo &info, Value &input);
 };
 
+struct ExternalCommitSyncSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "external_commit_sync";
+	static constexpr const char *Description = "Whether a COMMIT statement that needs a WAL sync waits for an external "
+	                                           "sync (DuckTransactionManager::SyncCommits) instead of syncing itself. "
+	                                           "The commit stays invisible to new transactions until then.";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr bool IsDebug = false;
+	static constexpr bool IsDeprecated = false;
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct ExternalFileCacheLocalMaxBlockSizeSetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "external_file_cache_local_max_block_size";

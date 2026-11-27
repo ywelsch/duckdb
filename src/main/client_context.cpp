@@ -1168,6 +1168,10 @@ void ClientContext::InterruptCheck() const {
 	if (IsInterrupted()) {
 		throw InterruptException();
 	}
+	if (interrupt_state.load(std::memory_order_relaxed) == ClientInterruptState::INTERRUPTS_SUPPRESSED) {
+		// an irreversible commit does not time out either
+		return;
+	}
 	if (QueryDeadlinePassed()) {
 		throw InterruptException(QUERY_DEADLINE_ERROR);
 	}
@@ -1224,7 +1228,8 @@ void ClientContext::RegisterFunction(CreateFunctionInfo &info) {
 	});
 }
 
-void ClientContext::RunTransactionStatementInternal(const TransactionInfo &info) {
+bool ClientContext::RunTransactionStatementInternal(const TransactionInfo &info,
+                                                    optional_ptr<const InterruptState> commit_callback) {
 	auto type = info.type;
 	if (type == TransactionType::COMMIT && transaction.HasActiveTransaction() &&
 	    ValidChecker::IsInvalidated(ActiveTransaction())) {
@@ -1254,8 +1259,14 @@ void ClientContext::RunTransactionStatementInternal(const TransactionInfo &info)
 		break;
 	}
 	case TransactionType::COMMIT:
-		if (transaction.IsAutoCommit()) {
+		if (transaction.IsAutoCommit() && !transaction.HasPendingCommit()) {
 			throw TransactionException("cannot commit - no transaction is active");
+		}
+		if (commit_callback) {
+			auto done = transaction.TryCommit(*commit_callback);
+			// irreversible, also while it waits for durability: ignore interrupts until the next query
+			SuppressInterrupts();
+			return done;
 		}
 		transaction.Commit();
 		// The commit is irreversible, so ignore interrupts until the next query.
@@ -1277,6 +1288,7 @@ void ClientContext::RunTransactionStatementInternal(const TransactionInfo &info)
 	default:
 		throw NotImplementedException("Unrecognized transaction type!");
 	}
+	return true;
 }
 
 void ClientContext::RunTransactionStatement(const TransactionInfo &info) {

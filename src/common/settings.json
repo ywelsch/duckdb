@@ -1030,6 +1030,13 @@
         ]
     },
     {
+        "name": "external_commit_sync",
+        "description": "Whether a COMMIT statement that needs a WAL sync waits for an external sync (DuckTransactionManager::SyncCommits) instead of syncing itself. The commit stays invisible to new transactions until then.",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
+    },
+    {
         "name": "external_file_cache_local_max_block_size",
         "description": "Maximum size in bytes of an external file cache block for local (non-remote) files. Larger reads are split into blocks of this size, which are fetched in parallel.",
         "type": "UBIGINT",
